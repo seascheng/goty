@@ -109,8 +109,10 @@ final class RemoteDaemonLink {
         // second instance. `setsid --fork` detaches it into its own session
         // with init as parent, so this shell — and the ssh session under
         // it — exits immediately instead of waiting on the daemon.
+        // The log TRUNCATES per start: one run's worth, never an
+        // ever-growing append across daemon generations.
         _ = ssh("cd \(Shell.forceQuoted(home)) && setsid --fork \(Shell.forceQuoted(binPath)) "
-            + "\(Shell.forceQuoted(sockPath)) </dev/null >>\(Shell.forceQuoted(dir + "/sessiond.log")) 2>&1; true")
+            + "\(Shell.forceQuoted(sockPath)) </dev/null >\(Shell.forceQuoted(dir + "/sessiond.log")) 2>&1; true")
 
         migrateLegacyTmuxSessions()
 
@@ -160,6 +162,18 @@ final class RemoteDaemonLink {
             guard let self, !self.stopping, self.daemon == nil else { return }
             self.booting = true
             self.boot()
+        }
+    }
+
+    /// Close Server's full cleanup: the sessions die with their daemon
+    /// (PTY masters close → SIGHUP), so kill the daemon itself — an idle
+    /// resident process on a server the user closed is residue. Re-adding
+    /// the host re-runs boot(), which restarts it transparently. Runs on
+    /// the link queue, so it precedes stop()'s teardown (queue FIFO).
+    func stopRemoteDaemon() {
+        queue.async { [weak self] in
+            guard let self, let binPath = self.remoteBinPath else { return }
+            _ = self.ssh("pkill -f " + Shell.forceQuoted(binPath) + "; true")
         }
     }
 

@@ -341,6 +341,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for workspace in coordinator.store?.workspaces ?? [] where workspace.isRemote {
             startRemoteLink(workspace)
         }
+        // Forward sockets from a hard crash: per-host openForward
+        // self-heals on next use, but a host never used again would
+        // keep its file forever. No link is up yet — sweep is safe.
+        let fwdDir = NSHomeDirectory() + "/Library/Application Support/goty/fwd"
+        for stale in (try? FileManager.default.contentsOfDirectory(atPath: fwdDir)) ?? [] {
+            try? FileManager.default.removeItem(atPath: fwdDir + "/" + stale)
+        }
         coordinator.daemonFor = { [weak self] workspace in
             workspace.isRemote
                 ? self?.remoteLinks[workspace.id]?.daemon
@@ -810,6 +817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the kills to the LOCAL daemon under remote pane ids (remote
         // sessions survived their own "Close").
         coordinator.killWorkspace(workspace.id)
+        remoteLinks[workspace.id]?.stopRemoteDaemon()
         remoteLinks.removeValue(forKey: workspace.id)?.stop()
         coordinator.teardownWorkspace(workspace.id)
     }
