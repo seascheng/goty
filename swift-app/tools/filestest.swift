@@ -33,7 +33,17 @@ enum FilesTest {
         // The repo's own tree (needs a real Sources/ directory). Derived
         // from #filePath so the suite follows the project when it moves —
         // the goty → goty rename broke the hardcoded absolute path.
-        let root = ((#filePath as NSString).deletingLastPathComponent
+        // #filePath is whatever path form swiftc received — relative
+        // when run-tests.sh compiles from swift-app/ ("tools/filestest.swift")
+        // — which made root "" and every assertion below fail with the
+        // tree never loading (the 6 "pre-existing" failures; the app
+        // itself was fine). Complete a relative form with the process
+        // cwd, which run-tests.sh keeps at swift-app/.
+        var sourcePath = #filePath
+        if !sourcePath.hasPrefix("/") {
+            sourcePath = FileManager.default.currentDirectoryPath + "/" + sourcePath
+        }
+        let root = ((sourcePath as NSString).deletingLastPathComponent
             as NSString).deletingLastPathComponent   // tools/ → swift-app/
         files.setDirectory(root, source: LocalFileSource())
         for _ in 0..<20 {
