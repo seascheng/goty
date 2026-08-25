@@ -36,3 +36,9 @@ errors to fix, not to commit.
 - No browser panes, plugin UI, marketplace, cloud accounts, or telemetry.
 - Keep UI work in `swift-app/Sources/UI`; keep logic in
   `swift-app/Sources/Core` with zero AppKit view imports.
+
+## Ops: restarting the GUI
+
+- NEVER `pkill -f ".../MacOS/goty"` — the substring also matches
+  `goty-sessiond` (same bundle dir) and kills every local session.
+  Use `swift-app/restart-app.sh` (anchored pattern, GUI only).
