@@ -47,7 +47,7 @@
   - `struct AIRound { var reasoning: String?; var toolName: String?; var toolInput: String; var toolResult: String }`
   - `struct AITask { let id: UUID; let context: AIContext; private(set) var phase: AITaskPhase; private(set) var rounds: [AIRound]; private(set) var pendingProposal: AIProposal?; private(set) var budgetRemaining: Int; init(id: UUID = UUID(), context: AIContext, budget: Int = 25) }` with `mutating func advance(to: AITaskPhase)`, `mutating func append(round: AIRound)`, `mutating func spendRound() -> Bool` (decrements, false at 0), `mutating func setPending(_ proposal: AIProposal?)`.
 
-- [ ] **Step 1: Write the failing tests** — create `swift-app/tools/aitest.swift`:
+- [x] **Step 1: Write the failing tests** — create `swift-app/tools/aitest.swift`:
 
 ```swift
 // aitest.swift — headless tests for Core AI types (Task 1+).
@@ -84,21 +84,21 @@ import Foundation
 }
 ```
 
-- [ ] **Step 2: Wire the harness** — in `run-tests.sh`, copy the filestest `swiftc` + `run_guarded` block, changing `tools/filestest.swift` → `tools/aitest.swift` and the output name to `goty-ai-test`; add `-framework Security` to that block's link flags.
+- [x] **Step 2: Wire the harness** — in `run-tests.sh`, copy the filestest `swiftc` + `run_guarded` block, changing `tools/filestest.swift` → `tools/aitest.swift` and the output name to `goty-ai-test`; add `-framework Security` to that block's link flags.
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
 
 Run: `cd swift-app && ./run-tests.sh`
 Expected: FAIL — `cannot find 'ExecutionTarget' in scope`.
 
-- [ ] **Step 4: Implement the three type files** exactly as listed in Interfaces (all under `// MARK:` headers per house style; Foundation only).
+- [x] **Step 4: Implement the three type files** exactly as listed in Interfaces (all under `// MARK:` headers per house style; Foundation only).
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `cd swift-app && ./run-tests.sh`
 Expected: all `ok`, exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add swift-app/tools/aitest.swift swift-app/Sources/Core/AI/ swift-app/run-tests.sh
@@ -117,7 +117,7 @@ git commit -m "feat(ai): core value types — ExecutionTarget, AIProposal, AITas
 - Consumes: `CommandRisk` from Task 1.
 - Produces: `struct ReadOnlyPolicy { static func autoExecutable(_ command: String) -> Bool; static func classify(_ command: String) -> CommandRisk }`
 
-- [ ] **Step 1: Write failing tests** — append inside `AITest.main()` before `exit`:
+- [x] **Step 1: Write failing tests** — append inside `AITest.main()` before `exit`:
 
 ```swift
 print("— ReadOnlyPolicy —")
@@ -143,9 +143,9 @@ check(ReadOnlyPolicy.classify("pwd") == .readOnly, "pwd readonly")
 check(!ReadOnlyPolicy.autoExecutable(""), "empty not auto")
 ```
 
-- [ ] **Step 2: Run** — `cd swift-app && ./run-tests.sh`; expect FAIL (`cannot find 'ReadOnlyPolicy'`).
+- [x] **Step 2: Run** — `cd swift-app && ./run-tests.sh`; expect FAIL (`cannot find 'ReadOnlyPolicy'`).
 
-- [ ] **Step 3: Implement** `ReadOnlyPolicy`:
+- [x] **Step 3: Implement** `ReadOnlyPolicy`:
 
 ```swift
 // ReadOnlyPolicy — the executor-side command classifier. The model never
@@ -200,9 +200,9 @@ struct ReadOnlyPolicy {
 
 Note: `git reset`/`git clean`/`git checkout --` are `.mutating` under the git branch, not `.destructive` — acceptable for v1 warning styling; `destructiveHeads` covers the common catastrophic ones. `ponytail: prefix/head classifier, no shell grammar parse — escalation path is a real tokenizer if tasks need compound commands.`
 
-- [ ] **Step 4: Run tests** — expect all `ok`.
+- [x] **Step 4: Run tests** — expect all `ok`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add swift-app/Sources/Core/Execution/ReadOnlyPolicy.swift swift-app/tools/aitest.swift
@@ -228,7 +228,7 @@ git commit -m "feat(ai): ReadOnlyPolicy — allowlist + risk classifier"
   - `final class LocalExecutor: CommandExecutor` — `/bin/zsh -c`, env from `UserShellEnv.asDictionary`
   - `final class SSHExecutor: CommandExecutor` — `let host: String`; `/usr/bin/ssh` + `SshTransport.options`; write = stdin heredoc (`cat > path`), read = `cat -- path`, edit = read+replace+write client-side
 
-- [ ] **Step 1: Write failing tests** — append before `exit`:
+- [x] **Step 1: Write failing tests** — append before `exit`:
 
 ```swift
 print("— Executors —")
@@ -265,9 +265,9 @@ check(SSHExecutor.host == nil || true, "ssh executor type exists")
 
 (If `NSTemporaryDirectory`/`createDirectory` spellings fight the harness, use `FileManager.default.temporaryDirectory` — any temp dir works; keep the check names.)
 
-- [ ] **Step 2: Run** — expect FAIL (`cannot find 'LocalExecutor'`).
+- [x] **Step 2: Run** — expect FAIL (`cannot find 'LocalExecutor'`).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `CommandExecutor.swift`:
 
@@ -303,9 +303,9 @@ protocol CommandExecutor {
 
 `SSHExecutor.swift` — same shape: `run` = `/usr/bin/ssh` with `SshTransport.options(host: host, command: command)`, `cwd` embedded as `cd \(Shell.forceQuoted(cwd)) && \(command)` when non-nil (the RemoteFileSource pattern, FileSources.swift:120-175); read/write identical command shapes with stdin piping for write; edit = read → replace → write. `timeout` enforced by killing the Process (same timer pattern).
 
-- [ ] **Step 4: Run tests** — expect all `ok`.
+- [x] **Step 4: Run tests** — expect all `ok`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add swift-app/Sources/Core/Execution/ swift-app/tools/aitest.swift
@@ -324,7 +324,7 @@ git commit -m "feat(ai): CommandExecutor — local process + ssh exec adapters"
 - Consumes: nothing.
 - Produces: `final class LineTrigger { var armed: Bool; var onTrigger: ((String) -> Void)?; func filter(_ bytes: [UInt8]) -> [UInt8]; func reset() }`
 
-- [ ] **Step 1: Write failing tests** — append before `exit`:
+- [x] **Step 1: Write failing tests** — append before `exit`:
 
 ```swift
 print("— LineTrigger —")
@@ -359,9 +359,9 @@ check(fired.last == "spaced", "request trimmed")
 // readline buffer; PaneHost sends ctrl-u after onTrigger (Task 8).
 ```
 
-- [ ] **Step 2: Run** — expect FAIL.
+- [x] **Step 2: Run** — expect FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```swift
 // LineTrigger — byte-level input-line tracker at the PTY chokepoint.
@@ -418,9 +418,9 @@ final class LineTrigger {
 }
 ```
 
-- [ ] **Step 4: Run tests** — expect all `ok`.
+- [x] **Step 4: Run tests** — expect all `ok`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add swift-app/Sources/Core/AI/LineTrigger.swift swift-app/tools/aitest.swift
@@ -439,7 +439,7 @@ git commit -m "feat(ai): LineTrigger — @ai input capture at the PTY chokepoint
 - Consumes: nothing.
 - Produces: `final class OutputTail { func append(_ bytes: [UInt8]); var snapshot: String { get } }` (8 KB ring, ANSI/OSC/CSI stripped, last 64 non-empty lines, thread-safe via internal `NSLock`)
 
-- [ ] **Step 1: Write failing tests** — append before `exit`:
+- [x] **Step 1: Write failing tests** — append before `exit`:
 
 ```swift
 print("— OutputTail —")
@@ -454,13 +454,13 @@ big.append(Array(String(repeating: "x", count: 20_000).utf8))
 check(big.snapshot.count <= 9_000, "8KB cap holds")
 ```
 
-- [ ] **Step 2: Run** — expect FAIL.
+- [x] **Step 2: Run** — expect FAIL.
 
-- [ ] **Step 3: Implement** — byte ring capped at 8192; `snapshot` decodes, strips CSI (`ESC [ ... final-byte 0x40–0x7E`), OSC (`ESC ] ... BEL or ST`), single-char ESC escapes, drops `\r`, then keeps the last 64 non-empty lines joined by `\n`. All under the lock (feeds from streamQueue, read from task start).
+- [x] **Step 3: Implement** — byte ring capped at 8192; `snapshot` decodes, strips CSI (`ESC [ ... final-byte 0x40–0x7E`), OSC (`ESC ] ... BEL or ST`), single-char ESC escapes, drops `\r`, then keeps the last 64 non-empty lines joined by `\n`. All under the lock (feeds from streamQueue, read from task start).
 
-- [ ] **Step 4: Run tests** — expect all `ok`.
+- [x] **Step 4: Run tests** — expect all `ok`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add swift-app/Sources/Core/AI/OutputTail.swift swift-app/tools/aitest.swift
@@ -491,7 +491,7 @@ git commit -m "feat(ai): OutputTail — 8KB ANSI-stripped output context"
   - `protocol ModelClient { func complete(messages: [ChatMessage], tools: [ToolSpec], completion: @escaping (Result<ModelReply, ModelError>) -> Void) }`
   - `final class OpenAICompatibleClient: ModelClient { init(baseUrl: String, apiKey: String, model: String) }` — POST `{base}/chat/completions`, `Authorization: Bearer`, body `{model, messages, tools:[{type:"function",function:{name,description,parameters}}], tool_choice:"auto"}`, parses `choices[0].message` incl. `tool_calls[].function.{name,arguments}`
 
-- [ ] **Step 1: Write failing tests** — append before `exit` (request shaping + response parsing; NO network):
+- [x] **Step 1: Write failing tests** — append before `exit` (request shaping + response parsing; NO network):
 
 ```swift
 print("— ModelClient —")
@@ -513,13 +513,13 @@ check(plain?.text == "done" && plain?.toolCalls.isEmpty == true, "plain reply pa
 
 To make those testable, `OpenAICompatibleClient` exposes two internal statics the tests call: `func buildRequestBody(...) -> String` and `static func parse(data: Data) -> ModelReply?` (`complete` = URLRequest + `URLSession.dataTask` + parse; `notConfigured` when baseUrl/model empty).
 
-- [ ] **Step 2: Run** — expect FAIL.
+- [x] **Step 2: Run** — expect FAIL.
 
-- [ ] **Step 3: Implement** — Keychain (SecItemAdd/Update/CopyMatching/Delete for nil), Preferences keys `aiBaseUrl`/`aiModel` following the existing `didSet` pattern, client as specified. Note: link Security FIRST (`build.sh` edit) or the harness fails to link SecItem calls.
+- [x] **Step 3: Implement** — Keychain (SecItemAdd/Update/CopyMatching/Delete for nil), Preferences keys `aiBaseUrl`/`aiModel` following the existing `didSet` pattern, client as specified. Note: link Security FIRST (`build.sh` edit) or the harness fails to link SecItem calls.
 
-- [ ] **Step 4: Run** `cd swift-app && ./run-tests.sh` AND `./build.sh` — both green.
+- [x] **Step 4: Run** `cd swift-app && ./run-tests.sh` AND `./build.sh` — both green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add swift-app/Sources/Core/Keychain.swift swift-app/Sources/Core/AI/ModelClient.swift \
@@ -542,7 +542,7 @@ git commit -m "feat(ai): keychain prefs + OpenAI-compatible model client"
   - `final class AITaskCoordinator { init(model: ModelClient, executorFor: @escaping (ExecutionTarget) -> CommandExecutor); func start(context: AIContext) -> UUID; func confirm(taskId: UUID); func edit(taskId: UUID, to: AIProposal); func cancel(taskId: UUID); func continueBudget(taskId: UUID); var onUpdate: ((AITask) -> Void)? }` — `onUpdate` fires on the main queue with the full `AITask` snapshot after every phase/round change.
   - Tool names on the wire: `read` `{path, offset?, limit?}`, `write` `{path, content}`, `edit` `{path, oldText, newText}`, `bash` `{command, cwd?, timeout?}`.
 
-- [ ] **Step 1: Write failing tests** — append before `exit`. Use a scripted fake:
+- [x] **Step 1: Write failing tests** — append before `exit`. Use a scripted fake:
 
 ```swift
 print("— AITaskCoordinator loop —")
@@ -611,9 +611,9 @@ coord.edit(taskId: tid, to: AIProposal(op: .bash("mv a c"), explanation: "", ris
 
 The spin line above is placeholder-ish — implement it as: `coord.onUpdate` also signals a `completedSem` on `.completed`/`.failed`; wait on that. Same for the second edit-invalidates scenario: start a fresh task, drive to `awaitingConfirmation`, call `edit`, assert `pendingProposal.op == .bash("mv a c")` and phase back to `.awaitingConfirmation`, assert executor never ran `mv a c` until a second `confirm`. Budget test: `FakeModel` returning 30 bash-ls calls → task reaches `.budgetExhausted`, `continueBudget` resumes it. Write tool test: model emits `write` call → proposal `.write(path: "/tmp/w", content: "x")` awaits confirmation.
 
-- [ ] **Step 2: Run** — expect FAIL.
+- [x] **Step 2: Run** — expect FAIL.
 
-- [ ] **Step 3: Implement** the loop:
+- [x] **Step 3: Implement** the loop:
 
 State: `tasks: [UUID: AITask]`, private serial `DispatchQueue(label: "goty.ai.coord")` for task state; model/executor callbacks hop onto that queue.
 
@@ -632,9 +632,9 @@ State: `tasks: [UUID: AITask]`, private serial `DispatchQueue(label: "goty.ai.co
 `cancel` → `.cancelled`. `continueBudget` → `budgetRemaining += 25`, phase `.thinking`, `step`.
 The internal fact probe (`whoami; hostname; uname -srm`) runs once in `start` before the first `step`, hard-coded (not a model tool call, not budget-charged), filling `context.hostFacts` (local: direct `LocalExecutor`; ssh: through the target's executor).
 
-- [ ] **Step 4: Run tests** — expect all `ok`.
+- [x] **Step 4: Run tests** — expect all `ok`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add swift-app/Sources/Core/AI/AITaskCoordinator.swift swift-app/tools/aitest.swift
@@ -658,7 +658,7 @@ git commit -m "feat(ai): AITaskCoordinator — bounded ReAct loop with proposal 
   - `PaneHost` additions: `var onAITask: ((PaneHost, String) -> Void)?` (request text), `var coordinatorFeed: (() -> ExecutionTarget?)?` and `var visibleTail: (() -> OutputTail?)?` injected by AppDelegate, internal `let aiTrigger = LineTrigger()`, `let aiTail = OutputTail()`.
   - `final class AITaskCard: NSView` with `func render(task: AITask, target: ExecutionTarget)` and callbacks `onConfirm`, `onEdit(AIProposal)`, `onCancel`, `onContinue`, `onClose`; an `inputMode` for ⌘⇧A (text field, Enter → `onSubmit(String)`).
 
-- [ ] **Step 1: Wire PaneHost (no card yet)**
+- [x] **Step 1: Wire PaneHost (no card yet)**
   - `createSurfaceIfNeeded()` (TerminalViews.swift:151-160): wrap the existing closure —
     ```swift
     config.onWrite = { [weak self] bytes in
@@ -673,17 +673,17 @@ git commit -m "feat(ai): AITaskCoordinator — bounded ReAct loop with proposal 
   - `updateAgentCommand(_:)` (already called from AppDelegate's `onForegroundChange`): set `aiTrigger.armed = Self.isShellPrompt(command)` where `isShellPrompt` returns true for nil (spawned shell) and basenames of `zsh bash sh fish dash ash` — matching AgentDetect's foreground reporting.
   - Trigger only when `coordinatorFeed?() != nil` and `AIProviderConfigured` (baseUrl+model non-empty — expose `static var isConfigured: Bool` on `OpenAICompatibleClient` reading `AppPreferences.shared`); otherwise leave `armed = false` (fail-open, spec).
 
-- [ ] **Step 2: Implement AITaskCard** — bottom-anchored overlay (`addSubview` above scrollView, height ≤ 40% of pane, `hasShadow`, chrome colors from `Chrome.theme`, EditorPanel-style mono text). Sections: header `target.displayName · cwd · riskBadge`; rounds list (tool name + one-line result, last 6, "+N more"); proposal body (mono; `oldText/newText` blocks for `.edit`, full content for `.write`); buttons row `Execute / Edit / Cancel` (destructive risk = red accent on Execute + the risk line); budget card `Continue +25 / Propose / Cancel`; answer + `Fill terminal` (sends `sendText(command + " ")`, never auto-runs — spec) + `Close`. Edit mode swaps body for an `EditorTextView`-lite `NSTextView` + `Save` (parsed back to an `AIProposal` of the same op-kind; invalid → stays in edit). Card never becomes firstResponder unless in `inputMode`/edit (arrow keys keep reaching the terminal).
+- [x] **Step 2: Implement AITaskCard** — bottom-anchored overlay (`addSubview` above scrollView, height ≤ 40% of pane, `hasShadow`, chrome colors from `Chrome.theme`, EditorPanel-style mono text). Sections: header `target.displayName · cwd · riskBadge`; rounds list (tool name + one-line result, last 6, "+N more"); proposal body (mono; `oldText/newText` blocks for `.edit`, full content for `.write`); buttons row `Execute / Edit / Cancel` (destructive risk = red accent on Execute + the risk line); budget card `Continue +25 / Propose / Cancel`; answer + `Fill terminal` (sends `sendText(command + " ")`, never auto-runs — spec) + `Close`. Edit mode swaps body for an `EditorTextView`-lite `NSTextView` + `Save` (parsed back to an `AIProposal` of the same op-kind; invalid → stays in edit). Card never becomes firstResponder unless in `inputMode`/edit (arrow keys keep reaching the terminal).
 
-- [ ] **Step 3: AppDelegate wiring**
+- [x] **Step 3: AppDelegate wiring**
   - `lazy var aiCoordinator: AITaskCoordinator` — `OpenAICompatibleClient(baseUrl: prefs.aiBaseUrl, apiKey: Keychain.secret(for: "aiApiKey") ?? "", model: prefs.aiModel)` (re-created when Settings change; simplest: read prefs at each `start` via a small `AIProviderFactory` closure inside the coordinator's `executorFor` sibling — keep it one closure `modelFor: () -> ModelClient`), `executorFor: { target in target.transport == .local ? LocalExecutor() : (target.transport case .ssh(let h) → SSHExecutor(host: h)) }`.
   - `aiCoordinator.onUpdate` → find `hostPool[HostKey(task.context.target…)]`… simplest: keep `activeAIPane: [UUID: HostKey]` (taskId → pane key) from `start`; onUpdate hops main, finds PaneHost, `host.showAITask(task)`.
   - PaneHost `onAITask`: build `AIContext(request:, target: coordinatorFeed?(), visibleOutput: aiTail.snapshot, hostFacts: "")`, `aiCoordinator.start(context:)`, show card in thinking state.
   - ⌘⇧A: menu item "Ask AI…" → focused pane's `host.openAIInputMode()` → card in `inputMode`; submit path identical to `onAITask`.
 
-- [ ] **Step 4: Build + manual smoke** — `./build.sh` green. Manual: in a local tab type `@ai list files here` → card appears, line never executes (`zsh: command not found` absent, prompt returned after ctrl-u); `echo "@ai"` passes through; run `claude` TUI → `@ai` typing reaches the TUI; ⌘⇧A works inside the TUI.
+- [x] **Step 4: Build + manual smoke** — `./build.sh` green. Manual: in a local tab type `@ai list files here` → card appears, line never executes (`zsh: command not found` absent, prompt returned after ctrl-u); `echo "@ai"` passes through; run `claude` TUI → `@ai` typing reaches the TUI; ⌘⇧A works inside the TUI.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add swift-app/Sources/UI/Terminal/AITaskCard.swift swift-app/Sources/UI/Terminal/TerminalViews.swift \
@@ -704,7 +704,7 @@ git commit -m "feat(ai): @ai capture in PaneHost + task card overlay + Ask AI sh
 - Consumes: Task 6 (`AppPreferences.aiBaseUrl/aiModel`, `Keychain`).
 - Produces: nothing downstream.
 
-- [ ] **Step 1: Write failing tests** — append to `settingstest.swift`'s `main()` (it already builds `SettingsRootView` headless): select `.ai`, assert the page exposes three fields and that setting values round-trips through prefs (Keychain in test: setSecret(nil) first to clear).
+- [x] **Step 1: Write failing tests** — append to `settingstest.swift`'s `main()` (it already builds `SettingsRootView` headless): select `.ai`, assert the page exposes three fields and that setting values round-trips through prefs (Keychain in test: setSecret(nil) first to clear).
 
 ```swift
 print("— AI settings —")
@@ -720,13 +720,13 @@ Keychain.setSecret(nil, for: "aitest-key")
 check(Keychain.secret(for: "aitest-key") == nil, "keychain delete")
 ```
 
-- [ ] **Step 2: Run** `./run-tests.sh` — expect FAIL.
+- [x] **Step 2: Run** `./run-tests.sh` — expect FAIL.
 
-- [ ] **Step 3: Implement** the section + rows (follow the `.configFile` page pattern for layout; secure field = `NSSecureTextField` styled like `ChromeInput`).
+- [x] **Step 3: Implement** the section + rows (follow the `.configFile` page pattern for layout; secure field = `NSSecureTextField` styled like `ChromeInput`).
 
-- [ ] **Step 4: Run tests + build** — green.
+- [x] **Step 4: Run tests + build** — green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add swift-app/Sources/UI/Panels/Settings/SettingsWindow.swift \
@@ -744,13 +744,13 @@ git commit -m "feat(ai): settings section — base url, model, api key"
 
 **Interfaces:** none new.
 
-- [ ] **Step 1: SSH manual acceptance** (needs one configured host alias in `~/.ssh/config`): open a remote workspace, `@ai list files here` → card shows `host · cwd`; probes run over ssh (verify with the mux socket count or `ssh -O check`); a mutation proposal confirms against the remote ONLY (`touch` a file in remote cwd, confirm locally it does not exist); the proposal header shows the alias; task survives tab switch (card re-binds on `onUpdate` since keyed by taskId→paneKey); closing the remote tab marks tasks `.cancelled` (wire `retire()` → cancel tasks whose pane key matches — add this in Step 1 if missing).
+- [x] **Step 1: SSH manual acceptance** (needs one configured host alias in `~/.ssh/config`): open a remote workspace, `@ai list files here` → card shows `host · cwd`; probes run over ssh (verify with the mux socket count or `ssh -O check`); a mutation proposal confirms against the remote ONLY (`touch` a file in remote cwd, confirm locally it does not exist); the proposal header shows the alias; task survives tab switch (card re-binds on `onUpdate` since keyed by taskId→paneKey); closing the remote tab marks tasks `.cancelled` (wire `retire()` → cancel tasks whose pane key matches — add this in Step 1 if missing).
 
-- [ ] **Step 2: Spec acceptance matrix** — walk the spec's 10 acceptance checks manually; each failure gets a failing aitest check first, then the fix, then green.
+- [x] **Step 2: Spec acceptance matrix** — walk the spec's 10 acceptance checks manually; each failure gets a failing aitest check first, then the fix, then green.
 
-- [ ] **Step 3: Full gates** — `cd swift-app && ./build.sh && ./run-tests.sh`; sessiond untouched so cargo gates stay green by construction (`cargo fmt --check && cargo clippy -D warnings && cargo test --manifest-path sessiond/Cargo.toml` once, for hygiene).
+- [x] **Step 3: Full gates** — `cd swift-app && ./build.sh && ./run-tests.sh`; sessiond untouched so cargo gates stay green by construction (`cargo fmt --check && cargo clippy -D warnings && cargo test --manifest-path sessiond/Cargo.toml` once, for hygiene).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add -A swift-app
