@@ -110,6 +110,17 @@ import Foundation
         type("@ai  spaced  \r")
         check(fired.last == "spaced", "request trimmed")
 
+        print("— OutputTail —")
+        let tail = OutputTail()
+        tail.append(Array("\u{1B}[32mOK\u{1B}[0m\n\u{1B}]0;title\u{7}\nplain line\n".utf8))
+        check(tail.snapshot.contains("OK") && tail.snapshot.contains("plain line")
+              && !tail.snapshot.contains("[32m") && !tail.snapshot.contains("]0;"), "ANSI/OSC stripped")
+        for n in 0..<200 { tail.append(Array("line \(n)\n".utf8)) }
+        check(tail.snapshot.contains("line 199") && !tail.snapshot.contains("line 100"), "ring keeps only the tail")
+        let big = OutputTail()
+        big.append(Array(String(repeating: "x", count: 20_000).utf8))
+        check(big.snapshot.count <= 9_000, "8KB cap holds")
+
         exit(failures == 0 ? 0 : 1)
     }
 }
