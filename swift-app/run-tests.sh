@@ -131,3 +131,26 @@ swiftc -parse-as-library \
      -framework ServiceManagement \
      -o "$B"/goty-settings-test
 run_guarded "$B"/goty-settings-test
+
+# Core AI types suite: same source set, fourth entry point.
+# Security framework linked here for the Keychain calls later tasks add.
+swiftc -parse-as-library \
+     -enable-bare-slash-regex \
+     $VENDORED \
+     $SWIFT_SOURCES \
+     tools/aitest.swift \
+     -Xcc -fmodule-map-file=CGhostty/include/module.modulemap \
+     -Xcc -fmodule-map-file=vendor-c/cmark-gfm/src/module.modulemap \
+    -Xcc -fmodule-map-file=vendor-c/tree-sitter/include/module.modulemap \
+    -Xcc -Ivendor-c/tree-sitter/include \
+    -Xcc -Ivendor-c/cmark-gfm/src -Xcc -Ivendor-c/cmark-gfm/extensions \
+     "$B"/libcmark_gfm.a \
+     "$B"/libtreesitter.a \
+     -Xcc -ICGhostty/include \
+     -L CGhostty/lib -lghostty \
+     -Xlinker -rpath -Xlinker @executable_path/CGhostty/lib \
+     -framework AppKit -framework Metal -framework MetalKit -framework CoreVideo \
+     -framework QuartzCore -framework UserNotifications -framework UniformTypeIdentifiers \
+     -framework ServiceManagement -framework Security \
+     -o "$B"/goty-ai-test
+run_guarded "$B"/goty-ai-test
