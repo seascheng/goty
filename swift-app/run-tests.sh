@@ -66,7 +66,7 @@ swiftc -parse-as-library \
     -Xlinker -rpath -Xlinker @executable_path/CGhostty/lib \
     -framework AppKit -framework Metal -framework MetalKit -framework CoreVideo \
     -framework QuartzCore -framework UserNotifications -framework UniformTypeIdentifiers \
-    -framework ServiceManagement \
+    -framework ServiceManagement -framework Security \
     -o "$B"/goty-layout-test
 
 # The binary links libghostty at @executable_path; give it the real tree.
@@ -105,7 +105,7 @@ swiftc -parse-as-library \
      -Xlinker -rpath -Xlinker @executable_path/CGhostty/lib \
      -framework AppKit -framework Metal -framework MetalKit -framework CoreVideo \
      -framework QuartzCore -framework UserNotifications -framework UniformTypeIdentifiers \
-     -framework ServiceManagement \
+     -framework ServiceManagement -framework Security \
      -o "$B"/goty-files-test
 run_guarded "$B"/goty-files-test
 
@@ -128,7 +128,7 @@ swiftc -parse-as-library \
      -Xlinker -rpath -Xlinker @executable_path/CGhostty/lib \
      -framework AppKit -framework Metal -framework MetalKit -framework CoreVideo \
      -framework QuartzCore -framework UserNotifications -framework UniformTypeIdentifiers \
-     -framework ServiceManagement \
+     -framework ServiceManagement -framework Security \
      -o "$B"/goty-settings-test
 run_guarded "$B"/goty-settings-test
 

@@ -23,6 +23,8 @@ final class AppPreferences {
         static let rightPanelWidth = "rightPanelWidth"
         static let rightPanelTab = "rightPanelTab"
         static let daemonUpgradeDeclined = "daemonUpgradeDeclined"
+        static let aiBaseUrl = "aiBaseUrl"
+        static let aiModel = "aiModel"
     }
 
     private let defaults: UserDefaults
@@ -42,6 +44,8 @@ final class AppPreferences {
         rightPanelTab = RightPanelTab(rawValue: tab ?? "") ?? .files
         daemonDeclines = (defaults.data(forKey: Key.daemonUpgradeDeclined))
             .flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) } ?? [:]
+        aiBaseUrl = defaults.string(forKey: Key.aiBaseUrl) ?? ""
+        aiModel = defaults.string(forKey: Key.aiModel) ?? ""
     }
 
     var sidebarCollapsed: Bool {
@@ -77,6 +81,16 @@ final class AppPreferences {
 
     func declineDaemonUpgrade(key: String, capability: Int) {
         daemonDeclines[key] = capability
+    }
+
+    // MARK: AI provider (API key lives in the Keychain, not here)
+
+    /// OpenAI-compatible endpoint. Empty = AI feature disabled (spec).
+    var aiBaseUrl: String {
+        didSet { defaults.set(aiBaseUrl, forKey: Key.aiBaseUrl) }
+    }
+    var aiModel: String {
+        didSet { defaults.set(aiModel, forKey: Key.aiModel) }
     }
 
     /// True when this exact daemon was already declined — stay silent.

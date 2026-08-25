@@ -121,6 +121,22 @@ import Foundation
         big.append(Array(String(repeating: "x", count: 20_000).utf8))
         check(big.snapshot.count <= 9_000, "8KB cap holds")
 
+        print("— ModelClient —")
+        check(OpenAICompatibleClient(baseUrl: "", apiKey: "k", model: "m")
+              .buildRequestBody(messages: [ChatMessage(role: "user", content: "hi", toolCalls: nil, toolCallId: nil)],
+                                tools: []).contains("\"messages\""), "request body encodes")
+        let sample = """
+        {"choices":[{"message":{"role":"assistant","content":null,
+         "tool_calls":[{"id":"c1","type":"function",
+           "function":{"name":"bash","arguments":"{\\"command\\":\\"pwd\\"}"}}]}}]}
+        """
+        let reply = OpenAICompatibleClient.parse(data: Data(sample.utf8))
+        check(reply?.toolCalls.first?.name == "bash"
+              && reply?.toolCalls.first?.argumentsJSON.contains("pwd") == true, "tool_calls parsed")
+        let plain = OpenAICompatibleClient.parse(data: Data(
+            "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"}}]}".utf8))
+        check(plain?.text == "done" && plain?.toolCalls.isEmpty == true, "plain reply parsed")
+
         exit(failures == 0 ? 0 : 1)
     }
 }

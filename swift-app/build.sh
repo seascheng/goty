@@ -54,6 +54,7 @@ swiftc \
     -framework Metal -framework MetalKit -framework CoreVideo \
     -framework QuartzCore -framework UserNotifications \
     -framework UniformTypeIdentifiers -framework ServiceManagement \
+    -framework Security \
     -o goty
 
 # Package as a minimal .app bundle: bare binaries crash on AppKit paths
