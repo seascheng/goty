@@ -725,14 +725,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func retireHosts(workspace: UUID) {
         for (key, host) in hostPool where key.workspace == workspace {
+            cancelAITasks(pane: key)
             host.retire()
             hostPool.removeValue(forKey: key)
         }
     }
 
     func retireHost(_ key: HostKey) {
+        cancelAITasks(pane: key)
         hostPool[key]?.retire()
         hostPool.removeValue(forKey: key)
+    }
+
+    /// Closing a pane cancels its AI tasks — task ownership must not
+    /// outlive the pane it was started from (spec acceptance #10); a
+    /// leaked task would keep burning model rounds against a host key
+    /// that no longer resolves to a card.
+    private func cancelAITasks(pane key: HostKey) {
+        for (id, paneKey) in activeAIPane where paneKey == key {
+            aiTaskOwner[id]?.cancel(taskId: id)
+            activeAIPane.removeValue(forKey: id)
+            aiTaskOwner.removeValue(forKey: id)
+        }
     }
 
     private func refresh() {

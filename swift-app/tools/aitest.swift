@@ -316,6 +316,35 @@ import Foundation
             check(e.wrote == ["/tmp/w"], "write executed after confirm")
         }
 
+        // acceptance #10 (close cancels): cancel during a pending
+        // proposal must kill the task without executing anything, and
+        // a late confirm on a cancelled task is inert (no zombie exec).
+        do {
+            let m = FakeModel()
+            let e = FakeExec()
+            let awaitSem = DispatchSemaphore(value: 0)
+            let cancelSem = DispatchSemaphore(value: 0)
+            var last: AITask?
+            let coord = AITaskCoordinator(model: m, executorFor: { _ in e })
+            coord.onUpdate = { t in
+                last = t
+                if t.phase == .awaitingConfirmation { awaitSem.signal() }
+                if t.phase == .cancelled { cancelSem.signal() }
+            }
+            m.script = [
+                [ToolCall(id: "1", name: "bash", argumentsJSON: "{\"command\":\"mv a b\"}")],
+            ]
+            let tid = coord.start(context: AIContext(request: "mv", target: target,
+                                                      visibleOutput: "", hostFacts: ""))
+            check(waitSem(awaitSem), "mutation proposal awaits before cancel")
+            coord.cancel(taskId: tid)
+            check(waitSem(cancelSem), "cancel transitions to .cancelled")
+            check(!e.ran.contains("mv a b"), "cancelled proposal never executes")
+            coord.confirm(taskId: tid)   // late UI callback after close
+            Thread.sleep(forTimeInterval: 0.15)
+            check(!e.ran.contains("mv a b"), "late confirm on cancelled task is inert")
+        }
+
         exit(failures == 0 ? 0 : 1)
     }
 }
