@@ -12,13 +12,14 @@ import GhosttyKit
 // (no dirty tracking, no Save button — the tty7 model).
 
 enum SettingsSection: String, CaseIterable {
-    case appearance, terminal, configFile
+    case appearance, terminal, configFile, ai
 
     var title: String {
         switch self {
         case .appearance: return "Appearance"
         case .terminal: return "Terminal"
         case .configFile: return "Config File"
+        case .ai: return "AI"
         }
     }
     var symbol: String {
@@ -26,6 +27,7 @@ enum SettingsSection: String, CaseIterable {
         case .appearance: return "paintpalette"
         case .terminal: return "chevron.left.forwardslash.chevron.right"
         case .configFile: return "doc.text"
+        case .ai: return "sparkles"
         }
     }
 }
@@ -450,6 +452,9 @@ final class SettingsRootView: NSView {
                 "Terminal look — written to your Ghostty config and applied to open terminals live.")
         case .terminal:
             (title, subtitle) = ("Terminal", "Cursor, scrollback, and close behavior.")
+        case .ai:
+            (title, subtitle) = ("AI",
+                "OpenAI-compatible provider for @ai tasks. Empty Base URL or Model disables the feature.")
         }
 
         let page = SettingsFormPage(title: title, subtitle: subtitle)
@@ -498,7 +503,65 @@ final class SettingsRootView: NSView {
         case .appearance: return appearanceSpecs()
         case .terminal: return terminalSpecs()
         case .configFile: return configFileSpecs()
+        case .ai: return aiSpecs()
         }
+    }
+
+    /// The AI page writes AppPreferences + the Keychain directly (never
+    /// the ghostty config); every act applies immediately — the same
+    /// live model as the rest of Settings (no Save button).
+    private func aiSpecs() -> [SettingSpec] {
+        let prefs = AppPreferences.shared
+        func input(placeholder: String, current: String,
+                   write: @escaping (String) -> Void) -> ChromeInput {
+            let f = ChromeInput(placeholder: placeholder)
+            f.stringValue = current
+            let commit = { [weak f] in
+                guard let f else { return }
+                write(f.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            f.onReturn = commit
+            f.onDidChange = commit
+            f.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+            f.heightAnchor.constraint(equalToConstant: ControlMetrics.inputHeight).isActive = true
+            return f
+        }
+        return [
+            SettingSpec(label: "Base URL", detail: "Endpoint serving /chat/completions.",
+                        key: "ai-base-url") { _, _ in
+                input(placeholder: "https://api.openai.com/v1", current: prefs.aiBaseUrl) {
+                    prefs.aiBaseUrl = $0
+                }
+            },
+            SettingSpec(label: "Model", detail: "Model name sent with every request.",
+                        key: "ai-model") { _, _ in
+                input(placeholder: "gpt-5.2", current: prefs.aiModel) {
+                    prefs.aiModel = $0
+                }
+            },
+            SettingSpec(label: "API Key", detail: "Stored in the Keychain, not the config file.",
+                        key: "ai-api-key") { _, _ in
+                let s = NSSecureTextField()
+                s.placeholderString = "sk-…"
+                s.font = .systemFont(ofSize: 12.5, weight: .regular)
+                s.focusRingType = .none
+                s.bezelStyle = .roundedBezel
+                s.usesSingleLineMode = true
+                s.target = Self.self
+                s.action = #selector(Self.commitAPIKey(_:))
+                s.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+                s.heightAnchor.constraint(equalToConstant: ControlMetrics.inputHeight).isActive = true
+                return s
+            },
+        ]
+    }
+
+    /// NSSecureTextField commits on Return (target/action): write the
+    /// Keychain item. Lives on the root so the field's target stays
+    /// alive for the window's lifetime.
+    @objc fileprivate static func commitAPIKey(_ field: NSSecureTextField) {
+        Keychain.setSecret(field.stringValue.isEmpty ? nil : field.stringValue,
+                           for: "aiApiKey")
     }
 
     private func appearanceSpecs() -> [SettingSpec] {

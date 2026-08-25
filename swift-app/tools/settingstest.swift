@@ -93,7 +93,7 @@ enum SettingsTest {
         window.contentView = root
         root.layoutSubtreeIfNeeded()
 
-        check(root.sectionRowCountForTest == 3, "three sections listed")
+        check(root.sectionRowCountForTest == 4, "four sections listed")
         let page = root.currentPageForTest
         check(page != nil, "appearance page built on launch")
 
@@ -248,6 +248,44 @@ enum SettingsTest {
         } else {
             check(true, "Arthur theme file absent here — swatch parse skipped")
         }
+
+        print("— AI settings —")
+        let aiPrefs = AppPreferences(defaults: UserDefaults(suiteName: "aitest")!)
+        aiPrefs.aiBaseUrl = "https://api.example.com/v1"
+        aiPrefs.aiModel = "m-1"
+        check(aiPrefs.aiBaseUrl == "https://api.example.com/v1" && aiPrefs.aiModel == "m-1",
+              "ai prefs round-trip")
+        Keychain.setSecret(nil, for: "aitest-key")
+        Keychain.setSecret("sekrit", for: "aitest-key")
+        check(Keychain.secret(for: "aitest-key") == "sekrit", "keychain round-trip")
+        Keychain.setSecret(nil, for: "aitest-key")
+        check(Keychain.secret(for: "aitest-key") == nil, "keychain delete")
+
+        // The AI page: three rows, live-wired to prefs + keychain.
+        root.selectForTest(.ai)
+        root.layoutSubtreeIfNeeded()
+        let aiPage = root.currentPageForTest
+        check(aiPage != nil, "ai page builds")
+        check(aiPage?.controlsByKey["ai-base-url"] is ChromeInput, "base url field present")
+        check(aiPage?.controlsByKey["ai-model"] is ChromeInput, "model field present")
+        check(aiPage?.controlsByKey["ai-api-key"] is NSSecureTextField, "api key secure field present")
+        // Live write path: a user act (Return) writes the pref directly.
+        if let f = aiPage?.controlsByKey["ai-model"] as? ChromeInput {
+            f.stringValue = "gpt-test"
+            f.onReturn?()
+            check(AppPreferences.shared.aiModel == "gpt-test", "model field writes the pref live")
+        } else {
+            check(false, "model field writes the pref live")
+        }
+        if let s = aiPage?.controlsByKey["ai-api-key"] as? NSSecureTextField {
+            s.stringValue = "k-test"
+            if let a = s.action, let t = s.target { t.perform(a, with: s) }
+            check(Keychain.secret(for: "aiApiKey") == "k-test", "api key field writes keychain live")
+            Keychain.setSecret(nil, for: "aiApiKey")
+        } else {
+            check(false, "api key field writes keychain live")
+        }
+        AppPreferences.shared.aiModel = ""   // leave shared prefs clean
 
         try? FileManager.default.removeItem(atPath: tmp)
         print(failures == 0 ? "ALL PASS" : "\(failures) FAILURES")
