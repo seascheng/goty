@@ -1,0 +1,38 @@
+name: checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  sessiond:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --manifest-path swift-app/sessiond/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path swift-app/sessiond/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --manifest-path swift-app/sessiond/Cargo.toml
+
+  swift:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      # Type-check the Swift sources only: a full build.sh run needs the
+      # locally built libghostty dylib (patches/build-libghostty.sh).
+      - name: swiftc parse check
+        run: |
+          cd swift-app
+          MAPFILE=CGhostty/include/module.modulemap
+          SWIFT_SOURCES=$(find vendor-swift -name '*.swift' | grep -v UIKit | grep -v InspectorView | grep -v GrabHandle | grep -v 'GhosttyPackage\.swift')
+          SWIFT_SOURCES="$SWIFT_SOURCES $(find Sources -name '*.swift' | sort)"
+          xcrun swiftc -parse-as-library -enable-bare-slash-regex \
+            -typecheck \
+            $SWIFT_SOURCES \
+            -Xcc -fmodule-map-file=$MAPFILE \
+            -Xcc -ICGhostty/include \
+            -framework AppKit -framework Metal -framework MetalKit \
+            -framework CoreVideo -framework QuartzCore \
+            -framework UserNotifications -framework UniformTypeIdentifiers \
+            -framework ServiceManagement

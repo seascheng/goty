@@ -1,0 +1,5 @@
+module CTreeSitter {
+    header "tree_sitter/api.h"
+    header "tree_sitter/languages.h"
+    export *
+}
