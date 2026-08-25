@@ -27,6 +27,28 @@ import Foundation
         task.setPending(p1); task.advance(to: .awaitingConfirmation)
         check(task.pendingProposal == p1 && task.phase == .awaitingConfirmation, "proposal set")
 
+        print("— ReadOnlyPolicy —")
+        check(ReadOnlyPolicy.autoExecutable("pwd"), "pwd auto")
+        check(ReadOnlyPolicy.autoExecutable("ls -la"), "ls args auto")
+        check(ReadOnlyPolicy.autoExecutable("find . -maxdepth 1 -name '*.txt'"), "find safe auto")
+        check(!ReadOnlyPolicy.autoExecutable("find . -name x -delete"), "find -delete blocked")
+        check(!ReadOnlyPolicy.autoExecutable("find . -exec rm {} ;"), "find -exec blocked")
+        check(ReadOnlyPolicy.autoExecutable("git status"), "git status auto")
+        check(ReadOnlyPolicy.autoExecutable("git diff HEAD~1"), "git diff auto")
+        check(!ReadOnlyPolicy.autoExecutable("git push"), "git push not auto")
+        check(!ReadOnlyPolicy.autoExecutable("env"), "env blocked (secret leak)")
+        check(!ReadOnlyPolicy.autoExecutable("cat x | sh"), "pipe blocked")
+        check(!ReadOnlyPolicy.autoExecutable("ls > out"), "redirect blocked")
+        check(!ReadOnlyPolicy.autoExecutable("ls; rm -rf /"), "semicolon blocked")
+        check(!ReadOnlyPolicy.autoExecutable("echo `whoami`"), "backtick blocked")
+        check(!ReadOnlyPolicy.autoExecutable("echo $(whoami)"), "cmdsub blocked")
+        check(!ReadOnlyPolicy.autoExecutable("sudo ls"), "sudo never auto")
+        check(ReadOnlyPolicy.classify("rm -rf x") == .destructive, "rm destructive")
+        check(ReadOnlyPolicy.classify("mv a b") == .mutating, "mv mutating")
+        check(ReadOnlyPolicy.classify("git reset --hard") == .destructive, "git reset destructive")
+        check(ReadOnlyPolicy.classify("pwd") == .readOnly, "pwd readonly")
+        check(!ReadOnlyPolicy.autoExecutable(""), "empty not auto")
+
         exit(failures == 0 ? 0 : 1)
     }
 }
