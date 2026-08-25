@@ -235,20 +235,18 @@ final class WorkspaceCoordinator {
                     let newCommand = fg[pane.id]
                     var entryChanged = false
                     if entry.command != newCommand {
-                        // Identity for the UI is AGENT-ness: omp running a
-                        // bash tool flips fg omp→bash→omp at tool cadence,
-                        // and each flip must not rebuild the sidebar —
-                        // only a change that alters the row's identity
-                        // (spec appears/disappears/changes) signals.
-                        let oldIdentity = AgentCatalog.manifestKey(for: entry.command)
-                            ?? AgentCatalog.spec(for: entry.command).map { _ in entry.command }
-                        let newIdentity = AgentCatalog.manifestKey(for: newCommand)
-                            ?? AgentCatalog.spec(for: newCommand).map { _ in newCommand }
+                        // Signal on EVERY fg change, not just agent-identity
+                        // changes: PaneHost retargets detection (deduped by
+                        // `guard next != agentCommand`) and re-evaluates the
+                        // @ai trigger arming. Identity filtering left the
+                        // trigger armed inside vim/ssh/python — every
+                        // non-agent program maps to identity nil, so the
+                        // shell→vim transition never signalled (acceptance
+                        // #8). Sidebar churn is driven by entryChanged,
+                        // not this list.
                         entry.command = newCommand
                         entryChanged = true
-                        if oldIdentity != newIdentity {
-                            identityChanges.append((HostKey(workspace: wsId, pane: pane.id), newCommand))
-                        }
+                        identityChanges.append((HostKey(workspace: wsId, pane: pane.id), newCommand))
                     }
                     // The omp/pi extension reports the authoritative TUI
                     // state through its owning daemon — it outranks the

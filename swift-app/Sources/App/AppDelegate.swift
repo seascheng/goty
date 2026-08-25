@@ -32,6 +32,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // plumbing); task id → pane routes coordinator updates back.
     private var aiCoordinatorBox: (token: String, coordinator: AITaskCoordinator)?
     private var activeAIPane: [UUID: HostKey] = [:]
+    /// The coordinator a running task lives in — card callbacks must
+    /// reach it, not whichever coordinator `aiCoordinator()` would
+    /// rebuild after a mid-task provider-settings change.
+    private var aiTaskOwner: [UUID: AITaskCoordinator] = [:]
 
     func applicationWillTerminate(_ notification: Notification) {
         // Detach GUI clients only. goty-sessiond owns the PTYs and must
@@ -501,11 +505,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// they started with; both stay wired to onUpdate.
     private func aiCoordinator() -> AITaskCoordinator {
         let p = AppPreferences.shared
-        let token = p.aiBaseUrl + "\n" + p.aiModel
+        // The key is part of the token: changing only the API key must
+        // rebuild the client too, or tasks keep firing 401s on the
+        // stale key until restart (plan Task 8: prefs re-read per start).
+        let key = Keychain.secret(for: "aiApiKey") ?? ""
+        let token = p.aiBaseUrl + "\n" + p.aiModel + "\n" + key
         if let box = aiCoordinatorBox, box.token == token { return box.coordinator }
         let client = OpenAICompatibleClient(
             baseUrl: p.aiBaseUrl,
-            apiKey: Keychain.secret(for: "aiApiKey") ?? "",
+            apiKey: key,
             model: p.aiModel)
         let coord = AITaskCoordinator(
             model: client,
@@ -532,22 +540,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ?? coordinator.aiTarget(for: host.hostKey) else { return }
         let context = AIContext(request: text, target: target,
                                 visibleOutput: host.aiTail.snapshot, hostFacts: "")
-        let id = aiCoordinator().start(context: context)
+        let coord = aiCoordinator()
+        let id = coord.start(context: context)
         activeAIPane[id] = host.hostKey
+        aiTaskOwner[id] = coord
     }
 
     private func wireAICard(_ host: PaneHost, task: AITask) {
         guard let card = host.currentAITaskCard else { return }
         let id = task.id
-        card.onConfirm = { [weak self] in self?.aiCoordinator().confirm(taskId: id) }
-        card.onEdit = { [weak self] proposal in
-            self?.aiCoordinator().edit(taskId: id, to: proposal)
+        // Route to the coordinator that owns the task: a settings change
+        // mid-task builds a new coordinator that doesn't know this id.
+        let owner = aiTaskOwner[id] ?? aiCoordinator()
+        card.onConfirm = { [weak owner] in owner?.confirm(taskId: id) }
+        card.onEdit = { [weak owner] proposal in
+            owner?.edit(taskId: id, to: proposal)
         }
-        card.onCancel = { [weak self] in
-            self?.aiCoordinator().cancel(taskId: id)
+        card.onCancel = { [weak owner] in
+            owner?.cancel(taskId: id)
             host.hideAITask()
         }
-        card.onContinue = { [weak self] in self?.aiCoordinator().continueBudget(taskId: id) }
+        card.onContinue = { [weak owner] in owner?.continueBudget(taskId: id) }
         card.onClose = { host.hideAITask() }
         // Spec: fill never auto-runs — command + trailing space, the
         // user presses Enter themselves.
