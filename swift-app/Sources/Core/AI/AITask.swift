@@ -63,6 +63,11 @@ struct AITask {
         return true
     }
 
+    /// Explicit user continue: +N rounds — never a silent reset.
+    mutating func grantBudget(_ extra: Int) {
+        budgetRemaining += extra
+    }
+
     mutating func setPending(_ proposal: AIProposal?) {
         pendingProposal = proposal
     }

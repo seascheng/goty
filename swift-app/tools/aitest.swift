@@ -137,6 +137,185 @@ import Foundation
             "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"}}]}".utf8))
         check(plain?.text == "done" && plain?.toolCalls.isEmpty == true, "plain reply parsed")
 
+        print("— AITaskCoordinator loop —")
+        final class FakeModel: ModelClient {
+            var script: [[ToolCall]] = []
+            var finalText = "done"
+            var calls = 0
+            func complete(messages: [ChatMessage], tools: [ToolSpec],
+                          completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
+                let idx = calls; calls += 1
+                if idx < script.count {
+                    completion(.success(ModelReply(text: nil, toolCalls: script[idx])))
+                } else {
+                    completion(.success(ModelReply(text: finalText, toolCalls: [])))
+                }
+            }
+        }
+        final class FakeExec: CommandExecutor {
+            var ran: [String] = []
+            var wrote: [String] = []
+            func run(_ c: String, cwd: String?, timeout: TimeInterval,
+                     completion: @escaping (Result<ExecResult, ExecFailure>) -> Void) {
+                ran.append(c)
+                completion(.success(ExecResult(exitCode: 0, stdout: "out:\(c)", stderr: "")))
+            }
+            func read(path: String, completion: @escaping (Result<String, ExecFailure>) -> Void) {
+                completion(.success("file-content"))
+            }
+            func write(path: String, content: String,
+                       completion: @escaping (Result<ExecResult, ExecFailure>) -> Void) {
+                wrote.append(path)
+                completion(.success(ExecResult(exitCode: 0, stdout: "", stderr: "")))
+            }
+            func edit(path: String, oldText: String, newText: String,
+                      completion: @escaping (Result<ExecResult, ExecFailure>) -> Void) {
+                completion(.success(ExecResult(exitCode: 0, stdout: "", stderr: "")))
+            }
+        }
+        // onUpdate fires on the MAIN queue — waits must spin the runloop
+        // to service it. Every wait is time-bounded; timeout = failure.
+        func waitSem(_ s: DispatchSemaphore, timeout: TimeInterval = 10) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if s.wait(timeout: .now()) == .success { return true }
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+            return s.wait(timeout: .now()) == .success
+        }
+
+        // probe → proposal → confirm → verify → completed
+        do {
+            let m = FakeModel()
+            let e = FakeExec()
+            let awaitSem = DispatchSemaphore(value: 0)
+            let doneSem = DispatchSemaphore(value: 0)
+            var last: AITask?
+            let coord = AITaskCoordinator(model: m, executorFor: { _ in e })
+            coord.onUpdate = { t in
+                last = t
+                if t.phase == .awaitingConfirmation { awaitSem.signal() }
+                if case .completed = t.phase { doneSem.signal() }
+                if case .failed = t.phase { doneSem.signal() }
+            }
+            m.script = [
+                [ToolCall(id: "1", name: "bash", argumentsJSON: "{\"command\":\"ls\"}")],
+                [ToolCall(id: "2", name: "bash", argumentsJSON: "{\"command\":\"mv a b\"}")],
+                [ToolCall(id: "3", name: "bash", argumentsJSON: "{\"command\":\"ls\"}")],
+            ]
+            let tid = coord.start(context: AIContext(request: "rename", target: target,
+                                                      visibleOutput: "", hostFacts: ""))
+            check(waitSem(awaitSem), "reaches awaitingConfirmation")
+            check(last?.pendingProposal?.op == .bash("mv a b"), "mutation became proposal")
+            check(e.ran.contains("ls"), "allowlisted probe ran without confirm")
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.3))
+            check(!e.ran.contains("mv a b"), "no execution before confirm")
+            coord.confirm(taskId: tid)
+            check(waitSem(doneSem), "completes after confirm")
+            check(e.ran.contains("mv a b"), "confirmed proposal executed")
+            check(last?.rounds.count == 3, "post-exec verification round ran")
+            if case .completed(let summary)? = last?.phase {
+                check(summary == "done", "completed summary is model text")
+            } else { check(false, "completed summary is model text") }
+        }
+
+        // edit invalidates: proposal replaced, second confirm still required
+        do {
+            let m = FakeModel()
+            let e = FakeExec()
+            let awaitSem = DispatchSemaphore(value: 0)
+            let doneSem = DispatchSemaphore(value: 0)
+            var last: AITask?
+            let coord = AITaskCoordinator(model: m, executorFor: { _ in e })
+            coord.onUpdate = { t in
+                last = t
+                if t.phase == .awaitingConfirmation { awaitSem.signal() }
+                if case .completed = t.phase { doneSem.signal() }
+                if case .failed = t.phase { doneSem.signal() }
+            }
+            m.script = [
+                [ToolCall(id: "1", name: "bash", argumentsJSON: "{\"command\":\"mv a b\"}")],
+            ]
+            let tid = coord.start(context: AIContext(request: "rename", target: target,
+                                                      visibleOutput: "", hostFacts: ""))
+            check(waitSem(awaitSem), "second task reaches awaitingConfirmation")
+            coord.edit(taskId: tid, to: AIProposal(op: .bash("mv a c"), explanation: "",
+                                                  risk: .mutating, rollbackHint: nil))
+            check(waitSem(awaitSem), "edit re-emits awaitingConfirmation")
+            check(last?.pendingProposal?.op == .bash("mv a c"), "edit replaces pending proposal")
+            check(last?.phase == .awaitingConfirmation, "phase back to awaitingConfirmation")
+            check(!e.ran.contains("mv a b") && !e.ran.contains("mv a c"),
+                  "edited proposal not executed yet")
+            coord.confirm(taskId: tid)
+            check(waitSem(doneSem), "second confirm completes")
+            check(e.ran.contains("mv a c") && !e.ran.contains("mv a b"),
+                  "edited command is what executes")
+        }
+
+        // budget: 30 scripted probes exhaust 25, continueBudget resumes
+        do {
+            let m = FakeModel()
+            let e = FakeExec()
+            let budgetSem = DispatchSemaphore(value: 0)
+            let doneSem = DispatchSemaphore(value: 0)
+            var last: AITask?
+            let coord = AITaskCoordinator(model: m, executorFor: { _ in e })
+            coord.onUpdate = { t in
+                last = t
+                if case .budgetExhausted = t.phase { budgetSem.signal() }
+                if case .completed = t.phase { doneSem.signal() }
+                if case .failed = t.phase { doneSem.signal() }
+            }
+            m.script = (0..<30).map {
+                [ToolCall(id: "c\($0)", name: "bash", argumentsJSON: "{\"command\":\"ls\"}")]
+            }
+            let tid = coord.start(context: AIContext(request: "scan", target: target,
+                                                      visibleOutput: "", hostFacts: ""))
+            check(waitSem(budgetSem), "budget exhausts after 25 rounds")
+            check(last?.rounds.count == 25 && last?.budgetRemaining == 0,
+                  "25 rounds spent, budget zero")
+            if case .budgetExhausted? = last?.phase {
+                check(true, "budgetExhausted phase reached")
+            } else { check(false, "budgetExhausted phase reached") }
+            coord.continueBudget(taskId: tid)
+            check(waitSem(doneSem), "continueBudget resumes to completion")
+            // The tool call that hits the exhausted budget is consumed by
+            // the gate (plan Task 7 step 4: spendRound-fail → return, the
+            // request is not re-issued), so 30 scripted calls → 29 rounds.
+            check(last?.rounds.count == 29, "remaining rounds run after continue")
+        }
+
+        // write tool: proposal awaits confirmation before touching disk
+        do {
+            let m = FakeModel()
+            let e = FakeExec()
+            let awaitSem = DispatchSemaphore(value: 0)
+            let doneSem = DispatchSemaphore(value: 0)
+            var last: AITask?
+            let coord = AITaskCoordinator(model: m, executorFor: { _ in e })
+            coord.onUpdate = { t in
+                last = t
+                if t.phase == .awaitingConfirmation { awaitSem.signal() }
+                if case .completed = t.phase { doneSem.signal() }
+                if case .failed = t.phase { doneSem.signal() }
+            }
+            m.script = [
+                [ToolCall(id: "1", name: "write",
+                          argumentsJSON: "{\"path\":\"/tmp/w\",\"content\":\"x\"}")],
+            ]
+            let tid = coord.start(context: AIContext(request: "save", target: target,
+                                                      visibleOutput: "", hostFacts: ""))
+            check(waitSem(awaitSem), "write proposal awaits confirmation")
+            check(last?.pendingProposal == AIProposal(op: .write(path: "/tmp/w", content: "x"),
+                                                     explanation: "", risk: .mutating,
+                                                     rollbackHint: nil),
+                  "write tool becomes .write proposal")
+            check(e.wrote.isEmpty, "write not executed before confirm")
+            coord.confirm(taskId: tid)
+            check(waitSem(doneSem), "confirmed write completes")
+            check(e.wrote == ["/tmp/w"], "write executed after confirm")
+        }
+
         exit(failures == 0 ? 0 : 1)
     }
 }
