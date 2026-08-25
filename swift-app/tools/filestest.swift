@@ -33,8 +33,10 @@ enum FilesTest {
         // The repo's own tree (needs a real Sources/ directory). Derived
         // from #filePath so the suite follows the project when it moves —
         // the goty → goty rename broke the hardcoded absolute path.
-        let root = ((#filePath as NSString).deletingLastPathComponent
-            as NSString).deletingLastPathComponent   // tools/ → swift-app/
+        let root = URL(fileURLWithPath: #filePath)          // as-spelled (relative
+            .standardizedFileURL.deletingLastPathComponent() // under run-tests.sh) →
+            .deletingLastPathComponent().path                // absolute first
+        // tools/ → swift-app/
         files.setDirectory(root, source: LocalFileSource())
         for _ in 0..<20 {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
