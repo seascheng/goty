@@ -49,7 +49,7 @@ Core code remains AppKit-free and owns:
 - `AITask` and its lifecycle.
 - `AIContext` and immutable `ExecutionTarget` snapshots.
 - `AIProposal` with command, explanation, affected paths, risk, and rollback hint.
-- Model/provider orchestration and structured tool calls.
+- A bounded ReAct-loop agent runtime: within one task the model iteratively reasons, calls tools, and observes results until the task completes. Not a single-turn request, and not a persistent session — that is the core distinction from Claude Code / pi.
 - Command classification and the read-only policy.
 - Local and SSH execution adapters.
 
@@ -108,15 +108,31 @@ The executor, not the model, enforces policy. A confirmation is valid only for t
 
 ## Task lifecycle
 
+One `@ai` request equals one task equals one bounded ReAct loop:
+
 ```text
-captured → understanding → probing → proposalReady
-                         → awaitingConfirmation
-                            ├─ cancelled
-                            ├─ edited → proposalReady
-                            └─ confirmed → executing
-                                             ├─ completed
-                                             └─ failed
+captured → thinking ⇄ probing      ← ReAct loop: reason → read-only tool call → observe
+              │ bounded by a round budget
+              ▼
+         proposalReady
+              ▼
+     awaitingConfirmation
+        ├─ cancelled
+        ├─ edited → proposalReady
+        └─ confirmed → executing
+                          ├─ thinking ⇄ probing   ← post-execution verification,
+                          │                          same allowlist, same rules
+                          ├─ completed
+                          └─ failed
 ```
+
+Loop rules:
+
+- All probing inside the loop goes through the same read-only allowlist; anything outside it becomes a proposal, in every round.
+- Post-execution verification probes belong to the same task loop and follow the same rules.
+- When the round budget (default 25 tool calls) is exhausted, the agent stops and reports progress, offering `Continue`, `Propose with what we have`, or `Cancel`. The budget never silently resets.
+- When the task ends, the loop state is discarded. The next `@ai` starts fresh from terminal context — no conversation memory carries over between tasks.
+- Each round's reasoning, tool calls, and outputs render in the AI block.
 
 Tasks are independent, may run in parallel, and never consume the shell's stdin. Probe output and execution output are summarized in the AI block, with raw stdout/stderr available as appropriate. Closing a terminal must give each active task an explicit cancellation/continuation result; it must not silently retarget or orphan the task.
 
