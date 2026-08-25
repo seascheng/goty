@@ -49,6 +49,38 @@ import Foundation
         check(ReadOnlyPolicy.classify("pwd") == .readOnly, "pwd readonly")
         check(!ReadOnlyPolicy.autoExecutable(""), "empty not auto")
 
+        print("— Executors —")
+        let sem = DispatchSemaphore(value: 0)
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("goty-ai-\(UUID().uuidString)").path
+        try? FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        let local = LocalExecutor()
+        local.run("echo hello", cwd: tmp, timeout: 10) { r in
+            if case .success(let e) = r, e.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "hello" {
+                check(true, "local echo runs")
+            } else { check(false, "local echo runs") }
+            sem.signal()
+        }
+        sem.wait()
+        local.write(path: tmp + "/f.txt", content: "alpha beta") { r in
+            check((try? String(contentsOfFile: tmp + "/f.txt", encoding: .utf8)) == "alpha beta", "local write")
+            sem.signal()
+        }
+        sem.wait()
+        local.edit(path: tmp + "/f.txt", oldText: "beta", newText: "gamma") { r in
+            check((try? String(contentsOfFile: tmp + "/f.txt", encoding: .utf8)) == "alpha gamma", "local edit")
+            sem.signal()
+        }
+        sem.wait()
+        local.edit(path: tmp + "/f.txt", oldText: "nope", newText: "x") { r in
+            if case .failure(.editAnchorNotFound) = r { check(true, "edit missing anchor fails") }
+            else { check(false, "edit missing anchor fails") }
+            sem.signal()
+        }
+        sem.wait()
+        // SSH command construction is pure; no live ssh in tests.
+        check(SSHExecutor(host: "example.invalid") != nil, "ssh executor type exists")
+
         exit(failures == 0 ? 0 : 1)
     }
 }
