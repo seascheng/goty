@@ -154,4 +154,6 @@ The first implementation is successful when it demonstrates:
 - Safety behavior is fail-closed for commands outside the read-only allowlist, and confirmation invalidation is explicit.
 
 
+## Future work
+
 After this core loop is stable, add provider adapters for one-shot native agents such as `@pi` and `@claude`. They should default to ephemeral task execution and only create persistent sessions through an explicit user action. A remote `goty-agent` may later replace or augment `SSHTarget` if long-running jobs, structured file operations, progress streaming, or SSH shell quoting make direct exec insufficient.
