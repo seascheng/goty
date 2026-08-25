@@ -27,6 +27,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var sshWindowBacking: SSHConfigWindowController?
     private var settingsWindowBacking: SettingsWindowController?
 
+    // AI tasks (@ai): the coordinator is rebuilt when the provider
+    // config changes (token compare per start — no notification
+    // plumbing); task id → pane routes coordinator updates back.
+    private var aiCoordinatorBox: (token: String, coordinator: AITaskCoordinator)?
+    private var activeAIPane: [UUID: HostKey] = [:]
+
     func applicationWillTerminate(_ notification: Notification) {
         // Detach GUI clients only. goty-sessiond owns the PTYs and must
         // outlive this process so sessions survive app restarts.
@@ -477,8 +483,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         host.onAgentState = { [weak self] host, state in
             self?.coordinator.agentStateUpdated(wsId: ws.id, paneId: host.paneId, state: state)
         }
+        host.coordinatorFeed = { [weak self] in
+            self?.coordinator.aiTarget(for: key)
+        }
+        host.onAITask = { [weak self] host, text in
+            self?.startAITask(host: host, text: text)
+        }
+        host.refreshAITrigger()
         hostPool[key] = host
         return host
+    }
+
+    // MARK: AI tasks (@ai)
+
+    /// The live coordinator, rebuilt when the AI provider settings
+    /// (base URL / model) change. Running tasks live in the coordinator
+    /// they started with; both stay wired to onUpdate.
+    private func aiCoordinator() -> AITaskCoordinator {
+        let p = AppPreferences.shared
+        let token = p.aiBaseUrl + "\n" + p.aiModel
+        if let box = aiCoordinatorBox, box.token == token { return box.coordinator }
+        let client = OpenAICompatibleClient(
+            baseUrl: p.aiBaseUrl,
+            apiKey: Keychain.secret(for: "aiApiKey") ?? "",
+            model: p.aiModel)
+        let coord = AITaskCoordinator(
+            model: client,
+            executorFor: { target in
+                switch target.transport {
+                case .local: return LocalExecutor()
+                case .ssh(let host): return SSHExecutor(host: host)
+                }
+            })
+        coord.onUpdate = { [weak self] task in
+            DispatchQueue.main.async {
+                guard let self, let key = self.activeAIPane[task.id] else { return }
+                let host = self.hostPool[key]
+                host?.showAITask(task)
+                if let host { self.wireAICard(host, task: task) }
+            }
+        }
+        aiCoordinatorBox = (token, coord)
+        return coord
+    }
+
+    private func startAITask(host: PaneHost, text: String) {
+        guard let target = host.coordinatorFeed?()
+            ?? coordinator.aiTarget(for: host.hostKey) else { return }
+        let context = AIContext(request: text, target: target,
+                                visibleOutput: host.aiTail.snapshot, hostFacts: "")
+        let id = aiCoordinator().start(context: context)
+        activeAIPane[id] = host.hostKey
+    }
+
+    private func wireAICard(_ host: PaneHost, task: AITask) {
+        guard let card = host.currentAITaskCard else { return }
+        let id = task.id
+        card.onConfirm = { [weak self] in self?.aiCoordinator().confirm(taskId: id) }
+        card.onEdit = { [weak self] proposal in
+            self?.aiCoordinator().edit(taskId: id, to: proposal)
+        }
+        card.onCancel = { [weak self] in
+            self?.aiCoordinator().cancel(taskId: id)
+            host.hideAITask()
+        }
+        card.onContinue = { [weak self] in self?.aiCoordinator().continueBudget(taskId: id) }
+        card.onClose = { host.hideAITask() }
+        // Spec: fill never auto-runs — command + trailing space, the
+        // user presses Enter themselves.
+        card.onFill = { [weak host] command in host?.sendText(command + " ") }
     }
 
     /// Local panes: the shared daemon, the user's login shell, the user's
@@ -859,6 +932,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let shellMenu = NSMenu()
         shellMenu.addItem(withTitle: "New Space", action: #selector(menuNewTab), keyEquivalent: "t")
         shellMenu.addItem(withTitle: "New Claude Code Space", action: #selector(menuNewAgentTab), keyEquivalent: "n")
+        let askAI = NSMenuItem(title: "Ask AI…", action: #selector(menuAskAI), keyEquivalent: "a")
+        askAI.keyEquivalentModifierMask = [.command, .shift]
+        askAI.target = self
+        shellMenu.addItem(askAI)
         let agentMenu = NSMenu()
         for (command, spec) in AgentCatalog.pickerOrder {
             let item = NSMenuItem(title: spec.label, action: #selector(menuNewAgentTabFrom(_:)),
@@ -912,6 +989,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func menuCloseTab() { coordinator.closeTab() }
     @objc private func menuSplitRight() { coordinator.splitPane(vertical: false) }
     @objc private func menuSplitDown() { coordinator.splitPane(vertical: true) }
+
+    /// ⌘⇧A: the focused pane's AI card in request-input mode. Falls back
+    /// to the focused tab's active pane when the host pool holds no hit.
+    @objc private func menuAskAI() {
+        guard let store = coordinator.store, let ws = store.focused,
+              let pane = coordinator.activePane(of: ws) else { return }
+        hostPool[HostKey(workspace: ws.id, pane: pane.id)]?.openAIInputMode()
+    }
 
     /// App-level config change (Settings writes, or a reload from the
     /// config page): the resolved config is the chrome's source of

@@ -287,6 +287,20 @@ final class WorkspaceCoordinator {
         delegate?.coordinatorDidChange(.cwd)
     }
 
+    /// AI execution target for one pane: local vs ssh follows the
+    /// workspace, cwd is the pane's live cwd. Shell stays nil — host
+    /// facts come from the AI coordinator's own probe, never a guess.
+    func aiTarget(for key: HostKey) -> ExecutionTarget? {
+        guard let store,
+              let ws = store.workspaces.first(where: { $0.id == key.workspace }),
+              let pane = ws.tabs.flatMap({ $0.panes })
+                  .first(where: { $0.id == key.pane }) else { return nil }
+        return ExecutionTarget(
+            workspaceId: ws.id, paneId: pane.id, displayName: ws.displayName,
+            transport: ws.sshHost.map { .ssh(host: $0) } ?? .local,
+            cwd: pane.cwd, shell: nil)
+    }
+
     func activePane(of workspace: WorkspaceState) -> PaneState? {
         if let id = runtime[workspace.id]?.activePaneId {
             for tab in workspace.tabs {

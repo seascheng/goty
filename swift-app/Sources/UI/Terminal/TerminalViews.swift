@@ -96,6 +96,21 @@ final class PaneHost: NSView {
     var onConnected: ((PaneHost) -> Void)?
     var onDisconnected: ((PaneHost) -> Void)?
 
+    // AI capture (@ai). The trigger sits at the PTY chokepoint inside
+    // onWrite; the tail keeps the last output as task context. Both are
+    // Core types owned here, fed from the byte paths below.
+    let aiTrigger = LineTrigger()
+    let aiTail = OutputTail()
+    /// A trigger fires this with the request text (after the host has
+    /// cleared the shell's readline copy of the line).
+    var onAITask: ((PaneHost, String) -> Void)?
+    /// Live AI target provider (AppDelegate): nil = AI unavailable for
+    /// this pane, and the trigger stays unarmed (fail-open — an @ai line
+    /// then reaches the shell like any other text).
+    var coordinatorFeed: (() -> ExecutionTarget?)?
+    private var aiCard: AITaskCard?
+    private var lastForegroundCommand: String?
+
     init(app: ghostty_app_t, paneId: String, hostKey: HostKey,
          cwd: String? = nil, command: String? = nil,
          daemonTarget: @escaping () -> PaneDaemonTarget?) {
@@ -107,6 +122,8 @@ final class PaneHost: NSView {
         self.daemonTarget = daemonTarget
         agentCommand = AgentDetect.hasRules(for: command) ? command : nil
         super.init(frame: .zero)
+        aiTrigger.onTrigger = { [weak self] text in self?.handleAITrigger(text) }
+        updateAITrigger(nil)
         agentStatus.onPublish = { [weak self] state, _ in
             guard let self else { return }
             self.onAgentState?(self, state)
@@ -156,7 +173,12 @@ final class PaneHost: NSView {
         // a dead input loop.
         config.ioMode = GHOSTTY_SURFACE_IO_MANUAL
         config.onWrite = { [weak self] bytes in
-            self?.session?.sendInput(bytes)
+            guard let self else { return }
+            // The AI trigger gets first refusal on every keystroke: a
+            // captured @ai enter is swallowed here, never reaching the
+            // PTY. Everything else flows on unchanged.
+            let forward = self.aiTrigger.filter(bytes)
+            if !forward.isEmpty { self.session?.sendInput(forward) }
         }
         let view = Ghostty.SurfaceView(gapp, baseConfig: config)
         surfaceView = view
@@ -336,6 +358,7 @@ final class PaneHost: NSView {
     /// streamQueue only. `agentContentSeq` is also read by the main-thread
     /// detect tick — sharedStateLock covers that pair.
     private func processOutput(_ data: Data, surface: ghostty_surface_t, present: Bool) {
+        aiTail.append(Array(data))
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress, !raw.isEmpty else { return }
             sharedStateLock.lock()
@@ -374,6 +397,8 @@ final class PaneHost: NSView {
     /// fresh grace window and a clean OSC slate, exactly like goty's
     /// agent-change handling.
     func updateAgentCommand(_ fg: String?) {
+        lastForegroundCommand = fg
+        updateAITrigger(fg)
         let next: String?
         if let fg, AgentCatalog.spec(for: fg) != nil {
             next = fg
@@ -435,6 +460,82 @@ final class PaneHost: NSView {
 
     func sendText(_ text: String) {
         session?.sendInput(Array(text.utf8))
+    }
+
+    // MARK: AI capture (@ai)
+
+    /// The trigger fired on a complete @ai line. The swallowed enter
+    /// left the typed characters in the shell's readline buffer — clear
+    /// the line (ctrl-u) so nothing partial executes, then hand the
+    /// request up. Runs on main (the ghostty app tick thread).
+    private func handleAITrigger(_ text: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.sendText("\u{15}")
+            self.onAITask?(self, text)
+        }
+    }
+
+    /// @ai arms only at a shell prompt with the model provider
+    /// configured and a live target — otherwise typing passes through.
+    func refreshAITrigger() { updateAITrigger(lastForegroundCommand) }
+    private func updateAITrigger(_ fg: String?) {
+        aiTrigger.armed = Self.isShellPrompt(fg)
+            && OpenAICompatibleClient.isConfigured
+            && coordinatorFeed?() != nil
+    }
+
+    /// True for nil (spawned shell) and the shell basenames — matches
+    /// what sessiond's foreground report spells at a plain prompt.
+    static func isShellPrompt(_ command: String?) -> Bool {
+        guard let command, !command.isEmpty else { return true }
+        var base = (command as NSString).lastPathComponent
+        if base.hasPrefix("-") { base = String(base.dropFirst()) }
+        return ["zsh", "bash", "sh", "fish", "dash", "ash"].contains(base)
+    }
+
+    // MARK: AI task card (bottom-anchored overlay)
+
+    /// The card currently presented over this pane (AppDelegate wires
+    /// its action callbacks on every coordinator update).
+    var currentAITaskCard: AITaskCard? { aiCard }
+
+    func showAITask(_ task: AITask) {
+        ensureAICard().render(task: task, target: task.context.target)
+    }
+
+    func hideAITask() {
+        aiCard?.removeFromSuperview()
+        aiCard = nil
+    }
+
+    /// ⌘⇧A: the card in request-input mode; submitting follows the same
+    /// path as a captured @ai line.
+    func openAIInputMode() {
+        ensureAICard().enterInputMode(target: coordinatorFeed?())
+    }
+
+    private func ensureAICard() -> AITaskCard {
+        if let aiCard { return aiCard }
+        let card = AITaskCard()
+        card.translatesAutoresizingMaskIntoConstraints = false
+        // Added last → composites above the scroll view; height is
+        // content-driven, capped at 40% of the pane.
+        addSubview(card)
+        NSLayoutConstraint.activate([
+            card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            card.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            card.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            card.heightAnchor.constraint(lessThanOrEqualTo: heightAnchor,
+                                         multiplier: 0.4),
+        ])
+        card.onSubmit = { [weak self] text in
+            guard let self else { return }
+            self.hideAITask()
+            self.onAITask?(self, text)
+        }
+        aiCard = card
+        return card
     }
 
     func revealContent() {
