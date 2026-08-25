@@ -79,7 +79,36 @@ import Foundation
         }
         sem.wait()
         // SSH command construction is pure; no live ssh in tests.
-        check(SSHExecutor(host: "example.invalid") != nil, "ssh executor type exists")
+        check(SSHExecutor(host: "example.invalid") is CommandExecutor, "ssh executor type exists")
+
+        print("— LineTrigger —")
+        var fired: [String] = []
+        let lt = LineTrigger()
+        lt.onTrigger = { fired.append($0) }
+        func type(_ s: String) { _ = lt.filter(Array(s.utf8)) }
+        lt.armed = true
+        type("echo \"@ai x\"\r")
+        check(fired.isEmpty, "mid-line @ai not triggered")
+        type("echo hi\r")
+        type("@ai rename files\r")
+        check(fired == ["rename files"], "line-leading @ai triggers, enter swallowed")
+        _ = lt.filter([0x15])                       // ctrl-u
+        lt.armed = false
+        type("@ai nope\r")
+        check(fired.count == 1, "unarmed passes through")
+        lt.armed = true
+        type("@ai fix nam")                         // backspace mid-word
+        _ = lt.filter([0x7F])
+        type("me\r")
+        check(fired.last == "fix name", "backspace tracked")
+        type("@ai a\u{7F}\u{7F}\u{7F}x\r")
+        check(fired.last == "x", "backspace at line start clamps")
+        type("@ai ab")                              // ctrl-c aborts the line
+        _ = lt.filter([0x03])
+        type("plain\r")
+        check(fired.last == "x", "ctrl-c resets accumulator")
+        type("@ai  spaced  \r")
+        check(fired.last == "spaced", "request trimmed")
 
         exit(failures == 0 ? 0 : 1)
     }
