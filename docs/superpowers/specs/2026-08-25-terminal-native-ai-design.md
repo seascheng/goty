@@ -48,7 +48,7 @@ Core code remains AppKit-free and owns:
 
 - `AITask` and its lifecycle.
 - `AIContext` and immutable `ExecutionTarget` snapshots.
-- `AIProposal` with command, explanation, affected paths, risk, and rollback hint.
+- `AIProposal` with operation (bash command / write / edit), explanation, affected paths, risk, and rollback hint.
 - A bounded ReAct-loop agent runtime: within one task the model iteratively reasons, calls tools, and observes results until the task completes. Not a single-turn request, and not a persistent session — that is the core distinction from Claude Code / pi.
 - Command classification and the read-only policy.
 - Local and SSH execution adapters.
@@ -96,15 +96,24 @@ The target snapshot includes display identity and execution facts (`host`, `user
 
 ### Tools and execution
 
-The first version uses a constrained command-oriented tool rather than a broad remote agent protocol:
+The agent's tool surface follows pi's built-in four-tool model:
 
 ```text
-run(command, mode)
+read(path, [offset, limit])    — read file content
+write(path, content)           — create or overwrite a file
+edit(path, oldText, newText)   — exact-match text replacement
+bash(command, [cwd, timeout])  — execute a shell command
 ```
 
-`readOnly` calls may run automatically only when the command matches the explicit safe allowlist. A command outside that allowlist always becomes a proposal, regardless of the model's claimed mode. Mutating work is represented as an `AIProposal`; only the exact confirmed proposal may be passed to the executor.
+Permission mapping is fixed by the executor, not chosen by the model:
 
-The executor, not the model, enforces policy. A confirmation is valid only for the complete tuple of target, command, arguments, and cwd. Any edit or target change invalidates it. The first version does not promise transactional rollback; rollback hints are informational only.
+- `read` runs automatically (bounded by size/line caps).
+- `bash` runs automatically only when the command matches the explicit read-only allowlist; anything else becomes a proposal, regardless of the model's claims.
+- `write` and `edit` are always mutations: they produce a proposal whose confirmation preview shows the full file content (write) or a unified diff (edit).
+
+All four tools execute against the task's `ExecutionTarget`; local vs SSH is resolved by the executor (write/edit over SSH use SFTP or ssh-exec heredocs — an implementation detail invisible to the agent). Mutating work is represented as an `AIProposal`; only the exact confirmed proposal may be passed to the executor.
+
+A confirmation is valid only for the complete tuple of target, operation, and payload (command + arguments + cwd, or path + content/diff). Any change invalidates it. The first version does not promise transactional rollback; rollback hints are informational only.
 
 ## Task lifecycle
 
