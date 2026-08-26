@@ -341,3 +341,36 @@ final class ServerStatusView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
 }
+
+// MARK: - Standard UI transition
+
+extension Chrome {
+    /// The one animation vocabulary for chrome state changes: 0.3s
+    /// (apple-design-motion: response 0.3–0.4, no overshoot on chrome),
+    /// implicit — retargets from the live mid-flight value stay smooth
+    /// (interruptible) — and instant under Reduce Motion. Frame
+    /// animation needs the relayout INSIDE the group: pass the root of
+    /// the subtree whose frames change (regions must be layer-backed).
+    /// ponytail: Reduce Motion is read per call, not observed via
+    /// NSWorkspace.accessibilityDisplayOptionsDidChange — subscribe if
+    /// a stale read ever matters.
+    static func animate(layout root: NSView? = nil,
+                        _ changes: @escaping () -> Void,
+                        completion: (() -> Void)? = nil) {
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            changes()
+            root?.needsLayout = true
+            root?.layoutSubtreeIfNeeded()
+            completion?()
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.3
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            ctx.allowsImplicitAnimation = true
+            changes()
+            root?.needsLayout = true
+            root?.layoutSubtreeIfNeeded()
+        }, completionHandler: completion)
+    }
+}

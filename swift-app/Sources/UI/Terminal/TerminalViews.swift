@@ -2,6 +2,7 @@
 import AppKit
 import Combine
 import GhosttyKit
+import QuartzCore
 
 // MARK: - Pane host
 
@@ -554,8 +555,15 @@ final class PaneHost: NSView {
     }
 
     func hideAITask() {
-        aiCard?.removeFromSuperview()
+        guard let card = aiCard else { return }
         aiCard = nil
+        // Symmetric exit: the same slide+fade the card entered with
+        // (apple-design-motion §7); teardown after it lands. Transform
+        // only — never touches layout, so constraints stay clean.
+        Chrome.animate({
+            card.alphaValue = 0
+            card.layer?.transform = CATransform3DMakeTranslation(0, -10, 0)
+        }, completion: { card.removeFromSuperview() })
     }
 
     /// Close this pane's card when it's the ⌘⇧A ask: the ask is
@@ -592,6 +600,15 @@ final class PaneHost: NSView {
             self.onAITask?(self, text)
         }
         aiCard = card
+        // Enter: rise from the bottom edge — the same path the exit
+        // takes. Guarded transform: layer-less (never-rendered) cards
+        // degrade to a plain fade, still symmetric with their exit.
+        card.alphaValue = 0
+        card.layer?.transform = CATransform3DMakeTranslation(0, -10, 0)
+        Chrome.animate {
+            card.alphaValue = 1
+            card.layer?.transform = CATransform3DIdentity
+        }
         return card
     }
 

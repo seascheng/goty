@@ -170,6 +170,9 @@ final class AppWindowController: NSObject {
         let rightPanel = RightPanelView()
         rightPanel.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(rightPanel)
+        // Implicit frame animation (Chrome.animate) needs the resizing
+        // regions layer-backed.
+        for region in [sidebar, terminalArea, rightPanel] { region.wantsLayer = true }
         self.sidebar = sidebar
         self.terminalArea = terminalArea
         self.rightPanel = rightPanel
@@ -326,6 +329,10 @@ final class AppWindowController: NSObject {
     func toggleSidebar() {
         prefs.sidebarCollapsed.toggle()
         let collapsed = prefs.sidebarCollapsed
+        // Instant width, like every major terminal (Ghostty/iTerm collapse
+        // is a hard cut): constraint-driven AppKit width animation proved
+        // unreliable (implicit latching and animator() both defer the model
+        // value past the layout pass).
         sidebarWidth?.constant = collapsed ? SidebarView.railWidth : prefs.sidebarWidth
         sidebar.setCollapsed(collapsed)
         terminalArea.setTabStripVisible(collapsed)
@@ -333,15 +340,20 @@ final class AppWindowController: NSObject {
 
     func toggleRightPanel() {
         prefs.rightPanelVisible.toggle()
-        rightPanel.setCollapsed(!prefs.rightPanelVisible)
+        let visible = prefs.rightPanelVisible
+        rightPanel.setCollapsed(!visible)
     }
 
     /// The titlebar's centered title (AppDelegate owns the text).
     func setChromeTitle(_ text: String) { titlebar.setTitle(text) }
 
-    /// Sidebar drag-resize passthrough (clamped, persisted).
+    /// Sidebar drag-resize passthrough (clamped, persisted). Min 225 per
+    /// the source-list guideline (Aguzman); the 460 max exceeds the
+    /// 350–400 recommendation deliberately — long SSH host names.
+    /// ponytail: tighten to 400 if row-truncation reports come in.
+    /// Drag stays unanimated: live 1:1 tracking beats any curve.
     func setSidebarWidth(_ width: Double) {
-        let clamped = min(max(width, 180), 460)
+        let clamped = min(max(width, 225), 460)
         sidebarWidth?.constant = clamped
         prefs.sidebarWidth = clamped
     }
