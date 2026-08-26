@@ -69,10 +69,10 @@ func run() {
     print("— chrome theme contrast —")
     let aizen = ChromeTheme(background: NSColor(hex: "#f0f2f6")!,
                             foreground: NSColor(hex: "#4a4d66")!, accent: .gray)
-    check(ChromeTheme.contrastRatio(aizen.secondaryText, aizen.background) >= 2.85,
-          "light-theme secondaryText ≥≈3:1")
-    check(ChromeTheme.contrastRatio(aizen.tertiaryText, aizen.background) >= 2.05,
-          "light-theme tertiaryText ≥≈2.2:1")
+    check(ChromeTheme.contrastRatio(aizen.secondaryText, aizen.background) >= 4.4,
+          "light-theme secondaryText ≥≈4.5:1")
+    check(ChromeTheme.contrastRatio(aizen.tertiaryText, aizen.background) >= 3.4,
+          "light-theme tertiaryText ≥≈3.5:1")
     check(aizen.hoverFill != aizen.foreground,
           "light-theme hover is a wash, not the foreground (black-hover bug)")
     let pale = ChromeTheme(background: NSColor(hex: "#f0f2f6")!,

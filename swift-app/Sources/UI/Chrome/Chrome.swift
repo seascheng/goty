@@ -155,19 +155,22 @@ struct ChromeTheme {
         NSColor.black.withAlphaComponent(isDark ? 0.35 : 0.12)
     }
 
-    /// Muted text — a SOLID blend toward the foreground, never an
-    /// alpha: alpha text washes out over translucent surfaces. Starts
-    /// at the design step and only darkens/brightens FURTHER if the
-    /// theme's own fg/bg contrast is too weak to clear 3:1 there
-    /// (lift alone exits early on high-contrast themes — Arthur's
-    /// 12:1 pair satisfied 3:1 at a 0.25 blend: near-black).
+    /// Muted text — the theme's own foreground (the highest-contrast
+    /// color vs the background the theme defines), stepped back toward
+    /// the background for hierarchy but never below a readable floor:
+    /// 4.5:1 (WCAG AA for text — Apple's secondaryLabel lands there
+    /// too). Alpha is never used: it washes out over translucent
+    /// surfaces. On strong themes (Arthur 12:1) the 0.62 design step
+    /// already clears the floor and keeps its look; weak themes only
+    /// darken as far as needed.
     var secondaryText: NSColor {
-        lift(background, toward: foreground, ratio: 3.0, from: 0.62)
+        lift(background, toward: foreground, ratio: 4.5, from: 0.62)
     }
 
-    /// Quietest solid step (row counts, footnotes) — same floor rule.
+    /// Quietest solid step (row counts, footnotes) — same rule at
+    /// 3.5:1 (small but non-essential text).
     var tertiaryText: NSColor {
-        lift(background, toward: foreground, ratio: 2.2, from: 0.45)
+        lift(background, toward: foreground, ratio: 3.5, from: 0.45)
     }
 
     /// Hover fill: tty7's recipe — the surface lifted toward the foreground
