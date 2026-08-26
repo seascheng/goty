@@ -1116,7 +1116,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let cfg = note.userInfo?[Notification.Name.GhosttyConfigChangeKey]
                   as? Ghostty.Config
         else { return }
+        let old = Chrome.theme.background.usingColorSpace(.deviceRGB)
         Chrome.theme = .from(cfg)
+        let new = Chrome.theme.background.usingColorSpace(.deviceRGB)
+        if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
+            let name = ChromeTheme.configuredThemeName(cfg) ?? "nil"
+            FileHandle.standardError.write("THEME change old=\(old.map { String(format: "%.2f", $0.redComponent) } ?? "?") new=\(new.map { String(format: "%.2f", $0.redComponent) } ?? "?") theme=\(name)\n".data(using: .utf8)!)
+        }
         wc?.applyChromeTheme(cfg: cfg)
 
         // OUR chrome follows the terminal theme too (the tty7 rule): the

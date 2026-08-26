@@ -66,6 +66,26 @@ func run() {
         return (wc.sidebar.frame, wc.terminalArea.frame, wc.rightPanel.frame, content.bounds)
     }
 
+    print("— chrome theme contrast —")
+    let aizen = ChromeTheme(background: NSColor(hex: "#f0f2f6")!,
+                            foreground: NSColor(hex: "#4a4d66")!, accent: .gray)
+    check(ChromeTheme.contrastRatio(aizen.secondaryText, aizen.background) >= 2.85,
+          "light-theme secondaryText ≥≈3:1")
+    check(ChromeTheme.contrastRatio(aizen.tertiaryText, aizen.background) >= 2.05,
+          "light-theme tertiaryText ≥≈2.2:1")
+    check(aizen.hoverFill != aizen.foreground,
+          "light-theme hover is a wash, not the foreground (black-hover bug)")
+    let pale = ChromeTheme(background: NSColor(hex: "#f0f2f6")!,
+                           foreground: NSColor(hex: "#9fd8ac")!, accent: .gray)
+    check(ChromeTheme.contrastRatio(pale.legibleForeground(), pale.background) >= 4.4,
+          "pale foreground floored to ≥≈4.5:1")
+    let dark = ChromeTheme(background: NSColor(hex: "#1c1c1c")!,
+                           foreground: NSColor(hex: "#ddeedd")!, accent: .gray)
+    check(ChromeTheme.contrastRatio(dark.secondaryText, dark.background) >= 2.85,
+          "dark-theme secondaryText ≥≈3:1")
+    check(ChromeTheme.contrastRatio(dark.hoverFill, dark.background) >= 1.1,
+          "dark-theme hover lifted")
+
     print("— region map —")
     var f = frames()
     check(f.content.width > 1000 && f.content.height > 600, "content substantial")

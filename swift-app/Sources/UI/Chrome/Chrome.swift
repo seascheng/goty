@@ -9,7 +9,7 @@ import GhosttyKit
 /// sidebar/top bar/pane chrome match whatever theme the user runs.
 struct ChromeTheme {
     let background: NSColor
-    let foreground: NSColor
+    var foreground: NSColor
     let accent: NSColor
     /// background-opacity from the resolved config — every big chrome
     /// surface (sidebar, panels, dialogs, strips) paints at THIS alpha
@@ -42,6 +42,7 @@ struct ChromeTheme {
             _ = ghostty_config_get(handle, &v, "background-opacity", 18)
             t.backgroundOpacity = CGFloat(max(0.1, min(1, v)))
         }
+        t.foreground = t.legibleForeground()
         return t
     }
 
@@ -114,6 +115,27 @@ struct ChromeTheme {
         return c.brightnessComponent < 0.5
     }
 
+    /// WCAG-style unsigned contrast ratio between two colors.
+    static func contrastRatio(_ a: NSColor, _ b: NSColor) -> CGFloat {
+        let la = luminance(a), lb = luminance(b)
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+
+    /// The theme's foreground, floored to ≥4.5:1 against the
+    /// background: pale-foreground themes leave values unreadable.
+    /// Chrome-only — the terminal surface keeps the raw theme pair.
+    func legibleForeground() -> NSColor {
+        if ChromeTheme.contrastRatio(foreground, background) >= 4.5 { return foreground }
+        let target: NSColor = isDark ? .white : .black
+        var t: CGFloat = 0.1
+        while t <= 1 {
+            let mixed = blend(foreground, with: target, fraction: t)
+            if ChromeTheme.contrastRatio(mixed, background) >= 4.5 { return mixed }
+            t += 0.1
+        }
+        return target
+    }
+
     private func blend(_ base: NSColor, with other: NSColor, fraction t: CGFloat) -> NSColor {
         let b = base.usingColorSpace(.deviceRGB)!, o = other.usingColorSpace(.deviceRGB)!
         return NSColor(srgbRed: b.redComponent + (o.redComponent - b.redComponent) * t,
@@ -134,17 +156,18 @@ struct ChromeTheme {
     }
 
     /// Muted text — a SOLID blend toward the foreground, never an
-    /// alpha: alpha text washes out over translucent surfaces (the
-    /// sidebar-title-on-desktop report) and over the strips that sit a
-    /// step off the background.
+    /// alpha: alpha text washes out over translucent surfaces. The
+    /// fraction SELF-ADAPTS: lift to ≥3:1 contrast keeps dark themes
+    /// at their old quiet step while light themes get enough darkening
+    /// for small text (Aizen-light report).
     var secondaryText: NSColor {
-        blend(background, with: foreground, fraction: 0.62)
+        lift(background, toward: foreground, ratio: 3.0)
     }
 
     /// Quietest solid step (row counts, footnotes) — the old
     /// secondaryText-with-alpha double-dip lived here.
     var tertiaryText: NSColor {
-        blend(background, with: foreground, fraction: 0.45)
+        lift(background, toward: foreground, ratio: 2.2)
     }
 
     /// Hover fill: tty7's recipe — the surface lifted toward the foreground
@@ -167,7 +190,8 @@ struct ChromeTheme {
         blend(background, with: foreground, fraction: isDark ? 0.11 : 0.07)
     }
 
-    private func luminance(_ color: NSColor) -> CGFloat {
+    private func luminance(_ color: NSColor) -> CGFloat { ChromeTheme.luminance(color) }
+    static func luminance(_ color: NSColor) -> CGFloat {
         guard let c = color.usingColorSpace(.deviceRGB) else { return 0 }
         func channel(_ v: CGFloat) -> CGFloat {
             v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4)
@@ -177,12 +201,18 @@ struct ChromeTheme {
     }
 
     private func lift(_ base: NSColor, toward fg: NSColor, ratio: CGFloat) -> NSColor {
+        // UNSIGNED contrast ratio: the old signed form only rose when
+        // blending brightened (dark themes) — on light themes blending
+        // toward the dark fg only darkens, the condition never held,
+        // and the loop fell through to t=1: hover fills came out as the
+        // raw foreground (the black-hover-on-light-themes report).
         let lb = luminance(base)
         var t: CGFloat = 0.05
         while t <= 1 {
             let mixed = blend(base, with: fg, fraction: t)
             let lm = luminance(mixed)
-            if lb <= 0.001 ? lm > 0.05 : (lm + 0.05) / (lb + 0.05) >= ratio {
+            let hi = max(lm, lb), lo = min(lm, lb)
+            if lb <= 0.001 ? lm > 0.05 : (hi + 0.05) / (lo + 0.05) >= ratio {
                 return mixed
             }
             t += 0.05
