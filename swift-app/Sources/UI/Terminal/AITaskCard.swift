@@ -150,6 +150,9 @@ final class AITaskCard: NSView {
     private var lastBashCommand: String?
     /// Full transcript of the rendered task — the Copy button source.
     private var lastTranscript: String?
+    /// Last rendered task/target — the theme-change re-render source.
+    private var lastTask: AITask?
+    private var lastTarget: ExecutionTarget?
     private var inputField: ChromeInput?
 
     /// Transcript for Copy: every round's tool + result, then the
@@ -170,6 +173,10 @@ final class AITaskCard: NSView {
         layer?.borderWidth = 1
         layer?.borderColor = Chrome.theme.hairline.cgColor
         layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(themeChanged),
+            name: Chrome.themeDidChange, object: nil)
 
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -284,8 +291,19 @@ final class AITaskCard: NSView {
 
     // MARK: render
 
+    /// Container chrome re-baked + content re-rendered from the stored
+    /// task on theme flips (content colors are build-time).
+    @objc private func themeChanged() {
+        layer?.borderColor = Chrome.theme.hairline.cgColor
+        layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        if let task = lastTask, let target = lastTarget {
+            render(task: task, target: target)
+        }
+    }
+
     func render(task: AITask, target: ExecutionTarget) {
         guard !inputMode else { return }   // typed request wins until submitted
+        lastTask = task; lastTarget = target
         taskQuestion = task.context.request
         if editMode { renderEdit(task: task, target: target); return }
         switch task.phase {

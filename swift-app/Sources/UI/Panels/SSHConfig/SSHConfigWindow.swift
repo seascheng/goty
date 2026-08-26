@@ -350,9 +350,11 @@ final class SSHConfigManagerView: NSView {
 /// the 40pt strip in the content carries the traffic lights).
 final class SSHConfigWindowController: NSObject {
     let window: NSWindow
-    let manager: SSHConfigManagerView
+    private let store: SSHConfigStore
+    private var manager: SSHConfigManagerView
 
     init(store: SSHConfigStore = SSHConfigStore()) {
+        self.store = store
         let manager = SSHConfigManagerView(store: store)
         self.manager = manager
         let window = NSWindow(
@@ -378,6 +380,21 @@ final class SSHConfigWindowController: NSObject {
         window.isReleasedWhenClosed = false
         self.window = window
         super.init()
+        // Theme flips rebuild the whole manager (its colors are baked
+        // into build-time locals — the strips/labels can't be surgically
+        // recolored). Unsaved editor text is lost.
+        // ponytail: surgical recolor if mid-edit theme flips ever bite.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(themeChanged),
+            name: Chrome.themeDidChange, object: nil)
+    }
+
+    @objc private func themeChanged() {
+        window.appearance = NSAppearance(
+            named: Chrome.theme.isDark ? .darkAqua : .aqua)
+        let fresh = SSHConfigManagerView(store: store)
+        window.contentView = fresh
+        manager = fresh
     }
 
     /// Re-reads the file (see reload()) and brings the window front,

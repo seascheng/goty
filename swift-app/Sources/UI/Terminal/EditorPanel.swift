@@ -113,11 +113,25 @@ final class EditorPanelView: NSView {
     var textContainerWidthForTest: CGFloat { textView.textContainer?.size.width ?? 0 }
     var editorTextForTest: String { textView.string }
     func insertTabForTest() { textView.insertTab(nil) }
+
+    /// Theme flip: re-bake the panel chrome and re-highlight the text
+    /// (the foreground color rides the highlight attribute pass).
+    /// ponytail: nameLabel/dirtyDot assume their init-time semantic
+    /// colors — state-driven recolors win on their next state change.
+    @objc private func themeChanged() {
+        layer?.backgroundColor = Chrome.theme.background.cgColor
+        headerBackground.layer?.backgroundColor = Chrome.theme.topBarBackground.cgColor
+        nameLabel.textColor = Chrome.theme.secondaryText
+        applyFont()
+    }
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
         layer?.backgroundColor = Chrome.theme.background.cgColor
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(themeChanged),
+            name: Chrome.themeDidChange, object: nil)
 
         // Header: filename, dirty dot, close (= back to terminal).
         headerBackground.wantsLayer = true

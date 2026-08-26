@@ -240,7 +240,14 @@ struct ChromeTheme {
 }
 
 enum Chrome {
-    static var theme: ChromeTheme = .fallback
+    /// Posted whenever `theme` is replaced — the single chokepoint.
+    /// Chrome surfaces bake colors at build time (locals in inits), so
+    /// they re-apply/rebuild themselves on this; the assignment sites
+    /// need no fan-out of their own.
+    static let themeDidChange = Notification.Name("chromeThemeDidChange")
+    static var theme: ChromeTheme = .fallback {
+        didSet { NotificationCenter.default.post(name: themeDidChange, object: nil) }
+    }
 }
 
 /// A big chrome-surface color (sidebar, panel, dialog, strip) at the
