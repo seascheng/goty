@@ -109,6 +109,18 @@ import Foundation
         check(fired.last == "x", "ctrl-c resets accumulator")
         type("@ai  spaced  \r")
         check(fired.last == "spaced", "request trimmed")
+        _ = lt.filter([0x03])
+        // Arrow keys (CSI and SS3 forms) must not feed the line: the
+        // trailing letter used to land in the buffer and break the
+        // prefix match on the next typed line (the field-reported
+        // "works once, then command not found" bug).
+        _ = lt.filter([0x1B, 0x5B, 0x41])   // CSI up
+        _ = lt.filter([0x1B, 0x4F, 0x41])   // SS3 up
+        type("@ai after arrows\r")
+        check(fired.last == "after arrows", "arrow keys do not pollute the line")
+        _ = lt.filter([0x1B, 0x5B, 0x31, 0x7E, 0x1B, 0x5B, 0x33, 0x7E])   // Home + Delete
+        type("@ai home delete ok\r")
+        check(fired.last == "home delete ok", "home/delete keys pass through cleanly")
 
         print("— OutputTail —")
         let tail = OutputTail()
