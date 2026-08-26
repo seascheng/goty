@@ -34,8 +34,9 @@ final class AITaskCoordinator {
 
     func start(context: AIContext) -> UUID {
         let id = UUID()
+        aiDebug("start: '\(context.request.prefix(40))' target=\(context.target.displayName) transport=\(context.target.transport)")
         queue.async {
-            var task = AITask(context: context)
+            var task = AITask(id: id, context: context)
             task.advance(to: .thinking)
             self.tasks[id] = task
             self.emit(id)
@@ -130,8 +131,16 @@ final class AITaskCoordinator {
         if wire[id] == nil {
             wire[id] = Self.initialMessages(for: task, facts: hostFacts[id] ?? "")
         }
+        aiDebug("step: calling model, rounds=\(task.rounds.count)")
         model.complete(messages: wire[id]!, tools: Self.toolSpecs) { [weak self] result in
             self?.queue.async { self?.handle(id, result) }
+        }
+    }
+
+    /// Env-gated trace (GOTY_AI_DEBUG=1): the @ai loop's decision points.
+    private func aiDebug(_ msg: String) {
+        if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
+            FileHandle.standardError.write("AICoord \(msg)\n".data(using: .utf8)!)
         }
     }
 
@@ -139,6 +148,7 @@ final class AITaskCoordinator {
         guard var task = tasks[id], task.phase == .thinking else { return }
         switch result {
         case .failure(let error):
+            aiDebug("task failed: \(error)")
             task.advance(to: .failed(String(describing: error)))
             tasks[id] = task
             emit(id)

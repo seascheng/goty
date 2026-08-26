@@ -530,8 +530,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         coord.onUpdate = { [weak self] task in
             DispatchQueue.main.async {
-                guard let self, let key = self.activeAIPane[task.id] else { return }
+                guard let self, let key = self.activeAIPane[task.id] else {
+                    if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
+                        FileHandle.standardError.write("AICARD drop: no activeAIPane for \(task.id)\n".data(using: .utf8)!)
+                    }
+                    return
+                }
                 let host = self.hostPool[key]
+                if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
+                    FileHandle.standardError.write("AICARD phase=\(task.phase) host=\(host != nil) frame=\(host?.currentAITaskCard?.frame ?? .zero)\n".data(using: .utf8)!)
+                }
                 host?.showAITask(task)
                 if let host { self.wireAICard(host, task: task) }
             }
@@ -549,6 +557,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let id = coord.start(context: context)
         activeAIPane[id] = host.hostKey
         aiTaskOwner[id] = coord
+        if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
+            FileHandle.standardError.write("AISTART id=\(id) mapped to pane=\(host.hostKey.pane)\n".data(using: .utf8)!)
+        }
     }
 
     private func wireAICard(_ host: PaneHost, task: AITask) {
