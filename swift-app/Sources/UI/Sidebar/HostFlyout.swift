@@ -162,11 +162,26 @@ final class FlyoutRow: NSView {
         wantsLayer = true
         layer?.cornerRadius = 6
 
-        let icon = IconLabel(symbol, pointSize: 12)
-        addSubview(icon)
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 12.5, weight: .regular)
-        label.textColor = Chrome.theme.foreground
+        // Symbol INLINE as a text attachment — AppKit puts it on the
+        // text baseline, so icon and title can't drift out of alignment
+        // (two separate centerY-anchored views always sat off by their
+        // differing glyph boxes).
+        let font = NSFont.systemFont(ofSize: 12.5, weight: .regular)
+        let text = NSMutableAttributedString()
+        if let base = NSImage(systemSymbolName: symbol, accessibilityDescription: symbol)?
+            .withSymbolConfiguration(.init(pointSize: 12.5, weight: .regular)
+                .applying(.init(paletteColors: [Chrome.theme.iconTint]))) {
+            let att = NSTextAttachment()
+            att.image = base
+            let size = base.size.width > 0 ? base.size : NSSize(width: 14, height: 14)
+            att.bounds = CGRect(x: 0, y: (font.capHeight - size.height) / 2,
+                                width: size.width, height: size.height)
+            text.append(NSAttributedString(attachment: att))
+            text.append(NSAttributedString(string: "  "))
+        }
+        text.append(NSAttributedString(string: title,
+            attributes: [.font: font, .foregroundColor: Chrome.theme.foreground]))
+        let label = NSTextField(labelWithAttributedString: text)
         label.lineBreakMode = .byTruncatingMiddle
         label.cell?.truncatesLastVisibleLine = true
         label.cell?.wraps = false
@@ -174,10 +189,7 @@ final class FlyoutRow: NSView {
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 28),
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 16),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])

@@ -1127,14 +1127,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   as? Ghostty.Config
         else { return }
         let old = Chrome.theme.background.usingColorSpace(.deviceRGB)
-        Chrome.theme = .from(cfg)
-        let new = Chrome.theme.background.usingColorSpace(.deviceRGB)
+        let candidate = ChromeTheme.from(cfg)
+        let new = candidate.background.usingColorSpace(.deviceRGB)
         if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
             let name = ChromeTheme.configuredThemeName(cfg) ?? "nil"
             FileHandle.standardError.write("THEME change old=\(old.map { String(format: "%.2f", $0.redComponent) } ?? "?") new=\(new.map { String(format: "%.2f", $0.redComponent) } ?? "?") theme=\(name)\n".data(using: .utf8)!)
         }
         wc?.applyChromeTheme(cfg: cfg)
 
+        // Re-color work on a REAL change — colors (theme switch) or
+        // opacity (slider: topBarBackground and every chromeSurface
+        // fill depend on it). Font-size-style writes change neither
+        // and skip straight through; the settings page rebuilds
+        // WITHOUT rebuilding its page when IT wrote the change (the
+        // rebuild swaps the slider mid-drag — the thumb-snap report).
+        guard old != new || candidate.backgroundOpacity != Chrome.theme.backgroundOpacity else { return }
+        Chrome.theme = candidate
         // OUR chrome follows the terminal theme too (the tty7 rule): the
         // render paths rebuild rows/headers with fresh colors — the
         // generation salt makes same-data renders rebuild anyway.

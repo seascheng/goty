@@ -254,6 +254,11 @@ final class AITaskCard: NSView {
         if pendingScroll {
             pendingScroll = false
             DispatchQueue.main.async { [stack] in
+                // Force the re-measured height to LAND first — reading
+                // bounds.height before the constraint pass completes
+                // scrolls to the PRE-growth height, which during
+                // streaming looked like the card jumping to its top.
+                stack.layoutSubtreeIfNeeded()
                 stack.scroll(NSPoint(x: 0, y: stack.bounds.height))
             }
         }

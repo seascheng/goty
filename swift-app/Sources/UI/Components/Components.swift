@@ -111,6 +111,10 @@ final class IconButton: NSView {
         imageView.image = base.withSymbolConfiguration(cfg) ?? base
     }
 
+    /// Pointing hand (the AI-card close report) — every icon tile in
+    /// the chrome is clickable chrome.
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+
     // Tracking is created ONCE: .inVisibleRect follows the view's
     // frame automatically, and rebuilding tracking areas on every
     // updateTrackingAreas call makes AppKit re-fire mouseEntered for

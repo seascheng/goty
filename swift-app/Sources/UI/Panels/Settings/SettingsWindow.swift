@@ -90,7 +90,10 @@ final class SettingsRootView: NSView, ThemeRefreshable {
         pathLabel.stringValue = rawPath.hasPrefix(home)
             ? "~" + rawPath.dropFirst(home.count) : rawPath
         pathLabel.translatesAutoresizingMaskIntoConstraints = false
-        headerStrip.addSubview(pathLabel)
+        // Config path lives in the STATUS bar — a centered title with
+        // the long path in the header kept shoving "SETTINGS" off
+        // center (toward the left column).
+        statusBar.addSubview(pathLabel)
 
         // Left column: search box (tty7's settings search) + sections.
         listColumn.translatesAutoresizingMaskIntoConstraints = false
@@ -158,13 +161,10 @@ final class SettingsRootView: NSView, ThemeRefreshable {
             headerStrip.leadingAnchor.constraint(equalTo: leadingAnchor),
             headerStrip.trailingAnchor.constraint(equalTo: trailingAnchor),
             headerStrip.heightAnchor.constraint(equalToConstant: 44),
-            // 84 clears the traffic-light capsules (they own the
-            // top-left ~70pt — sidebar DragStrip's rule).
             windowTitle.centerXAnchor.constraint(equalTo: headerStrip.centerXAnchor),
             windowTitle.centerYAnchor.constraint(equalTo: headerStrip.centerYAnchor),
-            windowTitle.trailingAnchor.constraint(lessThanOrEqualTo: pathLabel.leadingAnchor, constant: -8),
-            pathLabel.trailingAnchor.constraint(equalTo: headerStrip.trailingAnchor, constant: -14),
-            pathLabel.centerYAnchor.constraint(equalTo: headerStrip.centerYAnchor),
+            pathLabel.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor, constant: -12),
+            pathLabel.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
 
             listColumn.leadingAnchor.constraint(equalTo: leadingAnchor),
             listColumn.topAnchor.constraint(equalTo: headerStrip.bottomAnchor),
@@ -252,9 +252,18 @@ final class SettingsRootView: NSView, ThemeRefreshable {
         hintLabel.textColor = Chrome.theme.secondaryText
         searchField.retheme()
         sectionRows.forEach { $0.retheme() }
-        rebuildPage()
+        if suppressRebuild {
+            // Recolor only — see commit(): rebuilding here swaps the
+            // slider mid-drag on our own writes.
+        } else {
+            rebuildPage()
+        }
         needsDisplay = true
     }
+
+    private var suppressRebuild = false
+    func beginSuppressedRebuild() { suppressRebuild = true }
+    func endSuppressedRebuild() { suppressRebuild = false }
 
     private var currentPage: NSView?
 
@@ -312,7 +321,17 @@ final class SettingsRootView: NSView, ThemeRefreshable {
     /// Return) applies immediately via apply().
     func applyDebounced(_ key: String, _ make: @escaping () -> String?) {
         pendingWrite?.cancel()
-        let w = DispatchWorkItem { [weak self] in self?.apply(key, make()) }
+        let w = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // Own SLIDER write: the reload's theme fan-out must
+            // RECOLOR the page, not REBUILD it — rebuildPage swaps the
+            // slider mid-drag (thumb-snap report). The fan-out runs
+            // synchronously inside reloadConfig(). Explicit acts
+            // (theme popup, toggles) keep the full rebuild.
+            self.beginSuppressedRebuild()
+            self.apply(key, make())
+            self.endSuppressedRebuild()
+        }
         pendingWrite = w
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: w)
     }

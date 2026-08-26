@@ -146,9 +146,14 @@ struct ChromeTheme {
 
     /// Top strip: one step lighter (dark themes) / darker (light) than the
     /// terminal background — a quiet boundary, not a band.
+    /// TRANSLUCENT windows skip the step: the terminal renders
+    /// background@opacity straight over the desktop, and a lifted strip
+    /// beside it reads as "the terminal is too dark" (the translucent
+    /// mismatch report) — everything composites to one color instead.
     var topBarBackground: NSColor {
-        isDark ? blend(background, with: NSColor.white, fraction: 0.05)
-               : blend(background, with: NSColor.black, fraction: 0.05)
+        guard backgroundOpacity > 0.999 else { return background }
+        return isDark ? blend(background, with: NSColor.white, fraction: 0.05)
+                      : blend(background, with: NSColor.black, fraction: 0.05)
     }
 
     var hairline: NSColor {
