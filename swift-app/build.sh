@@ -96,4 +96,17 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+# Ad-hoc sign everything we ship. The linker's automatic adhoc signature
+# covers only the bare main binary (Info.plist unbound, resources
+# unsealed): macOS TCC could not persist a Downloads-folder grant against
+# that broken bundle signature and re-prompted on every access (2026-08-26:
+# endless "Goty wants to access files in your Downloads folder" dialogs).
+# Nested Mach-O first, then the bundle; the linux-musl ELF is a resource
+# uploaded over ssh, never executed on macOS, so it stays unsigned.
+codesign --force --sign - --identifier com.goty.terminal.sessiond \
+    "$APP/Contents/MacOS/goty-sessiond"
+codesign --force --sign - --identifier com.goty.terminal.libghostty \
+    "$APP/Contents/MacOS/CGhostty/lib/libghostty-internal.dylib"
+codesign --force --sign - --identifier com.goty.terminal "$APP"
+
 echo "built: $(pwd)/goty and $APP"
