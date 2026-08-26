@@ -11,14 +11,23 @@ import Foundation
 final class LineTrigger {
     var armed = false
     var onTrigger: ((String) -> Void)?
+    /// Enter swallowed on a zle-edited line (↑/↓/ctrl-r recall): the
+    /// line's text lives only on the rendered screen, so the host
+    /// reads the cursor row and either fires the task or re-sends the
+    /// enter (fail-open, identical to no interception).
+    var onPendingEnter: (() -> Void)?
     private var line: [UInt8] = []
     private static let prefix: [UInt8] = Array("@ai".utf8)
     /// Escape-sequence parser state: inside CSI / inside SS3.
     private var inCsi = false
     private var inSs3 = false
+    /// This line involved zle editing (arrow keys, ctrl-r search):
+    /// the accumulator no longer mirrors the shell's line, so an
+    /// enter on it defers to the screen check instead of raw bytes.
+    private var zleEdit = false
 
     func filter(_ bytes: [UInt8]) -> [UInt8] {
-        guard armed else { line = []; inCsi = false; inSs3 = false; return bytes }
+        guard armed else { line = []; inCsi = false; inSs3 = false; zleEdit = false; return bytes }
         var out: [UInt8] = []
         var i = 0
         while i < bytes.count {
@@ -39,9 +48,11 @@ final class LineTrigger {
             switch b {
             case 0x5B where i > 0 && bytes[i - 1] == 0x1B:
                 inCsi = true  // '[' right after ESC opens CSI
+                zleEdit = true
                 out.append(b)
             case 0x4F where i > 0 && bytes[i - 1] == 0x1B:
                 inSs3 = true  // 'O' right after ESC opens SS3
+                zleEdit = true
                 out.append(b)
             case 0x0D, 0x0A:
                 // Paired-symbol IMEs emit '@' as '@@' and may drop the
@@ -49,13 +60,19 @@ final class LineTrigger {
                 // and let trim handle the rest.
                 let isTrigger = Self.hasPrefix(line)
                 if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1", !line.isEmpty {
-                    FileHandle.standardError.write("AILINE armed=\(armed) line=\(String(decoding: line.prefix(24), as: UTF8.self)) trigger=\(isTrigger)\n".data(using: .utf8)!)
+                    FileHandle.standardError.write("AILINE armed=\(armed) zle=\(zleEdit) line=\(String(decoding: line.prefix(24), as: UTF8.self)) trigger=\(isTrigger)\n".data(using: .utf8)!)
                 }
                 if isTrigger {
                     let text = Self.requestText(from: line)
-                    line = []
+                    line = []; zleEdit = false
                     onTrigger?(text)
                     return out  // swallow this enter (and anything after in the same chunk)
+                }
+                if zleEdit {
+                    // History recall: content is only on the screen.
+                    line = []; zleEdit = false
+                    onPendingEnter?()
+                    return out  // enter (and the rest of the chunk) held for the screen check
                 }
                 line = []
                 out.append(b)
@@ -72,10 +89,13 @@ final class LineTrigger {
                 }
                 out.append(b)
             case 0x15:  // ctrl-u clears the shell line — mirror it
-                line = []
+                line = []; zleEdit = false
                 out.append(b)
             case 0x03:  // ctrl-c
-                line = []
+                line = []; zleEdit = false
+                out.append(b)
+            case 0x12:  // ctrl-r (history search) — zle edits the line
+                zleEdit = true
                 out.append(b)
             default:
                 // ESC alone forwards through (the [ / O check happens on
@@ -88,7 +108,7 @@ final class LineTrigger {
         return out
     }
 
-    func reset() { line = []; inCsi = false; inSs3 = false }
+    func reset() { line = []; inCsi = false; inSs3 = false; zleEdit = false }
 
     /// Index just after the @ai prefix at the START of the line,
     /// tolerating paired-symbol IMEs that emit '@' as '@@' (each extra
@@ -116,5 +136,35 @@ final class LineTrigger {
         guard let end = lastPrefixEnd(line) else { return "" }
         return String(decoding: line[end...], as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// @ai request from a RENDERED prompt row (the history-recall
+    /// path: ↑/ctrl-r redraws the line as PTY output the input filter
+    /// never sees; this reads what the shell actually has). Tolerates
+    /// any prompt before the @ — the LAST @ai on the row wins when
+    /// something non-space follows and nothing before it quotes,
+    /// pipes, or otherwise marks a mid-command occurrence (a recalled
+    /// `echo "@ai x"` passes through unchanged). IME "@@" pairs match
+    /// via the second @. .whitespaces trims ASCII and full-width
+    /// (U+3000) spaces alike — Chinese input needs no special case.
+    /// ponytail: prompt-tolerant match can still misfire on a recalled
+    /// bare `echo @ai x` (no quotes), ignores wrapped lines and gray
+    /// zsh-autosuggestion text; tighten with cursor-column walking
+    /// and cell-attribute reads if it bites.
+    static func requestFromScreenRow(_ row: String) -> String? {
+        let banned: Set<Character> = ["\"", "'", "`", "|", "&", ";", "<", ">", "=", "\\"]
+        var hits: [Range<String.Index>] = []
+        var search = row.startIndex
+        while let r = row.range(of: "@ai", range: search..<row.endIndex) {
+            hits.append(r); search = r.upperBound
+        }
+        for r in hits.reversed() {
+            let before = row[row.startIndex..<r.lowerBound]
+            guard !before.contains(where: { banned.contains($0) }) else { continue }
+            let after = row[r.upperBound..<row.endIndex]
+                .trimmingCharacters(in: .whitespaces)
+            if !after.isEmpty { return after }
+        }
+        return nil
     }
 }

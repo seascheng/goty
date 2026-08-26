@@ -123,6 +123,9 @@ final class PaneHost: NSView {
         agentCommand = AgentDetect.hasRules(for: command) ? command : nil
         super.init(frame: .zero)
         aiTrigger.onTrigger = { [weak self] text in self?.handleAITrigger(text) }
+        aiTrigger.onPendingEnter = { [weak self] in
+            DispatchQueue.main.async { self?.handleAIHistoryEnter() }
+        }
         updateAITrigger(nil)
         agentStatus.onPublish = { [weak self] state, _ in
             guard let self else { return }
@@ -476,6 +479,46 @@ final class PaneHost: NSView {
         }
     }
 
+    /// History-recalled enter (↑/ctrl-r): the line's bytes never
+    /// passed the input filter — zsh redrew it as PTY output — so read
+    /// what the shell actually holds: the rendered cursor row. An @ai
+    /// request follows the typed-trigger flow; anything else gets the
+    /// swallowed enter re-sent, byte-identical to no interception.
+    /// Runs on main, outside the onWrite callback (surface reads must
+    /// not re-enter the io path).
+    private func handleAIHistoryEnter() {
+        guard let request = aiHistoryRowRequest() else {
+            sendText("\r")
+            return
+        }
+        sendText("\u{15}")
+        onAITask?(self, request)
+    }
+
+    /// The @ai request on the cursor row, or nil. Failures return nil
+    /// → the enter is forwarded (fail-open).
+    private func aiHistoryRowRequest() -> String? {
+        guard let view = surfaceView, let surface = view.surface else { return nil }
+        var m = ghostty_surface_grid_metrics_s()
+        guard ghostty_surface_grid_metrics(surface, &m) else { return nil }
+        var text = ghostty_text_s()
+        let sel = ghostty_selection_s(
+            top_left: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT,
+                                      coord: GHOSTTY_POINT_COORD_EXACT,
+                                      x: 0, y: UInt32(m.cursor_row)),
+            bottom_right: ghostty_point_s(tag: GHOSTTY_POINT_VIEWPORT,
+                                          coord: GHOSTTY_POINT_COORD_EXACT,
+                                          x: UInt32(m.columns) - 1, y: UInt32(m.cursor_row)),
+            rectangle: false)
+        guard ghostty_surface_read_text(surface, sel, &text) else { return nil }
+        defer { ghostty_surface_free_text(surface, &text) }
+        let row = String(cString: text.text)
+        if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
+            FileHandle.standardError.write("AIHISTORY cursor=\(m.cursor_row):\(m.cursor_column) row=\(row.prefix(60))\n".data(using: .utf8)!)
+        }
+        return LineTrigger.requestFromScreenRow(row)
+    }
+
     /// @ai arms only at a shell prompt with the model provider
     /// configured and a live target — otherwise typing passes through.
     func refreshAITrigger() { updateAITrigger(lastForegroundCommand) }
@@ -515,6 +558,13 @@ final class PaneHost: NSView {
         aiCard = nil
     }
 
+    /// Close this pane's card when it's the ⌘⇧A ask: the ask is
+    /// app-global (one ask card at a time — a leftover small card next
+    /// to a running task card read as two panels). Task cards stay.
+    func hideAITaskIfInputMode() {
+        if aiCard?.isInputMode == true { hideAITask() }
+    }
+
     /// ⌘⇧A: the card in request-input mode; submitting follows the same
     /// path as a captured @ai line.
     func openAIInputMode() {
@@ -526,14 +576,15 @@ final class PaneHost: NSView {
         let card = AITaskCard()
         card.translatesAutoresizingMaskIntoConstraints = false
         // Added last → composites above the scroll view; height is
-        // content-driven, capped at 40% of the pane.
+        // content-driven, capped at 60% of the pane (the old 40% cap
+        // squeezed header + rounds + answer + buttons into a strip).
         addSubview(card)
         NSLayoutConstraint.activate([
             card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             card.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             card.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
             card.heightAnchor.constraint(lessThanOrEqualTo: heightAnchor,
-                                         multiplier: 0.4),
+                                         multiplier: 0.6),
         ])
         card.onSubmit = { [weak self] text in
             guard let self else { return }

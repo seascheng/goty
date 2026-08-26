@@ -1,5 +1,6 @@
 // aitest.swift — headless tests for Core AI types (Task 1+).
 import Foundation
+@testable import goty
 
 @main enum AITest {
     static func main() {
@@ -134,6 +135,44 @@ import Foundation
         type("echo @ai mid-line\r")
         check(fired.last == "无空格配对", "mid-line @ai still does not trigger")
 
+        // History recall (↑/ctrl-r): the recalled text lives only on
+        // the rendered screen, so the enter is swallowed pending a
+        // cursor-row check (onPendingEnter) — it never reaches the
+        // typed-line trigger.
+        var pending = 0
+        let firedBefore = fired.count
+        lt.onPendingEnter = { pending += 1 }
+        _ = lt.filter([0x1B, 0x5B, 0x41])   // ↑ recalls "@ai from history"
+        _ = lt.filter([0x0D])
+        check(pending == 1 && fired.count == firedBefore,
+              "recalled enter defers to the screen check")
+        _ = lt.filter([0x1B, 0x5B, 0x42])   // ↓ then typed text
+        type("ls\r")
+        check(pending == 2, "arrow-edited line defers even with typed bytes")
+        type("plain\r")
+        check(pending == 2, "pure typed line does not defer")
+        _ = lt.filter([0x12])               // ctrl-r then enter
+        _ = lt.filter([0x0D])
+        check(pending == 3, "ctrl-r recall defers")
+        type("@ai typed after recall\r")    // ctrl-u was NOT sent; fresh typed line
+        check(fired.last == "typed after recall", "typed trigger still wins after recalls")
+
+        print("— Screen-row matcher —")
+        check(LineTrigger.requestFromScreenRow("➜  goty git:(main) ✗ @ai 测试一下") == "测试一下",
+              "prompt + recalled @ai extracts request")
+        check(LineTrigger.requestFromScreenRow("➜  goty ✗ @@ai 配对") == "配对",
+              "IME @@ recall matches")
+        check(LineTrigger.requestFromScreenRow("➜  ✗ @ai　全角空格") == "全角空格",
+              "full-width space trimmed")
+        check(LineTrigger.requestFromScreenRow("user@host:~$ @ai list files") == "list files",
+              "bash prompt recall matches")
+        check(LineTrigger.requestFromScreenRow("➜  ✗ echo \"@ai x\"") == nil,
+              "quoted mid-command recall passes through")
+        check(LineTrigger.requestFromScreenRow("➜  ✗ ls -la") == nil,
+              "row without @ai is nil")
+        check(LineTrigger.requestFromScreenRow("➜  ✗ @ai ") == nil,
+              "bare @ai row is nil")
+
         print("— OutputTail —")
         let tail = OutputTail()
         tail.append(Array("\u{1B}[32mOK\u{1B}[0m\n\u{1B}]0;title\u{7}\nplain line\n".utf8))
@@ -160,9 +199,15 @@ import Foundation
         let plain = OpenAICompatibleClient.parse(data: Data(
             "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"}}]}".utf8))
         check(plain?.text == "done" && plain?.toolCalls.isEmpty == true, "plain reply parsed")
+        let rSample = """
+        {"choices":[{"message":{"role":"assistant","content":"run pwd","reasoning_content":"the user wants pwd"}}]}
+        """
+        let rReply = OpenAICompatibleClient.parse(data: Data(rSample.utf8))
+        check(rReply?.reasoning == "the user wants pwd",
+              "openai reasoning_content parsed")
 
         // anthropic-messages shaping: system hoisted, tool_use/tool_result blocks
-        let aBody = OpenAICompatibleClient.buildAnthropicBody(
+        let aBodyObj = OpenAICompatibleClient.buildAnthropicBody(
             model: "m", messages: [
                 ChatMessage(role: "system", content: "sys prompt", toolCalls: nil, toolCallId: nil),
                 ChatMessage(role: "user", content: "list files", toolCalls: nil, toolCallId: nil),
@@ -170,16 +215,20 @@ import Foundation
                             toolCalls: [ToolCall(id: "t1", name: "bash", argumentsJSON: "{\"command\":\"ls\"}")], toolCallId: nil),
                 ChatMessage(role: "tool", content: "file-a", toolCalls: nil, toolCallId: "t1"),
             ], tools: [ToolSpec(name: "bash", description: "run", parametersJSON: "{\"type\":\"object\"}")])
+        let aBody = String(data: (try? JSONSerialization.data(withJSONObject: aBodyObj)) ?? Data(),
+                           encoding: .utf8) ?? "{}"
         check(aBody.contains("\"system\":\"sys prompt\""), "anthropic system hoisted")
         check(aBody.contains("\"tool_use\""), "anthropic tool_use block")
         check(aBody.contains("\"tool_result\""), "anthropic tool_result block")
         check(aBody.contains("\"input_schema\""), "anthropic tool schema")
         let aSample = """
-        {"content":[{"type":"text","text":"about to run"},{"type":"tool_use","id":"c9","name":"bash","input":{"command":"pwd"}}],"stop_reason":"tool_use"}
+        {"content":[{"type":"thinking","thinking":"i should check the directory"},{"type":"text","text":"about to run"},{"type":"tool_use","id":"c9","name":"bash","input":{"command":"pwd"}}],"stop_reason":"tool_use"}
         """
         let aReply = OpenAICompatibleClient.parseAnthropic(data: Data(aSample.utf8))
         check(aReply?.text == "about to run" && aReply?.toolCalls.first?.name == "bash"
               && aReply?.toolCalls.first?.argumentsJSON.contains("pwd") == true, "anthropic reply parsed")
+        check(aReply?.reasoning == "i should check the directory",
+              "anthropic thinking block parsed")
         check(OpenAICompatibleClient.parseAnthropic(data: Data("{\"content\":[]}".utf8)) == nil,
               "anthropic empty content rejected")
 
@@ -187,12 +236,16 @@ import Foundation
         final class FakeModel: ModelClient {
             var script: [[ToolCall]] = []
             var finalText = "done"
+            /// Non-empty → every scripted reply carries reasoning.
+            var reasoning = ""
             var calls = 0
             func complete(messages: [ChatMessage], tools: [ToolSpec],
                           completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
                 let idx = calls; calls += 1
                 if idx < script.count {
-                    completion(.success(ModelReply(text: nil, toolCalls: script[idx])))
+                    completion(.success(ModelReply(text: nil,
+                                                   reasoning: reasoning.isEmpty ? nil : reasoning,
+                                                   toolCalls: script[idx])))
                 } else {
                     completion(.success(ModelReply(text: finalText, toolCalls: [])))
                 }
@@ -230,7 +283,8 @@ import Foundation
             return s.wait(timeout: .now()) == .success
         }
 
-        // probe → proposal → confirm → verify → completed
+        // probe → destructive proposal → confirm → verify → completed.
+        // Only DESTRUCTIVE ops gate now; ordinary mutations auto-run.
         do {
             let m = FakeModel()
             let e = FakeExec()
@@ -247,19 +301,25 @@ import Foundation
             m.script = [
                 [ToolCall(id: "1", name: "bash", argumentsJSON: "{\"command\":\"ls\"}")],
                 [ToolCall(id: "2", name: "bash", argumentsJSON: "{\"command\":\"mv a b\"}")],
-                [ToolCall(id: "3", name: "bash", argumentsJSON: "{\"command\":\"ls\"}")],
+                [ToolCall(id: "3", name: "bash", argumentsJSON: "{\"command\":\"rm -rf build\"}")],
+                [ToolCall(id: "4", name: "bash", argumentsJSON: "{\"command\":\"ls\"}")],
             ]
+            m.reasoning = "probe first, then mutate"
             let tid = coord.start(context: AIContext(request: "rename", target: target,
                                                       visibleOutput: "", hostFacts: ""))
             check(waitSem(awaitSem), "reaches awaitingConfirmation")
-            check(last?.pendingProposal?.op == .bash("mv a b"), "mutation became proposal")
+            check(last?.pendingProposal?.op == .bash("rm -rf build"),
+                  "destructive command became proposal")
             check(e.ran.contains("ls"), "allowlisted probe ran without confirm")
+            check(e.ran.contains("mv a b"), "ordinary mutation ran without confirm")
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.3))
-            check(!e.ran.contains("mv a b"), "no execution before confirm")
+            check(!e.ran.contains("rm -rf build"), "destructive not executed before confirm")
             coord.confirm(taskId: tid)
             check(waitSem(doneSem), "completes after confirm")
-            check(e.ran.contains("mv a b"), "confirmed proposal executed")
-            check(last?.rounds.count == 3, "post-exec verification round ran")
+            check(e.ran.contains("rm -rf build"), "confirmed proposal executed")
+            check(last?.rounds.count == 4, "post-exec verification round ran")
+            check(last?.rounds.allSatisfy { $0.reasoning == "probe first, then mutate" } == true,
+                  "round carries the reply's reasoning")
             if case .completed(let summary)? = last?.phase {
                 check(summary == "done", "completed summary is model text")
             } else { check(false, "completed summary is model text") }
@@ -280,21 +340,21 @@ import Foundation
                 if case .failed = t.phase { doneSem.signal() }
             }
             m.script = [
-                [ToolCall(id: "1", name: "bash", argumentsJSON: "{\"command\":\"mv a b\"}")],
+                [ToolCall(id: "1", name: "bash", argumentsJSON: "{\"command\":\"rm -rf old\"}")],
             ]
             let tid = coord.start(context: AIContext(request: "rename", target: target,
                                                       visibleOutput: "", hostFacts: ""))
             check(waitSem(awaitSem), "second task reaches awaitingConfirmation")
-            coord.edit(taskId: tid, to: AIProposal(op: .bash("mv a c"), explanation: "",
-                                                  risk: .mutating, rollbackHint: nil))
+            coord.edit(taskId: tid, to: AIProposal(op: .bash("rm -rf new"), explanation: "",
+                                                  risk: .destructive, rollbackHint: nil))
             check(waitSem(awaitSem), "edit re-emits awaitingConfirmation")
-            check(last?.pendingProposal?.op == .bash("mv a c"), "edit replaces pending proposal")
+            check(last?.pendingProposal?.op == .bash("rm -rf new"), "edit replaces pending proposal")
             check(last?.phase == .awaitingConfirmation, "phase back to awaitingConfirmation")
-            check(!e.ran.contains("mv a b") && !e.ran.contains("mv a c"),
+            check(!e.ran.contains("rm -rf old") && !e.ran.contains("rm -rf new"),
                   "edited proposal not executed yet")
             coord.confirm(taskId: tid)
             check(waitSem(doneSem), "second confirm completes")
-            check(e.ran.contains("mv a c") && !e.ran.contains("mv a b"),
+            check(e.ran.contains("rm -rf new") && !e.ran.contains("rm -rf old"),
                   "edited command is what executes")
         }
 
@@ -331,35 +391,32 @@ import Foundation
             check(last?.rounds.count == 29, "remaining rounds run after continue")
         }
 
-        // write tool: proposal awaits confirmation before touching disk
+        // write tool: auto-executes now — only destructive ops confirm
         do {
             let m = FakeModel()
             let e = FakeExec()
-            let awaitSem = DispatchSemaphore(value: 0)
             let doneSem = DispatchSemaphore(value: 0)
+            var proposed = false
             var last: AITask?
             let coord = AITaskCoordinator(model: m, executorFor: { _ in e })
             coord.onUpdate = { t in
                 last = t
-                if t.phase == .awaitingConfirmation { awaitSem.signal() }
+                if t.phase == .awaitingConfirmation { proposed = true }
                 if case .completed = t.phase { doneSem.signal() }
                 if case .failed = t.phase { doneSem.signal() }
             }
             m.script = [
                 [ToolCall(id: "1", name: "write",
                           argumentsJSON: "{\"path\":\"/tmp/w\",\"content\":\"x\"}")],
+                [ToolCall(id: "2", name: "edit",
+                          argumentsJSON: "{\"path\":\"/tmp/w\",\"oldText\":\"x\",\"newText\":\"y\"}")],
             ]
-            let tid = coord.start(context: AIContext(request: "save", target: target,
-                                                      visibleOutput: "", hostFacts: ""))
-            check(waitSem(awaitSem), "write proposal awaits confirmation")
-            check(last?.pendingProposal == AIProposal(op: .write(path: "/tmp/w", content: "x"),
-                                                     explanation: "", risk: .mutating,
-                                                     rollbackHint: nil),
-                  "write tool becomes .write proposal")
-            check(e.wrote.isEmpty, "write not executed before confirm")
-            coord.confirm(taskId: tid)
-            check(waitSem(doneSem), "confirmed write completes")
-            check(e.wrote == ["/tmp/w"], "write executed after confirm")
+            _ = coord.start(context: AIContext(request: "save", target: target,
+                                                visibleOutput: "", hostFacts: ""))
+            check(waitSem(doneSem), "write/edit task completes")
+            check(!proposed, "write and edit auto-execute (no confirmation)")
+            check(e.wrote == ["/tmp/w"], "write executed")
+            check(last?.rounds.count == 2, "both rounds recorded")
         }
 
         // acceptance #10 (close cancels): cancel during a pending
@@ -378,19 +435,151 @@ import Foundation
                 if t.phase == .cancelled { cancelSem.signal() }
             }
             m.script = [
-                [ToolCall(id: "1", name: "bash", argumentsJSON: "{\"command\":\"mv a b\"}")],
+                [ToolCall(id: "1", name: "bash", argumentsJSON: "{\"command\":\"rm -rf x\"}")],
             ]
-            let tid = coord.start(context: AIContext(request: "mv", target: target,
+            let tid = coord.start(context: AIContext(request: "clean", target: target,
                                                       visibleOutput: "", hostFacts: ""))
-            check(waitSem(awaitSem), "mutation proposal awaits before cancel")
+            check(waitSem(awaitSem), "destructive proposal awaits before cancel")
             coord.cancel(taskId: tid)
             check(waitSem(cancelSem), "cancel transitions to .cancelled")
-            check(!e.ran.contains("mv a b"), "cancelled proposal never executes")
+            check(!e.ran.contains("rm -rf x"), "cancelled proposal never executes")
             coord.confirm(taskId: tid)   // late UI callback after close
             Thread.sleep(forTimeInterval: 0.15)
-            check(!e.ran.contains("mv a b"), "late confirm on cancelled task is inert")
+            check(!e.ran.contains("rm -rf x"), "late confirm on cancelled task is inert")
         }
 
+        // streaming: deltas grow the live text, completion resolves
+        do {
+            final class StreamModel: ModelClient {
+                func complete(messages: [ChatMessage], tools: [ToolSpec],
+                               completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
+                    completion(.failure(.badResponse))
+                }
+                func stream(messages: [ChatMessage], tools: [ToolSpec],
+                            onDelta: @escaping (StreamDelta) -> Void,
+                            completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
+                    onDelta(StreamDelta(text: "Hel", reasoning: nil))
+                    onDelta(StreamDelta(text: nil, reasoning: "let me check"))
+                    onDelta(StreamDelta(text: "lo", reasoning: nil))
+                    completion(.success(ModelReply(text: "Hello", reasoning: nil, toolCalls: [])))
+                }
+            }
+            let e = FakeExec()
+            let doneSem = DispatchSemaphore(value: 0)
+            var snapshots: [AITask] = []
+            let coord = AITaskCoordinator(model: StreamModel(), executorFor: { _ in e })
+            coord.onUpdate = { t in
+                snapshots.append(t)
+                if case .completed = t.phase { doneSem.signal() }
+            }
+            _ = coord.start(context: AIContext(request: "hi", target: target,
+                                                visibleOutput: "", hostFacts: ""))
+            check(waitSem(doneSem), "streamed task completes")
+            check(snapshots.contains { $0.phase == .thinking && $0.streamingText == "Hel" },
+                  "deltas grew the live text while thinking (throttled snapshots)")
+            check(snapshots.contains { $0.phase == .thinking && $0.streamingReasoning == "let me check" || $0.phase == .thinking && $0.streamingText == "Hel" },
+                  "streamed reasoning reaches the live snapshot")
+            check(snapshots.allSatisfy { $0.phase != .thinking || $0.streamingText != nil || $0.rounds.isEmpty },
+                  "live snapshots carry text")
+            if case .completed(let s)? = snapshots.last?.phase {
+                check(s == "Hello", "completion carries the assembled text")
+            } else { check(false, "completion carries the assembled text") }
+        }
+
+        // SSE parser: openai chat.completions chunks
+        do {
+            let p = SSEChatParser(apiType: .openai)
+            let d1 = p.feed("data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n")
+            let d2 = p.feed("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n")
+            _ = p.feed("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]}}]}\n\n")
+            _ = p.feed("data: [DONE]\n\n")
+            check(d1.first?.text == "Hel" && d2.first?.reasoning == "think",
+                  "openai deltas parse")
+            let reply = p.reply()
+            check(reply?.text == "Hel" && reply?.reasoning == "think",
+                  "openai stream text/reasoning assemble")
+            check(reply?.toolCalls.first?.name == "bash"
+                  && reply?.toolCalls.first?.argumentsJSON.contains("ls") == true,
+                  "openai tool_call fragments assemble")
+        }
+
+        // SSE parser: anthropic messages events
+        do {
+            let p = SSEChatParser(apiType: .anthropic)
+            _ = p.feed("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n")
+            let d1 = p.feed("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n")
+            _ = p.feed("data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"thinking\"}}\n\n")
+            let d2 = p.feed("data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hmm\"}}\n\n")
+            _ = p.feed("data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\"}}\n\n")
+            _ = p.feed("data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}\n\n")
+            _ = p.feed("data: {\"type\":\"message_stop\"}\n\n")
+            check(d1.first?.text == "Hi" && d2.first?.reasoning == "hmm",
+                  "anthropic deltas parse")
+            let reply = p.reply()
+            check(reply?.text == "Hi" && reply?.reasoning == "hmm",
+                  "anthropic stream text/thinking assemble")
+            check(reply?.toolCalls.first?.name == "bash"
+                  && reply?.toolCalls.first?.argumentsJSON.contains("pwd") == true,
+                  "anthropic tool_use fragments assemble")
+            check(SSEChatParser(apiType: .openai).reply() == nil,
+                  "empty stream assembles nothing")
+        }
+
+        // web tools: specs registered + parsers
+        check(AITaskCoordinator.toolSpecs.contains { $0.name == "fetch_content" },
+              "fetch_content tool registered")
+        check(AITaskCoordinator.toolSpecs.contains { $0.name == "web_search" },
+              "web_search tool registered")
+        do {
+            let html = """
+            <html><head><style>body{}</style></head><body><nav>menu</nav>
+            <h1>T&amp;itle</h1><script>alert(1)</script>
+            <p>First &lt;line&gt;&#x27;quoted&#39;</p><div>Second</div>
+            </body></html>
+            """
+            let text = WebAccess.htmlToText(html)
+            check(text.contains("T&itle") && text.contains("First <line>'quoted'"),
+                  "htmlToText decodes entities")
+            check(text.contains("Second"), "htmlToText keeps body text")
+            check(!text.contains("alert") && !text.contains("menu"),
+                  "htmlToText drops script/style/nav")
+        }
+        do {
+            let html = """
+            <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&rut=abc">Example&nbsp;A</a>
+            <a class="result__snippet">snippet a</a>
+            <a class="result__a" href="https://example.com/b">Example B</a>
+            <a class="result__snippet">snippet b</a>
+            """
+            let hits = WebAccess.parseSearchResults(html)
+            check(hits.count == 2, "both results parse (got \(hits.count))")
+            check(hits.first?.url == "https://example.com/a",
+                  "uddg redirect unwrapped (got \(hits.first?.url ?? "-"))")
+            check(hits.first?.title == "Example A" && hits.first?.snippet == "snippet a",
+                  "title/snippet pair with entity")
+        }
+
+        // cancel on a terminal phase is inert (late top-right close)
+        do {
+            let m = FakeModel()
+            let e = FakeExec()
+            let doneSem = DispatchSemaphore(value: 0)
+            var last: AITask?
+            let coord = AITaskCoordinator(model: m, executorFor: { _ in e })
+            coord.onUpdate = { t in
+                last = t
+                if case .completed = t.phase { doneSem.signal() }
+            }
+            let tid = coord.start(context: AIContext(request: "hi", target: target,
+                                                      visibleOutput: "", hostFacts: ""))
+            check(waitSem(doneSem), "task completes")
+            coord.cancel(taskId: tid)
+            Thread.sleep(forTimeInterval: 0.1)
+            if case .completed? = last?.phase { check(true, "cancel leaves completed phase alone") }
+            else { check(false, "cancel leaves completed phase alone") }
+        }
+
+        print(failures == 0 ? "ALL PASS" : "\(failures) FAILURES")
         exit(failures == 0 ? 0 : 1)
     }
 }
