@@ -351,7 +351,9 @@ final class SSHConfigManagerView: NSView {
 final class SSHConfigWindowController: NSObject {
     let window: NSWindow
     private let store: SSHConfigStore
-    private var manager: SSHConfigManagerView
+    /// The live content view; replaced whole on theme flips. Internal
+    /// for the layout tests' editor flows.
+    private(set) var manager: SSHConfigManagerView
 
     init(store: SSHConfigStore = SSHConfigStore()) {
         self.store = store

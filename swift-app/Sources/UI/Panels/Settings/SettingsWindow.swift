@@ -49,6 +49,13 @@ final class SettingsRootView: NSView {
     private let searchField = ChromeInput(placeholder: "Search settings", icon: "magnifyingglass")
     private var sectionRows: [SettingsSectionRow] = []
     private let pageHost = NSView()  // no scrollview: pages are fixed row lists that always fit
+    // Chrome baked at init but re-baked by retheme() (theme flips).
+    private let headerStrip = NSView()
+    private let windowTitle = NSTextField(labelWithString: "")
+    private let pathLabel = NSTextField(labelWithString: "")
+    private let listColumn = NSView()
+    private let statusBar = NSView()
+    private let hintLabel = NSTextField(labelWithString: "")
 
     init(store: GhosttyConfigStore, app: Ghostty.App?) {
         self.store = store
@@ -59,7 +66,6 @@ final class SettingsRootView: NSView {
 
         // Top strip (44pt): window title + config path — the traffic
         // lights' band (transparent titlebar, app chrome).
-        let headerStrip = NSView()
         headerStrip.wantsLayer = true
         headerStrip.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
         headerStrip.translatesAutoresizingMaskIntoConstraints = false
@@ -71,12 +77,10 @@ final class SettingsRootView: NSView {
             attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold),
                          .foregroundColor: Chrome.theme.foreground,
                          .kern: 0.8])
-        windowTitle.translatesAutoresizingMaskIntoConstraints = false
         headerStrip.addSubview(windowTitle)
 
         let home = NSHomeDirectory()
         let rawPath = store.url.path
-        let pathLabel = NSTextField(labelWithString: "")
         pathLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
         pathLabel.textColor = Chrome.theme.secondaryText
         pathLabel.lineBreakMode = .byTruncatingMiddle
@@ -89,7 +93,6 @@ final class SettingsRootView: NSView {
         headerStrip.addSubview(pathLabel)
 
         // Left column: search box (tty7's settings search) + sections.
-        let listColumn = NSView()
         listColumn.translatesAutoresizingMaskIntoConstraints = false
         listColumn.wantsLayer = true
         listColumn.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
@@ -138,12 +141,10 @@ final class SettingsRootView: NSView {
         addSubview(pageHost)
 
         // Status bar across the bottom (tty7 26pt strip).
-        let statusBar = NSView()
         statusBar.wantsLayer = true
         statusBar.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
         statusBar.translatesAutoresizingMaskIntoConstraints = false
         addSubview(statusBar)
-        let hintLabel = NSTextField(labelWithString: "")
         hintLabel.stringValue = "Changes write the config file and apply to open terminals immediately."
         hintLabel.font = .systemFont(ofSize: 11.5)
         hintLabel.textColor = Chrome.theme.secondaryText
@@ -231,6 +232,28 @@ final class SettingsRootView: NSView {
     /// controls show what the disk says.
     func reload() {
         rebuildPage()
+    }
+
+    /// Theme flip: re-bake the init-time chrome (top strip, left
+    /// column, status bar, titles), re-theme the section rows and the
+    /// search box, and reload the page (its rows build fresh anyway).
+    func retheme() {
+        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        headerStrip.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        listColumn.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        pageHost.layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        statusBar.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        windowTitle.attributedStringValue = NSAttributedString(
+            string: "SETTINGS",
+            attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                         .foregroundColor: Chrome.theme.foreground,
+                         .kern: 0.8])
+        pathLabel.textColor = Chrome.theme.secondaryText
+        hintLabel.textColor = Chrome.theme.secondaryText
+        searchField.retheme()
+        sectionRows.forEach { $0.retheme() }
+        rebuildPage()
+        needsDisplay = true
     }
 
     private var currentPage: NSView?
@@ -858,8 +881,7 @@ final class SettingsWindowController: NSObject {
             named: Chrome.theme.isDark ? .darkAqua : .aqua)
         applyWindowTranslucency()
         root.layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
-        root.reload()
-        root.needsDisplay = true
+        root.retheme()
     }
 
     /// Re-reads the file (see reload()) and brings the window front,

@@ -133,8 +133,18 @@ struct ChromeTheme {
         NSColor.black.withAlphaComponent(isDark ? 0.35 : 0.12)
     }
 
+    /// Muted text — a SOLID blend toward the foreground, never an
+    /// alpha: alpha text washes out over translucent surfaces (the
+    /// sidebar-title-on-desktop report) and over the strips that sit a
+    /// step off the background.
     var secondaryText: NSColor {
-        foreground.withAlphaComponent(0.55)
+        blend(background, with: foreground, fraction: 0.62)
+    }
+
+    /// Quietest solid step (row counts, footnotes) — the old
+    /// secondaryText-with-alpha double-dip lived here.
+    var tertiaryText: NSColor {
+        blend(background, with: foreground, fraction: 0.45)
     }
 
     /// Hover fill: tty7's recipe — the surface lifted toward the foreground
@@ -144,9 +154,17 @@ struct ChromeTheme {
     }
 
     /// Icon glyphs sit brighter than secondary text (tty7 tiles use the
-    /// sidebar foreground, not its muted step).
+    /// sidebar foreground, not its muted step). Solid for the same
+    /// translucent-surface reason as secondaryText.
     var iconTint: NSColor {
-        foreground.withAlphaComponent(0.85)
+        blend(background, with: foreground, fraction: 0.85)
+    }
+
+    /// Input field surface — a clearly readable step up from hoverFill
+    /// (a 1.18 lift is a hover wash, not a field) plus the hairline
+    /// border ChromeInput draws with it.
+    var inputFill: NSColor {
+        blend(background, with: foreground, fraction: isDark ? 0.11 : 0.07)
     }
 
     private func luminance(_ color: NSColor) -> CGFloat {
@@ -220,7 +238,9 @@ struct ChromeTheme {
     }
 
     var selectionPill: NSColor {
-        isDark ? NSColor.white.withAlphaComponent(0.10) : NSColor.black.withAlphaComponent(0.08)
+        // Solid blend, not an alpha wash: the pill must read over the
+        // sidebar surface whatever the window composites behind it.
+        blend(background, with: foreground, fraction: isDark ? 0.16 : 0.12)
     }
 
     /// Editor current-line fill: the same quiet lift as the hover, one

@@ -162,6 +162,7 @@ final class SettingsSectionRow: NSView {
     var onClick: (() -> Void)?
 
     private let titleLabel = NSTextField(labelWithString: "")
+    private var iconView: IconLabel!
     private var ownTracking: NSTrackingArea?
     private var hovered = false
     private var selected = false
@@ -170,8 +171,8 @@ final class SettingsSectionRow: NSView {
         super.init(frame: .zero)
         wantsLayer = true
 
-        let icon = IconLabel(section.symbol)
-        addSubview(icon)
+        iconView = IconLabel(section.symbol)
+        addSubview(iconView)
 
         titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
         titleLabel.textColor = Chrome.theme.foreground
@@ -180,11 +181,11 @@ final class SettingsSectionRow: NSView {
         titleLabel.stringValue = section.title
 
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 16),
-            icon.heightAnchor.constraint(equalToConstant: 16),
-            titleLabel.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 16),
+            iconView.heightAnchor.constraint(equalToConstant: 16),
+            titleLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 10),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
@@ -194,6 +195,13 @@ final class SettingsSectionRow: NSView {
 
     func setSelected(_ on: Bool) {
         selected = on
+        applyFill()
+    }
+
+    /// Theme flip: title/icon colors are baked at init — re-bake.
+    func retheme() {
+        iconView.contentTintColor = Chrome.theme.iconTint
+        titleLabel.textColor = Chrome.theme.foreground
         applyFill()
     }
 

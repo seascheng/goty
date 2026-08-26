@@ -282,6 +282,13 @@ final class AppWindowController: NSObject {
     /// Settings can now switch it at runtime. Called from the app
     /// delegate's config-change observer.
     func applyChromeTheme(cfg: Ghostty.Config? = nil) {
+        // APP-wide, not just this window: popup menus (host pickers,
+        // context menus) are their own windows — they follow the app's
+        // effective appearance, and a light-theme app with dark menus
+        // (or menu hover fills that mismatch the chrome) is the whole
+        // "menu items don't follow the theme" class.
+        NSApp.appearance = NSAppearance(
+            named: Chrome.theme.isDark ? .darkAqua : .aqua)
         window.appearance = NSAppearance(
             named: Chrome.theme.isDark ? .darkAqua : .aqua)
 

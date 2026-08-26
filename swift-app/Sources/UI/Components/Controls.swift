@@ -398,8 +398,11 @@ final class ChromeInput: NSView, NSTextViewDelegate {
 
     private let placeholderLabel = NSTextField(labelWithString: "")
     fileprivate let textView = InputTextView()
+    private let placeholderText: String
+    private var iconView: NSImageView?
 
     init(placeholder: String = "", icon: String? = nil) {
+        self.placeholderText = placeholder
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
@@ -458,20 +461,21 @@ final class ChromeInput: NSView, NSTextViewDelegate {
 
         var textLeading = leadingAnchor
         var textLeadingConstant: CGFloat = 10
-        if let icon {
-            let iconView = NSImageView()
-            iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
-            iconView.contentTintColor = Chrome.theme.secondaryText
-            iconView.symbolConfiguration = .init(pointSize: 12, weight: .regular)
-            iconView.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(iconView)
+        if let iconName = icon {
+            let icon = NSImageView()
+            icon.image = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
+            icon.contentTintColor = Chrome.theme.secondaryText
+            icon.symbolConfiguration = .init(pointSize: 12, weight: .regular)
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(icon)
+            iconView = icon
             NSLayoutConstraint.activate([
-                iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-                iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-                iconView.widthAnchor.constraint(equalToConstant: 16),
-                iconView.heightAnchor.constraint(equalToConstant: 16),
+                icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+                icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+                icon.widthAnchor.constraint(equalToConstant: 16),
+                icon.heightAnchor.constraint(equalToConstant: 16),
             ])
-            textLeading = iconView.trailingAnchor
+            textLeading = icon.trailingAnchor
             textLeadingConstant = 6
         }
 
@@ -497,13 +501,26 @@ final class ChromeInput: NSView, NSTextViewDelegate {
     /// IconButton rule — a future ghostty-theme switch repaints on
     /// re-present).
     private func applyTheme() {
-        layer?.backgroundColor = Chrome.theme.hoverFill.cgColor
+        layer?.backgroundColor = Chrome.theme.inputFill.cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = Chrome.theme.hairline.cgColor
         textView.textColor = Chrome.theme.foreground
         textView.insertionPointColor = Chrome.theme.foreground
         textView.selectedTextAttributes = [
             .backgroundColor: Chrome.theme.accent,
             .foregroundColor: Chrome.theme.accentText,
         ]
+    }
+
+    /// Theme flip: applyTheme covers box/text/caret/selection; the
+    /// placeholder string and icon tint are build-time — re-bake here.
+    func retheme() {
+        applyTheme()
+        placeholderLabel.attributedStringValue = NSAttributedString(
+            string: placeholderText,
+            attributes: [.font: NSFont.systemFont(ofSize: 12.5, weight: .regular),
+                         .foregroundColor: Chrome.theme.secondaryText])
+        iconView?.contentTintColor = Chrome.theme.secondaryText
     }
 
     private func updatePlaceholder() {

@@ -69,7 +69,7 @@ final class SectionHeaderView: NSView {
                 string: String(count),
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 10, weight: .medium),
-                    .foregroundColor: Chrome.theme.secondaryText.withAlphaComponent(0.7),
+                    .foregroundColor: Chrome.theme.tertiaryText,
                 ])
             countField.isHidden = false
         } else {
