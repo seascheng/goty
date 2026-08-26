@@ -480,9 +480,15 @@ final class PaneHost: NSView {
     /// configured and a live target — otherwise typing passes through.
     func refreshAITrigger() { updateAITrigger(lastForegroundCommand) }
     private func updateAITrigger(_ fg: String?) {
-        aiTrigger.armed = Self.isShellPrompt(fg)
-            && OpenAICompatibleClient.isConfigured
-            && coordinatorFeed?() != nil
+        let prompt = Self.isShellPrompt(fg)
+        let configured = OpenAICompatibleClient.isConfigured
+        let feed = coordinatorFeed?() != nil
+        let next = prompt && configured && feed
+        if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
+            let why = !prompt ? "fg=\(fg ?? "nil") not a shell" : !configured ? "provider unset" : !feed ? "no target" : "armed"
+            FileHandle.standardError.write("AITRIGGER pane=\(paneId) \(why)\n".data(using: .utf8)!)
+        }
+        aiTrigger.armed = next
     }
 
     /// True for nil (spawned shell) and the shell basenames — matches
