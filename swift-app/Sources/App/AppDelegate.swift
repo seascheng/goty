@@ -513,12 +513,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // rebuild the client too, or tasks keep firing 401s on the
         // stale key until restart (plan Task 8: prefs re-read per start).
         let key = Keychain.secret(for: "aiApiKey") ?? ""
-        let token = p.aiBaseUrl + "\n" + p.aiModel + "\n" + key
+        let token = p.aiBaseUrl + "\n" + p.aiModel + "\n" + key + "\n" + p.aiApiType
         if let box = aiCoordinatorBox, box.token == token { return box.coordinator }
         let client = OpenAICompatibleClient(
             baseUrl: p.aiBaseUrl,
             apiKey: key,
-            model: p.aiModel)
+            model: p.aiModel,
+            apiType: OpenAICompatibleClient.APIType(rawValue: p.aiApiType) ?? .openai)
         let coord = AITaskCoordinator(
             model: client,
             executorFor: { target in

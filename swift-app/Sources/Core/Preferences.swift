@@ -25,6 +25,7 @@ final class AppPreferences {
         static let daemonUpgradeDeclined = "daemonUpgradeDeclined"
         static let aiBaseUrl = "aiBaseUrl"
         static let aiModel = "aiModel"
+        static let aiApiType = "aiApiType"
     }
 
     private let defaults: UserDefaults
@@ -46,6 +47,7 @@ final class AppPreferences {
             .flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) } ?? [:]
         aiBaseUrl = defaults.string(forKey: Key.aiBaseUrl) ?? ""
         aiModel = defaults.string(forKey: Key.aiModel) ?? ""
+        aiApiType = defaults.string(forKey: Key.aiApiType) ?? "openai"
     }
 
     var sidebarCollapsed: Bool {
@@ -91,6 +93,11 @@ final class AppPreferences {
     }
     var aiModel: String {
         didSet { defaults.set(aiModel, forKey: Key.aiModel) }
+    }
+    /// Wire protocol of the endpoint: "openai" (chat/completions) or
+    /// "anthropic" (messages). Anything else reads as openai.
+    var aiApiType: String {
+        didSet { defaults.set(aiApiType, forKey: Key.aiApiType) }
     }
 
     /// True when this exact daemon was already declined — stay silent.

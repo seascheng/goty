@@ -149,6 +149,28 @@ import Foundation
             "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"}}]}".utf8))
         check(plain?.text == "done" && plain?.toolCalls.isEmpty == true, "plain reply parsed")
 
+        // anthropic-messages shaping: system hoisted, tool_use/tool_result blocks
+        let aBody = OpenAICompatibleClient.buildAnthropicBody(
+            model: "m", messages: [
+                ChatMessage(role: "system", content: "sys prompt", toolCalls: nil, toolCallId: nil),
+                ChatMessage(role: "user", content: "list files", toolCalls: nil, toolCallId: nil),
+                ChatMessage(role: "assistant", content: "thinking",
+                            toolCalls: [ToolCall(id: "t1", name: "bash", argumentsJSON: "{\"command\":\"ls\"}")], toolCallId: nil),
+                ChatMessage(role: "tool", content: "file-a", toolCalls: nil, toolCallId: "t1"),
+            ], tools: [ToolSpec(name: "bash", description: "run", parametersJSON: "{\"type\":\"object\"}")])
+        check(aBody.contains("\"system\":\"sys prompt\""), "anthropic system hoisted")
+        check(aBody.contains("\"tool_use\""), "anthropic tool_use block")
+        check(aBody.contains("\"tool_result\""), "anthropic tool_result block")
+        check(aBody.contains("\"input_schema\""), "anthropic tool schema")
+        let aSample = """
+        {"content":[{"type":"text","text":"about to run"},{"type":"tool_use","id":"c9","name":"bash","input":{"command":"pwd"}}],"stop_reason":"tool_use"}
+        """
+        let aReply = OpenAICompatibleClient.parseAnthropic(data: Data(aSample.utf8))
+        check(aReply?.text == "about to run" && aReply?.toolCalls.first?.name == "bash"
+              && aReply?.toolCalls.first?.argumentsJSON.contains("pwd") == true, "anthropic reply parsed")
+        check(OpenAICompatibleClient.parseAnthropic(data: Data("{\"content\":[]}".utf8)) == nil,
+              "anthropic empty content rejected")
+
         print("— AITaskCoordinator loop —")
         final class FakeModel: ModelClient {
             var script: [[ToolCall]] = []

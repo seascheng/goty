@@ -527,6 +527,15 @@ final class SettingsRootView: NSView {
             return f
         }
         return [
+            SettingSpec(label: "API Type", detail: "Wire protocol of the endpoint.",
+                        key: "ai-api-type") { _, _ in
+                let p = ChromePopup.make()
+                p.load(options: [("OpenAI (chat/completions)", "openai"),
+                                 ("Anthropic (messages)", "anthropic")],
+                       current: prefs.aiApiType.isEmpty ? "openai" : prefs.aiApiType)
+                p.onChange = { value in prefs.aiApiType = value ?? "openai" }
+                return p
+            },
             SettingSpec(label: "Base URL", detail: "Endpoint serving /chat/completions.",
                         key: "ai-base-url") { _, _ in
                 input(placeholder: "https://api.openai.com/v1", current: prefs.aiBaseUrl) {

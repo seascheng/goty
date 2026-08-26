@@ -76,10 +76,19 @@ final class OpenAICompatibleClient: ModelClient {
     private let apiKey: String
     private let model: String
 
-    init(baseUrl: String, apiKey: String, model: String) {
+    /// Wire protocol of the provider endpoint. v1 shapes both request
+    /// and response; litellm-style local proxies stay "openai".
+    enum APIType: String {
+        case openai
+        case anthropic
+    }
+
+    private let apiType: APIType
+    init(baseUrl: String, apiKey: String, model: String, apiType: APIType = .openai) {
         self.baseUrl = baseUrl
         self.apiKey = apiKey
         self.model = model
+        self.apiType = apiType
     }
 
     /// Empty Base URL or Model = the AI feature is disabled (spec: the
@@ -94,11 +103,12 @@ final class OpenAICompatibleClient: ModelClient {
         guard !baseUrl.isEmpty, !model.isEmpty else {
             completion(.failure(.notConfigured)); return
         }
+        let path = apiType == .anthropic ? "/v1/messages" : "/chat/completions"
         var url: URL
         do {
             var base = baseUrl
             while base.hasSuffix("/") { base.removeLast() }
-            guard let parsed = URL(string: base + "/chat/completions") else {
+            guard let parsed = URL(string: base + path) else {
                 completion(.failure(.transport("bad base URL"))); return
             }
             url = parsed
@@ -106,8 +116,16 @@ final class OpenAICompatibleClient: ModelClient {
         var req = URLRequest(url: url, timeoutInterval: 120)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer " + apiKey, forHTTPHeaderField: "Authorization")
-        req.httpBody = Data(buildRequestBody(messages: messages, tools: tools).utf8)
+        if apiType == .anthropic {
+            req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        } else {
+            req.setValue("Bearer " + apiKey, forHTTPHeaderField: "Authorization")
+        }
+        let body = apiType == .anthropic
+            ? Self.buildAnthropicBody(model: model, messages: messages, tools: tools)
+            : buildRequestBody(messages: messages, tools: tools)
+        req.httpBody = Data(body.utf8)
         URLSession.shared.dataTask(with: req) { data, response, error in
             if let error {
                 completion(.failure(.transport(error.localizedDescription))); return
@@ -115,7 +133,9 @@ final class OpenAICompatibleClient: ModelClient {
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 completion(.failure(.http(http.statusCode))); return
             }
-            guard let data, let reply = Self.parse(data: data) else {
+            guard let data,
+                  let reply = self.apiType == .anthropic
+                      ? Self.parseAnthropic(data: data) : Self.parse(data: data) else {
                 completion(.failure(.badResponse)); return
             }
             completion(.success(reply))
@@ -172,6 +192,94 @@ final class OpenAICompatibleClient: ModelClient {
             }
         }
         if text == nil && calls.isEmpty { return nil }
+        return ModelReply(text: text, toolCalls: calls)
+    }
+
+    // MARK: anthropic-messages shaping (pure, test-covered)
+
+    /// Convert our wire-shaped history to the anthropic form: system
+    /// prompt becomes a top-level field; assistant tool calls become
+    /// tool_use content blocks; tool results become user tool_result
+    /// blocks. Uses JSONSerialization dicts end-to-end — the anthropic
+    /// shapes nest content blocks too deeply for the Encodable route.
+    static func buildAnthropicBody(model: String, messages: [ChatMessage],
+                                    tools: [ToolSpec]) -> String {
+        var systemText: [String] = []
+        var outMessages: [[String: Any]] = []
+        for m in messages {
+            switch m.role {
+            case "system":
+                if let c = m.content { systemText.append(c) }
+            case "tool":
+                var block: [String: Any] = ["type": "tool_result",
+                                            "tool_use_id": m.toolCallId ?? ""]
+                if let c = m.content { block["content"] = c }
+                outMessages.append(["role": "user", "content": [block]])
+            case "assistant":
+                var blocks: [[String: Any]] = []
+                if let c = m.content, !c.isEmpty { blocks.append(["type": "text", "text": c]) }
+                for call in m.toolCalls ?? [] {
+                    let input = AnyCodableJSON(jsonString: call.argumentsJSON)
+                    var block: [String: Any] = ["type": "tool_use", "id": call.id, "name": call.name]
+                    if input != nil {
+                        // re-parse through JSONSerialization for the dict path
+                        if let parsed = try? JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8)) {
+                            block["input"] = parsed
+                        } else { block["input"] = [String: Any]() }
+                    } else { block["input"] = [String: Any]() }
+                    blocks.append(block)
+                }
+                if !blocks.isEmpty { outMessages.append(["role": "assistant", "content": blocks]) }
+            default:
+                outMessages.append(["role": m.role,
+                                    "content": [["type": "text", "text": m.content ?? ""]]])
+            }
+        }
+        if outMessages.isEmpty {
+            outMessages.append(["role": "user", "content": [["type": "text", "text": ""]]])
+        }
+        var body: [String: Any] = [
+            "model": model,
+            "max_tokens": 8192,
+            "messages": outMessages,
+        ]
+        if !systemText.isEmpty { body["system"] = systemText.joined(separator: "\n\n") }
+        if !tools.isEmpty {
+            body["tools"] = tools.map { spec -> [String: Any] in
+                var t: [String: Any] = ["name": spec.name, "description": spec.description]
+                t["input_schema"] = AnyCodableJSON(jsonString: spec.parametersJSON)
+                    .flatMap { _ in
+                        (try? JSONSerialization.jsonObject(with: Data(spec.parametersJSON.utf8)))
+                    } as Any? ?? [String: Any]()
+                return t
+            }
+        }
+        return String(data: (try? JSONSerialization.data(withJSONObject: body)) ?? Data(),
+                      encoding: .utf8) ?? "{}"
+    }
+
+    static func parseAnthropic(data: Data) -> ModelReply? {
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let content = obj["content"] as? [[String: Any]] else { return nil }
+        var text: String?
+        var calls: [ToolCall] = []
+        for block in content {
+            switch block["type"] as? String {
+            case "text":
+                let t = (text ?? "") + (block["text"] as? String ?? "")
+                text = t
+            case "tool_use":
+                guard let id = block["id"] as? String,
+                      let name = block["name"] as? String else { continue }
+                let input = block["input"]
+                let jsonData = input.flatMap { try? JSONSerialization.data(withJSONObject: $0) }
+                calls.append(ToolCall(id: id, name: name,
+                                      argumentsJSON: jsonData.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"))
+            default: break
+            }
+        }
+        if text == nil && calls.isEmpty { return nil }
+        if let text, text.isEmpty, calls.isEmpty { return nil }
         return ModelReply(text: text, toolCalls: calls)
     }
 }
