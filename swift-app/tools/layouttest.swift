@@ -8,6 +8,7 @@
 // Built and run by run-tests.sh; NOT part of the app binary.
 
 import AppKit
+@testable import goty
 
 @main
 enum LayoutTest {

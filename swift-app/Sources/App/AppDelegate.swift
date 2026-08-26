@@ -569,6 +569,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     FileHandle.standardError.write("AICARD phase=\(task.phase) host=\(host != nil) frame=\(host?.currentAITaskCard?.frame ?? .zero)\n".data(using: .utf8)!)
                 }
                 host?.showAITask(task)
+                // A task card showing clears stale ask cards on OTHER
+                // panes (one AI surface at a time — tasks win).
+                for other in self.hostPool.values where other !== host {
+                    other.hideAITaskIfInputMode()
+                }
                 if let host { self.wireAICard(host, task: task) }
             }
         }
@@ -577,6 +582,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startAITask(host: PaneHost, text: String) {
+        // A leftover ⌘⇧A card on this pane would freeze and block the
+        // task render (the inputMode guard) — the "two panels" bug.
+        host.hideAITaskIfInputMode()
         guard let target = host.coordinatorFeed?()
             ?? coordinator.aiTarget(for: host.hostKey) else { return }
         let context = AIContext(request: text, target: target,
@@ -605,7 +613,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             host.hideAITask()
         }
         card.onContinue = { [weak owner] in owner?.continueBudget(taskId: id) }
-        card.onClose = { host.hideAITask() }
+        // Top-right close: always available; closing a still-running
+        // agent cancels it first (cancel is inert on terminal phases).
+        card.onClose = { [weak owner] in
+            owner?.cancel(taskId: id)
+            host.hideAITask()
+        }
         // Spec: fill never auto-runs — command + trailing space, the
         // user presses Enter themselves.
         card.onFill = { [weak host] command in host?.sendText(command + " ") }
@@ -1086,6 +1099,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func menuAskAI() {
         guard let store = coordinator.store, let ws = store.focused,
               let pane = coordinator.activePane(of: ws) else { return }
+        // The ask is app-global: clear any other pane's ask card first.
+        for host in hostPool.values { host.hideAITaskIfInputMode() }
         hostPool[HostKey(workspace: ws.id, pane: pane.id)]?.openAIInputMode()
     }
 

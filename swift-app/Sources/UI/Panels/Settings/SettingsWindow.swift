@@ -454,7 +454,7 @@ final class SettingsRootView: NSView {
             (title, subtitle) = ("Terminal", "Cursor, scrollback, and close behavior.")
         case .ai:
             (title, subtitle) = ("AI",
-                "OpenAI-compatible provider for @ai tasks. Empty Base URL or Model disables the feature.")
+                "Provider for @ai tasks. Empty Base URL or Model disables the feature.")
         }
 
         let page = SettingsFormPage(title: title, subtitle: subtitle)
@@ -512,6 +512,11 @@ final class SettingsRootView: NSView {
     /// live model as the rest of Settings (no Save button).
     private func aiSpecs() -> [SettingSpec] {
         let prefs = AppPreferences.shared
+        // hasSecret, NOT secret(for:): rendering the page must never
+        // decrypt the key — a real read pops the keychain ACL dialog.
+        let keychainDetail = Keychain.hasSecret(for: "aiApiKey")
+            ? "Stored in the Keychain — currently set."
+            : "Stored in the Keychain — not set."
         func input(placeholder: String, current: String,
                    write: @escaping (String) -> Void) -> ChromeInput {
             let f = ChromeInput(placeholder: placeholder)
@@ -548,29 +553,27 @@ final class SettingsRootView: NSView {
                     prefs.aiModel = $0
                 }
             },
-            SettingSpec(label: "API Key", detail: "Stored in the Keychain, not the config file.",
+            SettingSpec(label: "API Key", detail: keychainDetail,
                         key: "ai-api-key") { _, _ in
-                let s = NSSecureTextField()
-                s.placeholderString = "sk-…"
-                s.font = .systemFont(ofSize: 12.5, weight: .regular)
-                s.focusRingType = .none
-                s.bezelStyle = .roundedBezel
-                s.usesSingleLineMode = true
-                s.target = Self.self
-                s.action = #selector(Self.commitAPIKey(_:))
-                s.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
-                s.heightAnchor.constraint(equalToConstant: ControlMetrics.inputHeight).isActive = true
-                return s
+                // Themed field like every other row (a native
+                // NSSecureTextField drags REQUIRED autoresizing
+                // constraints into the row — the card shrank to hug
+                // it — and its bezel ignores the ghostty theme). The
+                // secret is never rendered: the field starts empty and
+                // commits on Return only (no per-keystroke Keychain
+                // writes); empty + Return clears it.
+                let f = ChromeInput(placeholder: "sk-… (paste, then Return)")
+                f.onReturn = { [weak f] in
+                    guard let f else { return }
+                    let v = f.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    Keychain.setSecret(v.isEmpty ? nil : v, for: "aiApiKey")
+                    f.stringValue = ""   // never echo the secret
+                }
+                f.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+                f.heightAnchor.constraint(equalToConstant: ControlMetrics.inputHeight).isActive = true
+                return f
             },
         ]
-    }
-
-    /// NSSecureTextField commits on Return (target/action): write the
-    /// Keychain item. Lives on the root so the field's target stays
-    /// alive for the window's lifetime.
-    @objc fileprivate static func commitAPIKey(_ field: NSSecureTextField) {
-        Keychain.setSecret(field.stringValue.isEmpty ? nil : field.stringValue,
-                           for: "aiApiKey")
     }
 
     private func appearanceSpecs() -> [SettingSpec] {

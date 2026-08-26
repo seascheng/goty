@@ -7,6 +7,7 @@
 //
 // Built and run by run-tests.sh; NOT part of the app binary.
 import AppKit
+@testable import goty
 
 @main
 enum SettingsTest {
@@ -272,7 +273,7 @@ enum SettingsTest {
         check(aiPage != nil, "ai page builds")
         check(aiPage?.controlsByKey["ai-base-url"] is ChromeInput, "base url field present")
         check(aiPage?.controlsByKey["ai-model"] is ChromeInput, "model field present")
-        check(aiPage?.controlsByKey["ai-api-key"] is NSSecureTextField, "api key secure field present")
+        check(aiPage?.controlsByKey["ai-api-key"] is ChromeInput, "api key field present (themed, not native)")
         // Live write path: a user act (Return) writes the pref directly.
         if let f = aiPage?.controlsByKey["ai-model"] as? ChromeInput {
             f.stringValue = "gpt-test"
@@ -281,11 +282,18 @@ enum SettingsTest {
         } else {
             check(false, "model field writes the pref live")
         }
-        if let s = aiPage?.controlsByKey["ai-api-key"] as? NSSecureTextField {
-            s.stringValue = "k-test"
-            if let a = s.action, let t = s.target { t.perform(a, with: s) }
-            check(Keychain.secret(for: "aiApiKey") == "k-test", "api key field writes keychain live")
-            Keychain.setSecret(nil, for: "aiApiKey")
+        // API key: Return commits to the Keychain; the field clears
+        // (the secret is never echoed) and an empty commit clears it.
+        if let f = aiPage?.controlsByKey["ai-api-key"] as? ChromeInput {
+            f.stringValue = "k-test"
+            f.onReturn?()
+            check(Keychain.secret(for: "aiApiKey") == "k-test",
+                  "api key field writes keychain live")
+            check(f.stringValue.isEmpty, "api key field clears after commit (no secret echo)")
+            f.stringValue = ""
+            f.onReturn?()
+            check(Keychain.secret(for: "aiApiKey") == nil,
+                  "empty commit clears the keychain item")
         } else {
             check(false, "api key field writes keychain live")
         }

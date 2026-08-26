@@ -38,6 +38,10 @@ struct AITask {
     private(set) var rounds: [AIRound]
     private(set) var pendingProposal: AIProposal?
     private(set) var budgetRemaining: Int
+    /// Partial model output while a turn streams (the card renders it
+    /// live); cleared when the turn resolves.
+    private(set) var streamingText: String?
+    private(set) var streamingReasoning: String?
 
     init(id: UUID = UUID(), context: AIContext, budget: Int = 25) {
         self.id = id
@@ -70,5 +74,15 @@ struct AITask {
 
     mutating func setPending(_ proposal: AIProposal?) {
         pendingProposal = proposal
+    }
+
+    mutating func appendLive(_ delta: StreamDelta) {
+        if let t = delta.text { streamingText = (streamingText ?? "") + t }
+        if let r = delta.reasoning { streamingReasoning = (streamingReasoning ?? "") + r }
+    }
+
+    mutating func clearLive() {
+        streamingText = nil
+        streamingReasoning = nil
     }
 }

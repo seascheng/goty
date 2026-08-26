@@ -3,6 +3,7 @@
 // real file. Two rounds of "New File/New Folder 闪一下就没了" came from
 // focus-churn kills; this is the contract that stops a third.
 import AppKit
+@testable import goty
 
 /// Minimal KeyedRow stand-in for container-layout tests.
 final class FilesTestRow: NSView, KeyedRow {

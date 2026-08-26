@@ -18,7 +18,7 @@ import AppKit
 final class AIMarkdownBox: NSView {
     private let textView = NSTextView()
     private let scroll = NSScrollView()
-    var maxHeight: CGFloat = 240
+    var maxHeight: CGFloat = 320
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -81,18 +81,31 @@ final class AIMarkdownBox: NSView {
 
     override var intrinsicContentSize: NSSize {
         let container = textView.textContainer ?? NSTextContainer()
+        // NSTextView lays out lazily (on draw); force it or usedRect is
+        // 0 until the first draw — which never comes when the card is
+        // mid-measure.
+        textView.layoutManager?.ensureLayout(for: container)
         let used = textView.layoutManager?.usedRect(for: container).height ?? 0
         return NSSize(width: NSView.noIntrinsicMetric,
                       height: min(maxHeight, ceil(used) + 10))
+    }
+
+    /// Re-derive the text container width from the current frame.
+    /// Called from layout() AND from the owning card before it measures
+    /// fitting height — invalidateIntrinsicContentSize is ignored
+    /// during a layout pass, so the card can't wait for the box to
+    /// invalidate itself.
+    func syncTextContainer() {
+        let clipWidth = scroll.contentView.bounds.width
+        textView.textContainer?.size = NSSize(width: max(clipWidth, 40),
+                                              height: .greatestFiniteMagnitude)
     }
 
     override func layout() {
         super.layout()
         // Width comes from the stack; keep the container tracking so the
         // text re-wraps and the intrinsic height stays honest.
-        let clipWidth = (scroll.contentView as? NSClipView)?.bounds.width ?? bounds.width
-        textView.textContainer?.size = NSSize(width: max(clipWidth, 40),
-                                              height: .greatestFiniteMagnitude)
+        syncTextContainer()
         invalidateIntrinsicContentSize()
     }
 }
@@ -126,6 +139,9 @@ final class AITaskCard: NSView {
     var onSubmit: ((String) -> Void)?
 
     private let stack = NSStackView()
+    /// The ask that started the running task — shown as the card's
+    /// title line (the user's own words, not a phase label).
+    private var taskQuestion: String?
     private var inputMode = false
     private var editMode = false
     private var editingProposal: AIProposal?
@@ -140,7 +156,8 @@ final class AITaskCard: NSView {
     /// summary. Mono, plain text — pastes cleanly anywhere.
     static func transcript(rounds: [AIRound], summary: String) -> String {
         var lines = rounds.map { r in
-            "[\(r.toolName ?? "tool")] \(r.toolInput)\n\(r.toolResult)"
+            (r.reasoning.map { "[think] " + $0 + "\n" } ?? "")
+                + "[\(r.toolName ?? "tool")] \(r.toolInput)\n\(r.toolResult)"
         }
         lines.append(summary)
         return lines.joined(separator: "\n\n")
@@ -159,13 +176,80 @@ final class AITaskCard: NSView {
         stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+
+        // The stack scrolls instead of crushing: the card hugs its
+        // content up to the pane cap (required constraint from the
+        // host), beyond which the body scrolls — long answers used to
+        // get squeezed to one line. Header scrolling away with the
+        // body is fine for v1; split header/footer zones if it bothers.
+        let scroll = NSScrollView()
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = stack
+        addSubview(scroll)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            stack.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
         ])
+        let hug = heightAnchor.constraint(equalTo: stack.heightAnchor)
+        hug.priority = .init(999)   // yield to the pane cap
+        hug.isActive = true
+        // The stack's height is pinned EXPLICITLY to its fitting
+        // height and re-measured per layout pass — otherwise the stack
+        // collapses and crushes the markdown box to a line.
+        bodyHeight = stack.heightAnchor.constraint(equalToConstant: 0)
+        bodyHeight?.priority = .init(999)   // yield to the pane cap
+        bodyHeight?.isActive = true
+
+        // Always-on close (top-right, floats over the scroll body): the
+        // user closes whenever they want — closing cancels a running
+        // agent (AppDelegate wires onClose to cancel). The per-phase
+        // bottom Close buttons went away with it.
+        let close = IconButton()
+        close.translatesAutoresizingMaskIntoConstraints = false
+        close.symbol = "xmark"
+        close.tint = Chrome.theme.secondaryText
+        close.pointSize = 12
+        close.onClick = { [weak self] in self?.onClose?() }
+        addSubview(close)
+        NSLayoutConstraint.activate([
+            close.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            close.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            close.widthAnchor.constraint(equalToConstant: 22),
+            close.heightAnchor.constraint(equalToConstant: 22),
+        ])
+    }
+
+    private var bodyHeight: NSLayoutConstraint?
+
+    override func layout() {
+        super.layout()
+        // fittingSize honors an active height constraint, so measure
+        // with it detached. Markdown boxes must sync their text
+        // container FIRST (their layout() runs after ours — measuring
+        // against a stale width crushed long answers to one line).
+        for case let box as AIMarkdownBox in stack.subviews {
+            box.syncTextContainer()
+        }
+        bodyHeight?.isActive = false
+        let fitting = ceil(stack.fittingSize.height)
+        bodyHeight?.constant = fitting
+        bodyHeight?.isActive = true
+        if pendingScroll {
+            pendingScroll = false
+            DispatchQueue.main.async { [stack] in
+                stack.scroll(NSPoint(x: 0, y: stack.bounds.height))
+            }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
@@ -174,11 +258,13 @@ final class AITaskCard: NSView {
 
     /// ⌘⇧A: an empty card with a request field. Submitting follows the
     /// exact @ai path (PaneHost routes onSubmit to onAITask).
+    var isInputMode: Bool { inputMode }
+
     func enterInputMode(target: ExecutionTarget?) {
         inputMode = true
         editMode = false
         rebuild { group in
-            group.header(target: target, phase: "Ask AI")
+            group.header(question: nil, target: target, phase: "Ask AI")
             let field = ChromeInput(placeholder: "Ask the model to do what, where?")
             field.onReturn = { [weak self] in self?.submitInput() }
             field.onEscape = { [weak self] in self?.onClose?() }
@@ -200,18 +286,29 @@ final class AITaskCard: NSView {
 
     func render(task: AITask, target: ExecutionTarget) {
         guard !inputMode else { return }   // typed request wins until submitted
+        taskQuestion = task.context.request
         if editMode { renderEdit(task: task, target: target); return }
         switch task.phase {
         case .idle, .thinking:
             rebuild { group in
-                group.header(target: target, phase: "thinking…")
+                group.header(question: taskQuestion, target: target,
+                             phase: (task.streamingText?.isEmpty ?? true) ? "thinking…" : "answering…")
                 group.rounds(task.rounds)
+                if let r = task.streamingReasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !r.isEmpty {
+                    group.thinkingBlock(r)
+                }
+                if let t = task.streamingText?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !t.isEmpty {
+                    _ = group.markdown(t)
+                }
             }
         case .awaitingConfirmation:
             if let proposal = task.pendingProposal {
                 if case .bash(let command) = proposal.op { lastBashCommand = command }
                 rebuild { group in
-                    group.header(target: target, phase: "confirmation required")
+                    group.header(question: taskQuestion, target: target,
+                                 phase: "confirmation required")
                     group.rounds(task.rounds)
                     group.proposal(proposal, target: target)
                     group.buttons {
@@ -229,7 +326,8 @@ final class AITaskCard: NSView {
             }
         case .budgetExhausted(let progress):
             rebuild { group in
-                group.header(target: target, phase: "round budget exhausted")
+                group.header(question: taskQuestion, target: target,
+                             phase: "round budget exhausted")
                 group.rounds(task.rounds)
                 group.label("25 rounds used. \(progress)",
                             font: .systemFont(ofSize: 12), color: Chrome.theme.secondaryText)
@@ -245,13 +343,13 @@ final class AITaskCard: NSView {
         case .executing:
             if case .bash(let command)? = task.pendingProposal?.op { lastBashCommand = command }
             rebuild { group in
-                group.header(target: target, phase: "executing…")
+                group.header(question: taskQuestion, target: target, phase: "executing…")
                 group.rounds(task.rounds)
             }
         case .completed(let summary):
             lastTranscript = Self.transcript(rounds: task.rounds, summary: summary)
             rebuild { group in
-                group.header(target: target, phase: "done")
+                group.header(question: taskQuestion, target: target, phase: "done")
                 group.rounds(task.rounds)
                 _ = group.markdown(summary)
                 group.buttons {
@@ -264,13 +362,12 @@ final class AITaskCard: NSView {
                         guard let cmd = self?.lastBashCommand else { return }
                         self?.onFill?(cmd)
                     }
-                    $0.add("Close", .ghost) { [weak self] in self?.onClose?() }
                 }
             }
         case .failed(let message):
             lastTranscript = message
             rebuild { group in
-                group.header(target: target, phase: "failed")
+                group.header(question: taskQuestion, target: target, phase: "failed")
                 _ = group.markdown(message)
                 group.buttons {
                     $0.add("Copy", .ghost) { [weak self] in
@@ -283,10 +380,7 @@ final class AITaskCard: NSView {
             }
         case .cancelled:
             rebuild { group in
-                group.header(target: target, phase: "cancelled")
-                group.buttons {
-                    $0.add("Close", .ghost) { [weak self] in self?.onClose?() }
-                }
+                group.header(question: taskQuestion, target: target, phase: "cancelled")
             }
         }
     }
@@ -297,7 +391,7 @@ final class AITaskCard: NSView {
         guard let proposal = editingProposal ?? task.pendingProposal else { return }
         editingProposal = proposal
         rebuild { group in
-            group.header(target: target, phase: "edit proposal")
+            group.header(question: taskQuestion, target: target, phase: "edit proposal")
             switch proposal.op {
             case .bash(let command):
                 group.editField(label: "command", text: command, tag: 1)
@@ -374,7 +468,18 @@ final class AITaskCard: NSView {
         for view in stack.views { stack.removeView(view) }
         inputField = nil
         build(Group(card: self))
+        // New content lands at the bottom of the (now scrollable) body.
+        // Scrolling HERE ran before the height re-measure landed, so the
+        // resize snapped the view back to the top — scroll AFTER layout.
+        pendingScroll = true
+        // The scroll view isolates layout: stack changes don't mark the
+        // card dirty, so re-measure explicitly on the next pass.
+        needsLayout = true
     }
+
+    /// Set by rebuild, consumed by layout(): scroll to the bottom once
+    /// the re-measured height has actually landed.
+    private var pendingScroll = false
 
     /// Section helpers scoped to one rebuild. Views keep default tag 0;
     /// edit-mode editors carry their parse tag.
@@ -382,36 +487,57 @@ final class AITaskCard: NSView {
         let card: AITaskCard
         private var stack: NSStackView { card.stack }
 
-        func header(target: ExecutionTarget?, phase: String) {
+        func header(question: String?, target: ExecutionTarget?, phase: String) {
             let name = target?.displayName ?? "Local"
             let cwd = target?.cwd ?? "~"
-            let title = name + " · " + cwd
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.spacing = 8
-            row.addView(label(title, font: .systemFont(ofSize: 12, weight: .semibold),
-                              color: Chrome.theme.foreground), in: .leading)
-            row.addView(label("AI · \(phase)", font: .systemFont(ofSize: 11),
-                              color: Chrome.theme.secondaryText), in: .leading)
-            let spacer = NSView()
-            spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-            row.addView(spacer, in: .leading)
-            add(views: [row])
-            row.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
+            // The user's original ask IS the title — one bold line,
+            // truncated; the meta line (AI · phase · target) sits
+            // quietly under it.
+            if let question, !question.isEmpty {
+                let q = label(question, font: .systemFont(ofSize: 12.5, weight: .semibold),
+                              color: Chrome.theme.foreground)
+                q.lineBreakMode = .byTruncatingTail
+                q.maximumNumberOfLines = 1
+                q.cell?.truncatesLastVisibleLine = true
+            }
+            label("AI · \(phase) · \(name) · \(cwd)",
+                  font: .systemFont(ofSize: 11), color: Chrome.theme.secondaryText)
         }
 
         func rounds(_ rounds: [AIRound]) {
             guard !rounds.isEmpty else { return }
-            for round in rounds.suffix(6) {
+            for round in rounds.suffix(8) {
+                if let think = round.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !think.isEmpty {
+                    thinkingBlock(think)
+                }
+                // pi/omp shape: one line per round — tool name + the
+                // result's first line, tail-truncated. The full result
+                // stays in Copy; detail here is noise.
                 let name = round.toolName ?? "tool"
-                let line = "› \(name)  \(round.toolResult)"
-                add(views: [mono(line)])
+                let first = round.toolResult
+                    .split(separator: "\n", omittingEmptySubsequences: true)
+                    .first.map { "  \($0)" } ?? ""
+                let line = mono("› \(name)\(first)")
+                line.lineBreakMode = .byTruncatingTail
+                line.maximumNumberOfLines = 1
+                line.cell?.truncatesLastVisibleLine = true
             }
-            if rounds.count > 6 {
-                add(views: [label("+\(rounds.count - 6) more rounds",
+            if rounds.count > 8 {
+                add(views: [label("+\(rounds.count - 8) more rounds",
                                   font: .systemFont(ofSize: 11),
                                   color: Chrome.theme.secondaryText)])
             }
+        }
+
+        /// The model's own reasoning for one round: muted mono preview,
+        /// capped at 2 lines — it's context for the line under it.
+        func thinkingBlock(_ text: String) {
+            let body = mono(text)
+            body.textColor = Chrome.theme.secondaryText
+            body.lineBreakMode = .byTruncatingTail
+            body.maximumNumberOfLines = 2
+            body.cell?.truncatesLastVisibleLine = true
         }
 
         func proposal(_ proposal: AIProposal, target: ExecutionTarget) {
@@ -493,7 +619,7 @@ final class AITaskCard: NSView {
         /// Selectable mono text (tool output, transcripts).
         func monoSelectable(_ text: String) -> AIMarkdownBox {
             let box = AIMarkdownBox(frame: .zero)
-            box.maxHeight = 140
+            box.maxHeight = 180
             box.setPlainText(text, font: .monospacedSystemFont(ofSize: 11.5, weight: .regular))
             add(views: [box])
             box.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor,

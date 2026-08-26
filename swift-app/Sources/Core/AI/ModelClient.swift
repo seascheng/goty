@@ -53,7 +53,18 @@ struct ToolSpec {
 
 struct ModelReply {
     var text: String?
+    /// Extended-thinking / chain-of-thought the model exposed with the
+    /// reply (OpenAI "reasoning_content"/"reasoning", Anthropic thinking
+    /// blocks). nil when the model or endpoint doesn't emit it.
+    var reasoning: String? = nil
     var toolCalls: [ToolCall]
+}
+
+/// One streaming chunk: text and/or reasoning fragments (either may
+/// be nil; empty fragments are dropped by the parser).
+struct StreamDelta {
+    var text: String?
+    var reasoning: String?
 }
 
 enum ModelError: Error, Equatable {
@@ -68,6 +79,20 @@ enum ModelError: Error, Equatable {
 protocol ModelClient: AnyObject {
     func complete(messages: [ChatMessage], tools: [ToolSpec],
                    completion: @escaping (Result<ModelReply, ModelError>) -> Void)
+    /// Streaming variant: onDelta fires as chunks arrive (any thread);
+    /// completion carries the assembled reply. The default falls back
+    /// to the buffered call (fakes, non-streaming endpoints).
+    func stream(messages: [ChatMessage], tools: [ToolSpec],
+                onDelta: @escaping (StreamDelta) -> Void,
+                completion: @escaping (Result<ModelReply, ModelError>) -> Void)
+}
+
+extension ModelClient {
+    func stream(messages: [ChatMessage], tools: [ToolSpec],
+                onDelta: @escaping (StreamDelta) -> Void,
+                completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
+        complete(messages: messages, tools: tools, completion: completion)
+    }
 }
 
 /// One OpenAI-compatible endpoint (`{base}/chat/completions`).
@@ -100,6 +125,20 @@ final class OpenAICompatibleClient: ModelClient {
 
     func complete(messages: [ChatMessage], tools: [ToolSpec],
                    completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
+        perform(messages: messages, tools: tools, allowThinking: true,
+                stream: false, onDelta: nil, completion: completion)
+    }
+
+    func stream(messages: [ChatMessage], tools: [ToolSpec],
+                onDelta: @escaping (StreamDelta) -> Void,
+                completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
+        perform(messages: messages, tools: tools, allowThinking: true,
+                stream: true, onDelta: onDelta, completion: completion)
+    }
+
+    private func perform(messages: [ChatMessage], tools: [ToolSpec], allowThinking: Bool,
+                         stream: Bool, onDelta: ((StreamDelta) -> Void)?,
+                         completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
         guard !baseUrl.isEmpty, !model.isEmpty else {
             completion(.failure(.notConfigured)); return
         }
@@ -122,16 +161,40 @@ final class OpenAICompatibleClient: ModelClient {
         } else {
             req.setValue("Bearer " + apiKey, forHTTPHeaderField: "Authorization")
         }
-        let body = apiType == .anthropic
-            ? Self.buildAnthropicBody(model: model, messages: messages, tools: tools)
-            : buildRequestBody(messages: messages, tools: tools)
-        req.httpBody = Data(body.utf8)
+        if apiType == .anthropic {
+            // Extended thinking is surfaced in the card's think block;
+            // the budget must sit below max_tokens (8192).
+            // ponytail: fixed 1024 budget — make it a setting if it ever
+            // needs tuning per model.
+            var body = Self.buildAnthropicBody(model: model, messages: messages, tools: tools)
+            if allowThinking { body["thinking"] = ["type": "enabled", "budget_tokens": 1024] }
+            if stream { body["stream"] = true }
+            req.httpBody = Data((try? JSONSerialization.data(withJSONObject: body)) ?? Data())
+        } else {
+            req.httpBody = Data(buildRequestBody(messages: messages, tools: tools,
+                                                 stream: stream).utf8)
+        }
+        if stream {
+            streamRequest(req, messages: messages, tools: tools, allowThinking: allowThinking,
+                          onDelta: onDelta, completion: completion)
+            return
+        }
         URLSession.shared.dataTask(with: req) { data, response, error in
             if let error {
                 completion(.failure(.transport(error.localizedDescription))); return
             }
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                completion(.failure(.http(http.statusCode))); return
+            if let http = response as? HTTPURLResponse {
+                // Models without extended thinking reject the thinking
+                // param with 400 — retry once without it rather than
+                // failing the whole task.
+                if http.statusCode == 400 && self.apiType == .anthropic && allowThinking {
+                    self.perform(messages: messages, tools: tools, allowThinking: false,
+                                 stream: false, onDelta: onDelta, completion: completion)
+                    return
+                }
+                if !(200...299).contains(http.statusCode) {
+                    completion(.failure(.http(http.statusCode))); return
+                }
             }
             guard let data,
                   let reply = self.apiType == .anthropic
@@ -140,6 +203,43 @@ final class OpenAICompatibleClient: ModelClient {
             }
             completion(.success(reply))
         }.resume()
+    }
+
+    /// SSE streaming pass: parses server-sent events incrementally and
+    /// assembles the final reply. Deltas fire on a URLSession task
+    /// thread; the coordinator owns its own queue hop. A 400 thinking
+    /// rejection retries once buffered (rare path — not worth a second
+    /// stream pass).
+    private func streamRequest(_ req: URLRequest, messages: [ChatMessage], tools: [ToolSpec],
+                               allowThinking: Bool, onDelta: ((StreamDelta) -> Void)?,
+                               completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
+        Task {
+            do {
+                let (bytes, response) = try await URLSession.shared.bytes(for: req)
+                if let http = response as? HTTPURLResponse {
+                    if http.statusCode == 400 && apiType == .anthropic && allowThinking {
+                        perform(messages: messages, tools: tools, allowThinking: false,
+                                stream: false, onDelta: onDelta, completion: completion)
+                        return
+                    }
+                    guard (200...299).contains(http.statusCode) else {
+                        completion(.failure(.http(http.statusCode))); return
+                    }
+                }
+                let parser = SSEChatParser(apiType: apiType)
+                for try await line in bytes.lines {
+                    for delta in parser.feed(line + "\n") {
+                        onDelta?(delta)
+                    }
+                }
+                guard let reply = parser.reply() else {
+                    completion(.failure(.badResponse)); return
+                }
+                completion(.success(reply))
+            } catch {
+                completion(.failure(.transport(error.localizedDescription)))
+            }
+        }
     }
 
     // MARK: request/response shaping (pure, test-covered)
@@ -154,12 +254,14 @@ final class OpenAICompatibleClient: ModelClient {
         var function: WireFunction
     }
 
-    func buildRequestBody(messages: [ChatMessage], tools: [ToolSpec]) -> String {
+    func buildRequestBody(messages: [ChatMessage], tools: [ToolSpec],
+                          stream: Bool = false) -> String {
         struct Body: Encodable {
             var model: String
             var messages: [ChatMessage]
             var tools: [WireTool]
             var tool_choice: String
+            var stream: Bool?
         }
         let body = Body(
             model: model,
@@ -171,7 +273,8 @@ final class OpenAICompatibleClient: ModelClient {
                     parameters: AnyCodableJSON(jsonString: spec.parametersJSON)
                         ?? AnyCodableJSON([String: Any]())))
             },
-            tool_choice: "auto")
+            tool_choice: "auto",
+            stream: stream ? true : nil)
         let encoder = JSONEncoder()
         return String(data: (try? encoder.encode(body)) ?? Data(), encoding: .utf8) ?? "{}"
     }
@@ -181,6 +284,9 @@ final class OpenAICompatibleClient: ModelClient {
               let choices = obj["choices"] as? [[String: Any]],
               let message = choices.first?["message"] as? [String: Any] else { return nil }
         let text = message["content"] as? String
+        // DeepSeek-style "reasoning_content" / OpenRouter "reasoning".
+        let reasoning = message["reasoning_content"] as? String
+            ?? message["reasoning"] as? String
         var calls: [ToolCall] = []
         if let raw = message["tool_calls"] as? [[String: Any]] {
             for c in raw {
@@ -192,7 +298,7 @@ final class OpenAICompatibleClient: ModelClient {
             }
         }
         if text == nil && calls.isEmpty { return nil }
-        return ModelReply(text: text, toolCalls: calls)
+        return ModelReply(text: text, reasoning: reasoning, toolCalls: calls)
     }
 
     // MARK: anthropic-messages shaping (pure, test-covered)
@@ -203,7 +309,7 @@ final class OpenAICompatibleClient: ModelClient {
     /// blocks. Uses JSONSerialization dicts end-to-end — the anthropic
     /// shapes nest content blocks too deeply for the Encodable route.
     static func buildAnthropicBody(model: String, messages: [ChatMessage],
-                                    tools: [ToolSpec]) -> String {
+                                    tools: [ToolSpec]) -> [String: Any] {
         var systemText: [String] = []
         var outMessages: [[String: Any]] = []
         for m in messages {
@@ -254,20 +360,23 @@ final class OpenAICompatibleClient: ModelClient {
                 return t
             }
         }
-        return String(data: (try? JSONSerialization.data(withJSONObject: body)) ?? Data(),
-                      encoding: .utf8) ?? "{}"
+        return body
     }
 
     static func parseAnthropic(data: Data) -> ModelReply? {
         guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let content = obj["content"] as? [[String: Any]] else { return nil }
         var text: String?
+        var reasoning: String?
         var calls: [ToolCall] = []
         for block in content {
             switch block["type"] as? String {
             case "text":
                 let t = (text ?? "") + (block["text"] as? String ?? "")
                 text = t
+            case "thinking":
+                let t = (reasoning ?? "") + (block["thinking"] as? String ?? "")
+                reasoning = t
             case "tool_use":
                 guard let id = block["id"] as? String,
                       let name = block["name"] as? String else { continue }
@@ -280,7 +389,7 @@ final class OpenAICompatibleClient: ModelClient {
         }
         if text == nil && calls.isEmpty { return nil }
         if let text, text.isEmpty, calls.isEmpty { return nil }
-        return ModelReply(text: text, toolCalls: calls)
+        return ModelReply(text: text, reasoning: reasoning, toolCalls: calls)
     }
 }
 
@@ -312,6 +421,137 @@ struct AnyCodableJSON: Encodable {
             try container.encode(o.mapValues(AnyCodableJSON.init))
         } else {
             try container.encodeNil()
+        }
+    }
+}
+
+// MARK: - SSE chat stream parser (both wire protocols)
+
+/// Incremental server-sent-event parser: feed raw body chunks (line
+/// fragments carry over), collect deltas, assemble the final reply.
+/// Pure in-memory; test-covered directly.
+final class SSEChatParser {
+    private let apiType: OpenAICompatibleClient.APIType
+    private var buf = ""
+    private var text = ""
+    private var reasoning = ""
+    /// openai: tool_calls delta index → (id, name, args fragments).
+    private var openaiCalls: [Int: (id: String, name: String, args: String)] = [:]
+    /// anthropic: content block index → kind + accumulated tool state.
+    private var anthropicBlocks: [Int: (kind: String, id: String, name: String, json: String)] = [:]
+
+    init(apiType: OpenAICompatibleClient.APIType) {
+        self.apiType = apiType
+    }
+
+    /// Feed raw body text; returns the deltas it completed.
+    func feed(_ chunk: String) -> [StreamDelta] {
+        buf += chunk
+        var deltas: [StreamDelta] = []
+        while let nl = buf.firstIndex(of: "\n") {
+            let line = String(buf[buf.startIndex..<nl])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            buf.removeSubrange(buf.startIndex..<buf.index(after: nl))
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            guard payload != "[DONE]",
+                  let data = payload.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else { continue }
+            deltas += consume(obj)
+        }
+        return deltas
+    }
+
+    /// The assembled reply, or nil when the stream carried nothing.
+    func reply() -> ModelReply? {
+        var calls: [ToolCall] = []
+        if apiType == .anthropic {
+            calls = anthropicBlocks.sorted(by: { $0.key < $1.key }).compactMap { _, b in
+                b.kind == "tool_use" && !b.id.isEmpty
+                    ? ToolCall(id: b.id, name: b.name, argumentsJSON: b.json.isEmpty ? "{}" : b.json)
+                    : nil
+            }
+        } else {
+            calls = openaiCalls.sorted(by: { $0.key < $1.key }).map { _, c in
+                ToolCall(id: c.id, name: c.name,
+                         argumentsJSON: c.args.isEmpty ? "{}" : c.args)
+            }
+        }
+        let t = text.isEmpty ? nil : text
+        if t == nil && calls.isEmpty { return nil }
+        return ModelReply(text: t, reasoning: reasoning.isEmpty ? nil : reasoning,
+                          toolCalls: calls)
+    }
+
+    private func consume(_ obj: [String: Any]) -> [StreamDelta] {
+        apiType == .anthropic ? consumeAnthropic(obj) : consumeOpenAI(obj)
+    }
+
+    private func consumeOpenAI(_ obj: [String: Any]) -> [StreamDelta] {
+        guard let choices = obj["choices"] as? [[String: Any]],
+              let delta = choices.first?["delta"] as? [String: Any] else { return [] }
+        var out: [StreamDelta] = []
+        if let t = delta["content"] as? String, !t.isEmpty {
+            text += t
+            out.append(StreamDelta(text: t, reasoning: nil))
+        }
+        if let r = delta["reasoning_content"] as? String ?? delta["reasoning"] as? String,
+           !r.isEmpty {
+            reasoning += r
+            out.append(StreamDelta(text: nil, reasoning: r))
+        }
+        if let raw = delta["tool_calls"] as? [[String: Any]] {
+            for c in raw {
+                let idx = c["index"] as? Int ?? 0
+                var slot = openaiCalls[idx] ?? ("", "", "")
+                if let id = c["id"] as? String { slot.id = id }
+                if let fn = c["function"] as? [String: Any] {
+                    if let n = fn["name"] as? String { slot.name = n }
+                    if let a = fn["arguments"] as? String { slot.args += a }
+                }
+                openaiCalls[idx] = slot
+            }
+        }
+        return out
+    }
+
+    private func consumeAnthropic(_ obj: [String: Any]) -> [StreamDelta] {
+        guard let type = obj["type"] as? String else { return [] }
+        let idx = obj["index"] as? Int ?? 0
+        switch type {
+        case "content_block_start":
+            if let block = obj["content_block"] as? [String: Any],
+               let kind = block["type"] as? String {
+                anthropicBlocks[idx] = (kind,
+                                        block["id"] as? String ?? "",
+                                        block["name"] as? String ?? "", "")
+            }
+            return []
+        case "content_block_delta":
+            guard let delta = obj["delta"] as? [String: Any],
+                  let dType = delta["type"] as? String else { return [] }
+            switch dType {
+            case "text_delta":
+                if let t = delta["text"] as? String, !t.isEmpty {
+                    text += t
+                    return [StreamDelta(text: t, reasoning: nil)]
+                }
+            case "thinking_delta":
+                if let t = delta["thinking"] as? String, !t.isEmpty {
+                    reasoning += t
+                    return [StreamDelta(text: nil, reasoning: t)]
+                }
+            case "input_json_delta":
+                if var b = anthropicBlocks[idx] {
+                    b.json += delta["partial_json"] as? String ?? ""
+                    anthropicBlocks[idx] = b
+                }
+            default: break
+            }
+            return []
+        default:
+            return []   // message_start/stop, ping: nothing to do
         }
     }
 }

@@ -11,7 +11,9 @@ enum ControlMetrics {
     /// Single-line input height.
     static let inputHeight: CGFloat = 30
     /// Button height.
-    static let buttonHeight: CGFloat = 28
+    /// Button height — matches inputHeight so a button beside an
+    /// input/popup (settings rows, dialog footers) never steps.
+    static let buttonHeight: CGFloat = 30
     /// Button minimum width — one floor so short labels ("OK", "Save")
     /// never read smaller than their row siblings ("Cancel").
     static let buttonMinWidth: CGFloat = 76

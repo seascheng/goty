@@ -4,9 +4,11 @@ import Foundation
 // MARK: - AITaskCoordinator
 
 /// The bounded ReAct loop. Model turns drive tool dispatch through the
-/// target's executor; read-only probes run auto-approved, every mutation
-/// becomes an AIProposal gated on explicit confirmation (target + op
-/// fingerprint). 25 tool calls per task, +25 on explicit continue.
+/// target's executor; replies STREAM into the card live. Safety is
+/// proportionate: read-only probes and ordinary mutations (write/edit/
+/// non-destructive bash) run auto-approved in the open — every round is
+/// visible — and only DESTRUCTIVE operations (rm, dd, git reset…) gate
+/// on an explicit confirmation. 25 tool calls per task, +25 on continue.
 final class AITaskCoordinator {
     private let model: ModelClient
     private let executorFor: (ExecutionTarget) -> CommandExecutor
@@ -19,6 +21,12 @@ final class AITaskCoordinator {
     private var wire: [UUID: [ChatMessage]] = [:]
     /// The tool call behind the pending proposal (replayed on confirm).
     private var pendingCall: [UUID: ToolCall] = [:]
+    /// Reasoning the model emitted with its last reply, waiting to be
+    /// attached to the round that reply's tool call produces.
+    private var pendingReasoning: [UUID: String] = [:]
+    /// Live-emit throttle: at most one snapshot per 100ms per task —
+    /// markdown re-render per token would stutter the card.
+    private var lastLiveEmit: [UUID: Date] = [:]
     private let queue = DispatchQueue(label: "goty.ai.coord")
 
     /// Fires on the main queue with a full task snapshot after every
@@ -104,9 +112,22 @@ final class AITaskCoordinator {
         }
     }
 
+    /// True while the loop can still make progress (close/cancel
+    /// should act; terminal phases stay put on a late close click).
+    private static func isActive(_ phase: AITaskPhase) -> Bool {
+        switch phase {
+        case .idle, .thinking, .awaitingConfirmation,
+             .executing, .budgetExhausted:
+            return true
+        case .completed, .failed, .cancelled:
+            return false
+        }
+    }
+
     func cancel(taskId: UUID) {
         queue.async {
-            guard var task = self.tasks[taskId] else { return }
+            guard var task = self.tasks[taskId], Self.isActive(task.phase)
+            else { return }   // terminal phases stay put (late close click)
             task.advance(to: .cancelled)
             self.tasks[taskId] = task
             self.emit(taskId)
@@ -132,9 +153,25 @@ final class AITaskCoordinator {
             wire[id] = Self.initialMessages(for: task, facts: hostFacts[id] ?? "")
         }
         aiDebug("step: calling model, rounds=\(task.rounds.count)")
-        model.complete(messages: wire[id]!, tools: Self.toolSpecs) { [weak self] result in
-            self?.queue.async { self?.handle(id, result) }
-        }
+        model.stream(messages: wire[id]!, tools: Self.toolSpecs,
+                     onDelta: { [weak self] delta in
+                         self?.queue.async { self?.liveDelta(id, delta) }
+                     },
+                     completion: { [weak self] result in
+                         self?.queue.async { self?.handle(id, result) }
+                     })
+    }
+
+    /// One streamed chunk: grows the task's live text and emits a
+    /// throttled snapshot (the resolving turn emits anyway).
+    private func liveDelta(_ id: UUID, _ delta: StreamDelta) {
+        guard var task = tasks[id], task.phase == .thinking else { return }
+        task.appendLive(delta)
+        tasks[id] = task
+        let now = Date()
+        if let last = lastLiveEmit[id], now.timeIntervalSince(last) < 0.1 { return }
+        lastLiveEmit[id] = now
+        emit(id)
     }
 
     /// Env-gated trace (GOTY_AI_DEBUG=1): the @ai loop's decision points.
@@ -146,6 +183,7 @@ final class AITaskCoordinator {
 
     private func handle(_ id: UUID, _ result: Result<ModelReply, ModelError>) {
         guard var task = tasks[id], task.phase == .thinking else { return }
+        task.clearLive()
         switch result {
         case .failure(let error):
             aiDebug("task failed: \(error)")
@@ -153,6 +191,9 @@ final class AITaskCoordinator {
             tasks[id] = task
             emit(id)
         case .success(let reply):
+            if let r = reply.reasoning, !r.isEmpty {
+                pendingReasoning[id] = r
+            }
             if let text = reply.text, reply.toolCalls.isEmpty {
                 task.advance(to: .completed(summary: text))
                 tasks[id] = task
@@ -192,7 +233,13 @@ final class AITaskCoordinator {
             }
         case "bash":
             let command = Self.argString(call, "command") ?? ""
-            if ReadOnlyPolicy.autoExecutable(command) {
+            let risk = ReadOnlyPolicy.classify(command)
+            if risk == .destructive {
+                // Only destructive operations gate: reads and ordinary
+                // mutations run in the open (every round is visible).
+                propose(id, call, AIProposal(op: .bash(command), explanation: "",
+                                             risk: risk, rollbackHint: nil))
+            } else {
                 let timeout = Self.argAny(call, "timeout") as? Double ?? 60
                 let cwd = Self.argString(call, "cwd") ?? task.context.target.cwd
                 exec.run(command, cwd: cwd, timeout: timeout) { [weak self] r in
@@ -200,22 +247,32 @@ final class AITaskCoordinator {
                         self?.finishRound(id, call, Self.describeExec(r))
                     }
                 }
-            } else {
-                propose(id, call, AIProposal(op: .bash(command), explanation: "",
-                                             risk: ReadOnlyPolicy.classify(command),
-                                             rollbackHint: nil))
             }
         case "write":
-            propose(id, call, AIProposal(
-                op: .write(path: Self.argString(call, "path") ?? "",
-                           content: Self.argString(call, "content") ?? ""),
-                explanation: "", risk: .mutating, rollbackHint: nil))
+            exec.write(path: Self.argString(call, "path") ?? "",
+                       content: Self.argString(call, "content") ?? "") { [weak self] r in
+                self?.queue.async {
+                    self?.finishRound(id, call, Self.describeExec(r))
+                }
+            }
         case "edit":
-            propose(id, call, AIProposal(
-                op: .edit(path: Self.argString(call, "path") ?? "",
-                          oldText: Self.argString(call, "oldText") ?? "",
-                          newText: Self.argString(call, "newText") ?? ""),
-                explanation: "", risk: .mutating, rollbackHint: nil))
+            exec.edit(path: Self.argString(call, "path") ?? "",
+                      oldText: Self.argString(call, "oldText") ?? "",
+                      newText: Self.argString(call, "newText") ?? "") { [weak self] r in
+                self?.queue.async {
+                    self?.finishRound(id, call, Self.describeExec(r))
+                }
+            }
+        case "fetch_content":
+            // Web tools run AGENT-SIDE (the Mac), never the target's
+            // executor — docs are local even for SSH targets.
+            WebAccess.fetch(url: Self.argString(call, "url") ?? "") { [weak self] result in
+                self?.queue.async { self?.finishRound(id, call, result) }
+            }
+        case "web_search":
+            WebAccess.search(query: Self.argString(call, "query") ?? "") { [weak self] result in
+                self?.queue.async { self?.finishRound(id, call, result) }
+            }
         default:
             finishRound(id, call, "unknown tool: \(call.name)")
         }
@@ -234,7 +291,8 @@ final class AITaskCoordinator {
     /// then keep stepping.
     private func finishRound(_ id: UUID, _ call: ToolCall, _ result: String) {
         guard var task = tasks[id], task.phase == .thinking else { return }
-        task.append(round: AIRound(reasoning: nil, toolName: call.name,
+        task.append(round: AIRound(reasoning: pendingReasoning.removeValue(forKey: id),
+                                   toolName: call.name,
                                    toolInput: call.argumentsJSON, toolResult: result))
         wire[id]?.append(ChatMessage(role: "tool", content: result, toolCallId: call.id))
         tasks[id] = task
@@ -246,7 +304,8 @@ final class AITaskCoordinator {
     /// resume the loop (post-exec verification is just the next rounds).
     private func finishConfirmed(_ id: UUID, _ call: ToolCall?, _ result: String) {
         guard var task = tasks[id], task.phase == .executing else { return }
-        task.append(round: AIRound(reasoning: nil, toolName: call?.name ?? "op",
+        task.append(round: AIRound(reasoning: pendingReasoning.removeValue(forKey: id),
+                                   toolName: call?.name ?? "op",
                                    toolInput: call?.argumentsJSON ?? task.pendingProposal?.fingerprint ?? "",
                                    toolResult: result))
         task.setPending(nil)
@@ -296,6 +355,18 @@ final class AITaskCoordinator {
                  {"type":"object","properties":{"command":{"type":"string"},\
                  "cwd":{"type":"string"},"timeout":{"type":"number"}},\
                  "required":["command"]}
+                 """),
+        ToolSpec(name: "fetch_content",
+                 description: "Fetch an http(s) URL and return readable text (HTML stripped). Runs on the local Mac, not the target host. Use for docs, APIs, changelogs.",
+                 parametersJSON: """
+                 {"type":"object","properties":{"url":{"type":"string"}},\
+                 "required":["url"]}
+                 """),
+        ToolSpec(name: "web_search",
+                 description: "Web search (DuckDuckGo): top results with title, URL and snippet. Follow up with fetch_content on a result URL for the full page.",
+                 parametersJSON: """
+                 {"type":"object","properties":{"query":{"type":"string"}},\
+                 "required":["query"]}
                  """),
     ]
 

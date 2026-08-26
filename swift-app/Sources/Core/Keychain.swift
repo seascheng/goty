@@ -16,6 +16,9 @@ enum Keychain {
     private static var service: String { serviceOverrideForTests ?? "goty.ai" }
 
     static func setSecret(_ value: String?, for key: String) {
+        // Keep the in-process cache authoritative: a write must never
+        // leave a stale cached secret behind.
+        cache[key] = value
         if let value {
             let data = Data(value.utf8)
             let query: [String: Any] = [
@@ -40,7 +43,30 @@ enum Keychain {
         }
     }
 
+    /// Existence check WITHOUT decrypting the secret: a data-less
+    /// query never trips the keychain ACL prompt. UI status lines
+    /// must use THIS, not `secret(for:)` — every real read of an
+    /// item created by an earlier build pops the "wants to use your
+    /// confidential information" dialog (dev binaries re-sign each
+    /// build, so the ACL never sticks).
+    static func hasSecret(for key: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+        ]
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
+
+    /// Per-process cache: the keychain prompts per READ when the ACL
+    /// doesn't cover the running binary (every rebuilt dev build), so
+    /// repeated reads — per settings rebuild, per @ai task — must hit
+    /// memory, not the Security server. The secret is already resident
+    /// in the API client after the first read; this adds no exposure.
+    private static var cache: [String: String] = [:]
+
     static func secret(for key: String) -> String? {
+        if let hit = cache[key] { return hit }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -51,6 +77,8 @@ enum Keychain {
         var out: AnyObject?
         guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
               let data = out as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        let value = String(data: data, encoding: .utf8)
+        cache[key] = value
+        return value
     }
 }
