@@ -76,6 +76,16 @@ final class CommitMessageView: NSScrollView {
 
     required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
 
+    /// Fan-out recolor (ScmPanel itself isn't refreshable — the box
+    /// owns its own tokens).
+    func retheme() {
+        backgroundColor = Chrome.theme.inputFill
+        layer?.borderColor = Chrome.theme.hairline.cgColor
+        textView.textColor = Chrome.theme.foreground
+        placeholder.textColor = Chrome.theme.secondaryText
+        updatePlaceholder()
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.contains(.command), event.specialKey == .carriageReturn {
             onCommandEnter?()

@@ -74,7 +74,7 @@ final class SettingsRootView: NSView, ThemeRefreshable {
         let windowTitle = NSTextField(labelWithString: "SETTINGS")
         windowTitle.attributedStringValue = NSAttributedString(
             string: "SETTINGS",
-            attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold),
                          .foregroundColor: Chrome.theme.foreground,
                          .kern: 0.8])
         headerStrip.addSubview(windowTitle)
@@ -90,10 +90,10 @@ final class SettingsRootView: NSView, ThemeRefreshable {
         pathLabel.stringValue = rawPath.hasPrefix(home)
             ? "~" + rawPath.dropFirst(home.count) : rawPath
         pathLabel.translatesAutoresizingMaskIntoConstraints = false
-        // Config path lives in the STATUS bar — a centered title with
-        // the long path in the header kept shoving "SETTINGS" off
-        // center (toward the left column).
-        statusBar.addSubview(pathLabel)
+        // Header = the SSH HOSTS pattern exactly (the cited reference):
+        // title after the traffic lights, config path trailing. A
+        // centered title never read as "in the toolbar".
+        headerStrip.addSubview(pathLabel)
 
         // Left column: search box (tty7's settings search) + sections.
         listColumn.translatesAutoresizingMaskIntoConstraints = false
@@ -160,11 +160,14 @@ final class SettingsRootView: NSView, ThemeRefreshable {
             headerStrip.topAnchor.constraint(equalTo: topAnchor),
             headerStrip.leadingAnchor.constraint(equalTo: leadingAnchor),
             headerStrip.trailingAnchor.constraint(equalTo: trailingAnchor),
-            headerStrip.heightAnchor.constraint(equalToConstant: 44),
-            windowTitle.centerXAnchor.constraint(equalTo: headerStrip.centerXAnchor),
+            headerStrip.heightAnchor.constraint(equalToConstant: 40),
+            // 84 clears the traffic-light capsules (they own the
+            // top-left ~70pt — sidebar DragStrip's rule).
+            windowTitle.leadingAnchor.constraint(equalTo: headerStrip.leadingAnchor, constant: 84),
             windowTitle.centerYAnchor.constraint(equalTo: headerStrip.centerYAnchor),
-            pathLabel.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor, constant: -12),
-            pathLabel.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
+            windowTitle.trailingAnchor.constraint(lessThanOrEqualTo: pathLabel.leadingAnchor, constant: -8),
+            pathLabel.trailingAnchor.constraint(equalTo: headerStrip.trailingAnchor, constant: -14),
+            pathLabel.centerYAnchor.constraint(equalTo: headerStrip.centerYAnchor),
 
             listColumn.leadingAnchor.constraint(equalTo: leadingAnchor),
             listColumn.topAnchor.constraint(equalTo: headerStrip.bottomAnchor),
@@ -245,7 +248,7 @@ final class SettingsRootView: NSView, ThemeRefreshable {
         statusBar.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
         windowTitle.attributedStringValue = NSAttributedString(
             string: "SETTINGS",
-            attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold),
                          .foregroundColor: Chrome.theme.foreground,
                          .kern: 0.8])
         pathLabel.textColor = Chrome.theme.secondaryText

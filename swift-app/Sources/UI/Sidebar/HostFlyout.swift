@@ -173,15 +173,22 @@ final class FlyoutRow: NSView {
                 .applying(.init(paletteColors: [Chrome.theme.iconTint]))) {
             let att = NSTextAttachment()
             att.image = base
-            let size = base.size.width > 0 ? base.size : NSSize(width: 14, height: 14)
-            att.bounds = CGRect(x: 0, y: (font.capHeight - size.height) / 2,
-                                width: size.width, height: size.height)
+            // 12pt box — the 14pt symbol box overflowed the 12.5pt
+            // line's ascent, so the cell bottom-anchored the whole
+            // line and every row sat ~6pt low (the not-centered
+            // report). 12 fits inside ascent+descender, keeping the
+            // line at its natural centered height.
+            let h: CGFloat = 12
+            let w = base.size.height > 0 ? h * base.size.width / base.size.height : h
+            att.bounds = CGRect(x: 0, y: (font.capHeight - h) / 2,
+                                width: w, height: h)
             text.append(NSAttributedString(attachment: att))
             text.append(NSAttributedString(string: "  "))
         }
         text.append(NSAttributedString(string: title,
             attributes: [.font: font, .foregroundColor: Chrome.theme.foreground]))
         let label = NSTextField(labelWithAttributedString: text)
+        label.translatesAutoresizingMaskIntoConstraints = false
         label.lineBreakMode = .byTruncatingMiddle
         label.cell?.truncatesLastVisibleLine = true
         label.cell?.wraps = false
