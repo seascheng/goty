@@ -1,7 +1,7 @@
 // goty — see CLAUDE.md for the working principles.
 import AppKit
 
-final class FileRow: NSView, KeyedRow {
+final class FileRow: NSView, KeyedRow, ThemeRefreshable {
     var onOpen: (() -> Void)?
     /// Reconciliation identity: the row's absolute path.
     var rowKey: String { dragPath ?? entry.name }
@@ -24,6 +24,10 @@ final class FileRow: NSView, KeyedRow {
     let entry: FileEntry
     private let depth: Int
     private let isOpen: Bool
+    /// Build-time-baked colors, re-baked by the theme fan-out walk.
+    private let glyphTint: NSColor?
+    private var glyphView: LucideIconView?
+    private var labelField: NSTextField?
 
     init(entry: FileEntry, depth: Int, expanded: Bool,
          badge: (letter: String, color: NSColor)? = nil,
@@ -31,6 +35,7 @@ final class FileRow: NSView, KeyedRow {
         self.entry = entry
         self.depth = depth
         self.isOpen = expanded
+        self.glyphTint = glyphTint
         super.init(frame: .zero)
 
         // tty7: no disclosure chevron — the folder glyph itself carries the
@@ -42,12 +47,14 @@ final class FileRow: NSView, KeyedRow {
             tint: glyphTint
                 ?? (entry.isDirectory ? Chrome.theme.foreground
                                      : Chrome.theme.secondaryText))
+        glyphView = glyph
         glyph.translatesAutoresizingMaskIntoConstraints = false
         addSubview(glyph)
 
         let label = NSTextField(labelWithString: entry.name)
         label.font = .systemFont(ofSize: 12.5, weight: .regular)
         label.textColor = Chrome.theme.foreground
+        labelField = label
         label.lineBreakMode = .byTruncatingMiddle
         label.cell?.truncatesLastVisibleLine = true
         label.cell?.wraps = false
@@ -206,6 +213,15 @@ final class FileRow: NSView, KeyedRow {
     private var isHovered = false
     override func mouseEntered(with event: NSEvent) { isHovered = true; needsDisplay = true }
     override func mouseExited(with event: NSEvent) { isHovered = false; needsDisplay = true }
+
+    /// Theme flip: the icon tint and name color are baked at build
+    /// (hover fills already draw from the live theme).
+    func retheme() {
+        glyphView?.tint = glyphTint
+            ?? (entry.isDirectory ? Chrome.theme.foreground : Chrome.theme.secondaryText)
+        glyphView?.needsDisplay = true
+        labelField?.textColor = Chrome.theme.foreground
+    }
 }
 
 extension FileRow: NSDraggingSource {

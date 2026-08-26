@@ -298,12 +298,24 @@ struct ChromeTheme {
 
 enum Chrome {
     /// Posted whenever `theme` is replaced — the single chokepoint.
-    /// Chrome surfaces bake colors at build time (locals in inits), so
-    /// they re-apply/rebuild themselves on this; the assignment sites
-    /// need no fan-out of their own.
     static let themeDidChange = Notification.Name("chromeThemeDidChange")
     static var theme: ChromeTheme = .fallback {
         didSet { NotificationCenter.default.post(name: themeDidChange, object: nil) }
+    }
+}
+
+/// Views that bake theme colors at build time re-bake on demand.
+/// The theme-change fan-out walks every window's view tree and calls
+/// retheme() on conformers — same role, same color, everywhere: a
+/// surface never needs its own observer or rebuild path (the
+/// "HOSTS recolors but SERVERS doesn't" consistency class).
+@objc protocol ThemeRefreshable: AnyObject { @objc func retheme() }
+
+extension NSView {
+    /// Recursive: retheme self and every descendant that conforms.
+    func rethemeSubtree() {
+        (self as? ThemeRefreshable)?.retheme()
+        for v in subviews { v.rethemeSubtree() }
     }
 }
 

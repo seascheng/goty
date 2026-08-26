@@ -11,7 +11,7 @@ import AppKit
 /// The right-side panel: Info + Files tabs. Fully hidden when closed
 /// (⌘J). All colors come from ChromeTheme tokens; all icon buttons
 /// from the shared IconButton factory.
-final class RightPanelView: NSView {
+final class RightPanelView: NSView, ThemeRefreshable {
     /// Click a file in the tree → the built-in editor (wired by the
     /// delegate layer, which knows the focused workspace's machine).
     var onOpenFile: ((String) -> Void)? {
@@ -43,6 +43,11 @@ final class RightPanelView: NSView {
     static let minWidth: CGFloat = 216
     static let maxWidth: CGFloat = 460
 
+    /// Build-time-baked colors, re-baked by the theme fan-out walk.
+    private var infoLabels: [NSTextField] = []
+    private var infoValues: [NSTextField] = []
+    private var panelTabs: [PanelTabButton] = []
+
     init() {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -67,6 +72,7 @@ final class RightPanelView: NSView {
         tabBar.addArrangedSubview(filesTab)
         tabBar.addArrangedSubview(gitTab)
         tabBar.addArrangedSubview(infoTab)
+        panelTabs = [filesTab, gitTab, infoTab]
         filesTab.isActive = true
 
         infoStack = makeInfoStack()
@@ -247,6 +253,14 @@ final class RightPanelView: NSView {
     /// lit-tile collapse rule cannot fire from a restore).
     func activate(tab: RightPanelTab) { show(tab: tab) }
 
+    /// Theme flip: the panel's contents are built once (show() only
+    /// toggles isHidden), so labels/values/tab glyphs re-bake here;
+    /// FileRow/PanelTabButton conform and are reached by the walk.
+    func retheme() {
+        for l in infoLabels { l.textColor = Chrome.theme.secondaryText }
+        for v in infoValues { v.textColor = Chrome.theme.foreground }
+    }
+
     private func tabBarSubviews() -> [NSView] {
         subviews.compactMap { $0 as? NSStackView }.first?.arrangedSubviews ?? []
     }
@@ -262,6 +276,7 @@ final class RightPanelView: NSView {
             let label = NSTextField(labelWithString: title)
             label.font = .systemFont(ofSize: 10.5, weight: .medium)
             label.textColor = Chrome.theme.secondaryText
+            infoLabels.append(label)
 
             let value = NSTextField(labelWithString: "…")
             value.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -272,7 +287,7 @@ final class RightPanelView: NSView {
             value.maximumNumberOfLines = 1
             value.setContentHuggingPriority(.defaultLow, for: .horizontal)
             value.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
+            infoValues.append(value)
             let pair = NSStackView(views: [label, value])
             pair.orientation = .horizontal
             pair.spacing = 8
@@ -311,12 +326,13 @@ final class RightPanelView: NSView {
 
 // MARK: - Tab tile
 
-final class PanelTabButton: NSView {
+final class PanelTabButton: NSView, ThemeRefreshable {
     var onClick: (() -> Void)?
     var isActive = false { didSet { needsDisplay = true } }
     let labelText: String
 
     private var isHovered = false
+    private var glyph: IconLabel!
 
     /// tty7 tab tiles: icon only, 26pt square, the lit one reads by ink
     /// not by width — the label lives in the tooltip.
@@ -328,6 +344,7 @@ final class PanelTabButton: NSView {
         layer?.cornerRadius = 6
 
         let glyph = IconLabel(symbol, pointSize: 12)
+        self.glyph = glyph
         addSubview(glyph)
 
         NSLayoutConstraint.activate([
@@ -358,6 +375,10 @@ final class PanelTabButton: NSView {
 
     override func mouseEntered(with event: NSEvent) { isHovered = true; needsDisplay = true }
     override func mouseExited(with event: NSEvent) { isHovered = false; needsDisplay = true }
+
+    /// Theme flip: the glyph tint is baked at init (hover/active fills
+    /// already draw from the live theme).
+    func retheme() { glyph.contentTintColor = Chrome.theme.iconTint }
 }
 
 // MARK: - Status dot (Info agent state)

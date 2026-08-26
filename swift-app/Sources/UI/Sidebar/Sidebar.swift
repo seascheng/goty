@@ -13,7 +13,9 @@ import AppKit
 /// Reconfigurable in place: section headers are REUSED across sidebar
 /// renders (the row-reuse rule — no view churn, no hover flicker), so
 /// the '+' stays hoverable while titles/counts rebind per pass.
-final class SectionHeaderView: NSView {
+final class SectionHeaderView: NSView, ThemeRefreshable {
+    private var lastText = ""
+    private var lastCount: Int?
     private let label = NSTextField(labelWithString: "")
     private let countField = NSTextField(labelWithString: "")
     private var onPlus: ((NSView) -> Void)?
@@ -57,6 +59,8 @@ final class SectionHeaderView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
 
     func configure(text: String, plus: ((NSView) -> Void)?, count: Int?) {
+        lastText = text
+        lastCount = count
         label.attributedStringValue = NSAttributedString(string: text.uppercased(), attributes: [
             .font: NSFont.systemFont(ofSize: emphasized ? 11 : 10, weight: .semibold),
             .foregroundColor: emphasized ? Chrome.theme.foreground : Chrome.theme.secondaryText,
@@ -75,6 +79,13 @@ final class SectionHeaderView: NSView {
         } else {
             countField.isHidden = true
         }
+    }
+
+    /// Theme flip: re-run the last configure — the static SERVERS/
+    /// SPACES headers are built once and never re-rendered by data
+    /// passes, so without this they carry the launch theme forever.
+    func retheme() {
+        configure(text: lastText, plus: onPlus, count: lastCount)
     }
 }
 

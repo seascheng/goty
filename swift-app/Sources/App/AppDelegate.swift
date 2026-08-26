@@ -401,6 +401,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // embedder's documented hook. Route it to the same coordinator
         // path as the menu bar so the two can never drift.
         NotificationCenter.default.addObserver(
+            self, selector: #selector(themeFanout),
+            name: Chrome.themeDidChange, object: nil)
+        NotificationCenter.default.addObserver(
             self, selector: #selector(ghosttySplitRequested(_:)),
             name: Ghostty.Notification.ghosttyNewSplit, object: nil)
 
@@ -1111,6 +1114,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (the viewDidMoveToWindow rule).
     // ponytail: partial live repaint — a retheme broadcast is the
     // upgrade path if stale rows ever read wrong.
+    /// One walk covers every chrome surface in every window: views
+    /// that bake colors at build time conform to ThemeRefreshable;
+    /// no per-surface observers, no rebuild paths to remember.
+    @objc private func themeFanout() {
+        for w in NSApp.windows { w.contentView?.rethemeSubtree() }
+    }
+
     @objc private func ghosttyConfigChanged(_ note: Notification) {
         guard note.object == nil,
               let cfg = note.userInfo?[Notification.Name.GhosttyConfigChangeKey]

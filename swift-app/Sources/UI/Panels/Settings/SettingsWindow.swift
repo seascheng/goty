@@ -34,7 +34,7 @@ enum SettingsSection: String, CaseIterable {
 
 /// One section in the left column: icon + title, click selects, the
 /// selected row keeps the persistent pill fill (SSHHostRow recipe).
-final class SettingsRootView: NSView {
+final class SettingsRootView: NSView, ThemeRefreshable {
     override var isFlipped: Bool { true }
 
     let store: GhosttyConfigStore
@@ -887,6 +887,11 @@ final class SettingsWindowController: NSObject {
     /// Re-reads the file (see reload()) and brings the window front,
     /// centered over the app's main window when one is given.
     func show(over parent: NSWindow?) {
+        // The header/title chrome is baked at first-ever build; a theme
+        // switched while the window was CLOSED would otherwise show
+        // stale colors until the next live switch (reload() only
+        // rebuilds the page).
+        rethemeNow()
         root.reload()
         applyWindowTranslucency()
         window.appearance = NSAppearance(

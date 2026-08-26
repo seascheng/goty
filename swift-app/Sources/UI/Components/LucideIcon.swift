@@ -29,7 +29,7 @@ final class LucideIconView: NSView {
     }
 
     let glyph: Glyph
-    private let tint: NSColor
+    var tint: NSColor
     private let pointSize: CGFloat
 
     init(_ glyph: Glyph, pointSize: CGFloat, tint: NSColor) {
