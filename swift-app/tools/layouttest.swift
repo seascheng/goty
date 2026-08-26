@@ -19,6 +19,22 @@ func run() {
         if cond { print("  ok  \(name)") } else { failures += 1; print("FAIL  \(name)") }
     }
 
+        // — AITaskCard hit-testing: markdown box selectability —
+        do {
+            let card = AITaskCard(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+            card.renderForTest(markdown: "## head\n\nbody **bold** text\n\n- one\n- two\n")
+            card.layoutSubtreeIfNeeded()
+            let box = card.firstSubviewOfType(AIMarkdownBox.self)
+            check(box != nil, "AI card builds a markdown box")
+            check(card.isTextViewSelectableForTest, "AI answer text is selectable")
+            if let box {
+                let p = card.convert(NSPoint(x: box.bounds.midX, y: box.bounds.midY), from: box)
+                let hit = card.hitTest(p)
+                let chain = hit.map { String(describing: type(of: $0)) } ?? "nil"
+                check(chain.contains("TextView"), "hit-test reaches the text view (got \(chain))")
+            }
+        }
+
     // assertions below describe the fully-open window.
     let d = UserDefaults.standard
     d.set(false, forKey: "sidebarCollapsed")

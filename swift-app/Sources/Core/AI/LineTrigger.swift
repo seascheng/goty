@@ -44,13 +44,15 @@ final class LineTrigger {
                 inSs3 = true  // 'O' right after ESC opens SS3
                 out.append(b)
             case 0x0D, 0x0A:
-                let isTrigger = line.starts(with: Self.prefix) && line.count > Self.prefix.count
+                // Paired-symbol IMEs emit '@' as '@@' and may drop the
+                // space after the prefix — match the LAST @ai occurrence
+                // and let trim handle the rest.
+                let isTrigger = Self.hasPrefix(line)
                 if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1", !line.isEmpty {
                     FileHandle.standardError.write("AILINE armed=\(armed) line=\(String(decoding: line.prefix(24), as: UTF8.self)) trigger=\(isTrigger)\n".data(using: .utf8)!)
                 }
                 if isTrigger {
-                    let text = String(decoding: line.dropFirst(Self.prefix.count), as: UTF8.self)
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let text = Self.requestText(from: line)
                     line = []
                     onTrigger?(text)
                     return out  // swallow this enter (and anything after in the same chunk)
@@ -87,4 +89,32 @@ final class LineTrigger {
     }
 
     func reset() { line = []; inCsi = false; inSs3 = false }
+
+    /// Index just after the @ai prefix at the START of the line,
+    /// tolerating paired-symbol IMEs that emit '@' as '@@' (each extra
+    /// '@' before the final "@ai" is skipped). Mid-line occurrences
+    /// never trigger — only line-leading requests do.
+    static func lastPrefixEnd(_ line: [UInt8]) -> Int? {
+        var i = 0
+        // Skip any run of leading '@' — single or doubled alike — then
+        // require the literal "ai" right after it.
+        while i < line.count && line[i] == 0x40 { i += 1 }
+        guard i > 0, i + 2 <= line.count, line[i] == 0x61, line[i + 1] == 0x69
+        else { return nil }
+        return i + 2
+    }
+
+    /// True when the last "@ai" carries at least one non-space byte
+    /// after it (a bare '@ai' with nothing typed does not trigger).
+    static func hasPrefix(_ line: [UInt8]) -> Bool {
+        guard let end = lastPrefixEnd(line) else { return false }
+        return line[end...].contains { $0 != 0x20 && $0 != 0x09 }
+    }
+
+    /// The request text after the last @ai (surrounding spaces trimmed).
+    static func requestText(from line: [UInt8]) -> String {
+        guard let end = lastPrefixEnd(line) else { return "" }
+        return String(decoding: line[end...], as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }

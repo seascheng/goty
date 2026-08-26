@@ -77,6 +77,8 @@ final class AIMarkdownBox: NSView {
         invalidateIntrinsicContentSize()
     }
 
+    var textViewSelectableForTest: Bool { textView.isSelectable }
+
     override var intrinsicContentSize: NSSize {
         let container = textView.textContainer ?? NSTextContainer()
         let used = textView.layoutManager?.usedRect(for: container).height ?? 0
@@ -92,6 +94,20 @@ final class AIMarkdownBox: NSView {
         textView.textContainer?.size = NSSize(width: max(clipWidth, 40),
                                               height: .greatestFiniteMagnitude)
         invalidateIntrinsicContentSize()
+    }
+}
+
+// MARK: - small NSView helper
+
+extension NSView {
+    /// Depth-first search for the first descendant of the given type
+    /// (stack-nested cards etc.).
+    func firstSubviewOfType<T: NSView>(_ type: T.Type) -> T? {
+        for v in subviews {
+            if let hit = v as? T { return hit }
+            if let hit = v.firstSubviewOfType(type) { return hit }
+        }
+        return nil
     }
 }
 
@@ -345,6 +361,15 @@ final class AITaskCard: NSView {
 
     /// One rebuild pass: clears the stack, hands the group builder the
     /// section helpers, all wired to this card's stack.
+    // MARK: test surface
+
+    func renderForTest(markdown: String) {
+        rebuild { group in _ = group.markdown(markdown) }
+    }
+    var isTextViewSelectableForTest: Bool {
+        firstSubviewOfType(AIMarkdownBox.self)?.textViewSelectableForTest ?? false
+    }
+
     private func rebuild(_ build: (Group) -> Void) {
         for view in stack.views { stack.removeView(view) }
         inputField = nil

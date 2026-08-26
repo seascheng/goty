@@ -121,6 +121,18 @@ import Foundation
         _ = lt.filter([0x1B, 0x5B, 0x31, 0x7E, 0x1B, 0x5B, 0x33, 0x7E])   // Home + Delete
         type("@ai home delete ok\r")
         check(fired.last == "home delete ok", "home/delete keys pass through cleanly")
+        // IME compatibility: paired-symbol '@@' (e.g. macOS Chinese IMEs
+        // emitting '@' as a pair) and a missing space after the prefix.
+        type("@@ai 配对符号模式\r")
+        check(fired.last == "配对符号模式", "paired @@ trigger matches (IME)")
+        type("@ai无空格请求\r")
+        check(fired.last == "无空格请求", "no-space prefix still triggers (IME)")
+        type("@@ai无空格配对\r")
+        check(fired.last == "无空格配对", "paired @@ with no space triggers (IME)")
+        type("@ai\r")
+        check(fired.last == "无空格配对", "bare @ai with no request does not trigger")
+        type("echo @ai mid-line\r")
+        check(fired.last == "无空格配对", "mid-line @ai still does not trigger")
 
         print("— OutputTail —")
         let tail = OutputTail()
