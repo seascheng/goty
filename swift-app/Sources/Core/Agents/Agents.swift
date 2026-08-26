@@ -15,11 +15,17 @@ struct AgentSpec {
     /// goty status palette (goty ChromeTheme.statusColor, synced):
     /// working=amber, blocked=red, done=teal, idle=green — attention
     /// colors that read instantly; blue "info" for active work was
-    /// illegible.
+    /// illegible. Light variants are the same hues darkened for light
+    /// backgrounds (the gitAdded rule); the UI layer picks by isDark —
+    /// Core never reads the live theme.
     static let statusWorking = NSColor(hex: "#F59E05")!
     static let statusWaiting = NSColor(hex: "#F0595E")!
     static let statusDone = NSColor(hex: "#149996")!
     static let statusIdle = NSColor(hex: "#21C45E")!
+    static let statusWorkingLight = NSColor(hex: "#B45309")!
+    static let statusWaitingLight = NSColor(hex: "#B91C1C")!
+    static let statusDoneLight = NSColor(hex: "#0E7490")!
+    static let statusIdleLight = NSColor(hex: "#15803D")!
 
 }
 

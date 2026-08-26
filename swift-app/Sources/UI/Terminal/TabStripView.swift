@@ -239,7 +239,9 @@ final class TabChipView: NSView {
 
         if let brandImage {
             iconView.image = brandImage
-            iconView.contentTintColor = brandImage.isTemplate ? NSColor.white : nil
+            // Theme foreground, never white: mask glyphs are template
+            // images and white vanishes on light themes.
+            iconView.contentTintColor = brandImage.isTemplate ? Chrome.theme.foreground : nil
         } else {
             let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
             iconView.image = NSImage(systemSymbolName: symbol,

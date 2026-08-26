@@ -83,10 +83,13 @@ final class SidebarRowView: NSView {
         }
 
         static func color(for s: SpaceStatus) -> NSColor {
+            let dark = Chrome.theme.isDark
             switch s.activity {
-            case .working: return AgentSpec.statusWorking
-            case .blocked: return AgentSpec.statusWaiting
-            case .idle: return s.seen ? AgentSpec.statusIdle : AgentSpec.statusDone
+            case .working: return dark ? AgentSpec.statusWorking : AgentSpec.statusWorkingLight
+            case .blocked: return dark ? AgentSpec.statusWaiting : AgentSpec.statusWaitingLight
+            case .idle: return s.seen
+                ? (dark ? AgentSpec.statusIdle : AgentSpec.statusIdleLight)
+                : (dark ? AgentSpec.statusDone : AgentSpec.statusDoneLight)
             case .unknown: return Chrome.theme.secondaryText
             }
         }
@@ -330,7 +333,7 @@ final class SidebarRowView: NSView {
             }
         } ?? nil
         iconView.contentTintColor = (brandImage?.isTemplate == true)
-            ? NSColor.white
+            ? Chrome.theme.foreground
             : hasBrand
                 ? nil
                 : tagColor ?? statusTint
