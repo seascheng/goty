@@ -81,8 +81,8 @@ func run() {
           "pale foreground floored to ≥≈4.5:1")
     let dark = ChromeTheme(background: NSColor(hex: "#1c1c1c")!,
                            foreground: NSColor(hex: "#ddeedd")!, accent: .gray)
-    check(ChromeTheme.contrastRatio(dark.secondaryText, dark.background) >= 2.85,
-          "dark-theme secondaryText ≥≈3:1")
+    check(ChromeTheme.contrastRatio(dark.secondaryText, dark.background) >= 4.5,
+          "dark-theme secondaryText keeps the design step (≥4.5:1, not the bare 3:1 floor)")
     check(ChromeTheme.contrastRatio(dark.hoverFill, dark.background) >= 1.1,
           "dark-theme hover lifted")
 

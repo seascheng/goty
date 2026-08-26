@@ -156,18 +156,18 @@ struct ChromeTheme {
     }
 
     /// Muted text — a SOLID blend toward the foreground, never an
-    /// alpha: alpha text washes out over translucent surfaces. The
-    /// fraction SELF-ADAPTS: lift to ≥3:1 contrast keeps dark themes
-    /// at their old quiet step while light themes get enough darkening
-    /// for small text (Aizen-light report).
+    /// alpha: alpha text washes out over translucent surfaces. Starts
+    /// at the design step and only darkens/brightens FURTHER if the
+    /// theme's own fg/bg contrast is too weak to clear 3:1 there
+    /// (lift alone exits early on high-contrast themes — Arthur's
+    /// 12:1 pair satisfied 3:1 at a 0.25 blend: near-black).
     var secondaryText: NSColor {
-        lift(background, toward: foreground, ratio: 3.0)
+        lift(background, toward: foreground, ratio: 3.0, from: 0.62)
     }
 
-    /// Quietest solid step (row counts, footnotes) — the old
-    /// secondaryText-with-alpha double-dip lived here.
+    /// Quietest solid step (row counts, footnotes) — same floor rule.
     var tertiaryText: NSColor {
-        lift(background, toward: foreground, ratio: 2.2)
+        lift(background, toward: foreground, ratio: 2.2, from: 0.45)
     }
 
     /// Hover fill: tty7's recipe — the surface lifted toward the foreground
@@ -200,14 +200,18 @@ struct ChromeTheme {
             + 0.0722 * channel(c.blueComponent)
     }
 
-    private func lift(_ base: NSColor, toward fg: NSColor, ratio: CGFloat) -> NSColor {
+    private func lift(_ base: NSColor, toward fg: NSColor, ratio: CGFloat,
+                      from minT: CGFloat = 0.05) -> NSColor {
         // UNSIGNED contrast ratio: the old signed form only rose when
         // blending brightened (dark themes) — on light themes blending
         // toward the dark fg only darkens, the condition never held,
         // and the loop fell through to t=1: hover fills came out as the
         // raw foreground (the black-hover-on-light-themes report).
+        // `from` holds the design step: lift returns the FIRST blend
+        // clearing the ratio, so without it high-contrast themes exit
+        // far quieter than designed (Arthur's near-black step).
         let lb = luminance(base)
-        var t: CGFloat = 0.05
+        var t = max(0.05, minT)
         while t <= 1 {
             let mixed = blend(base, with: fg, fraction: t)
             let lm = luminance(mixed)
