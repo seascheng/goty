@@ -317,12 +317,8 @@ final class ServerStatusView: NSView {
                 spin.topAnchor.constraint(equalTo: sub.bottomAnchor, constant: 18),
             ])
         } else {
-            let button = ClosureButton()
-            button.bezelStyle = .rounded
-            button.title = "Reconnect"
-            button.controlSize = .regular
-            button.font = .systemFont(ofSize: 13, weight: .medium)
-            button.onClick = onReconnect
+            let button = ClosureButton.make(title: "Reconnect", emphasized: true,
+                                           onClick: onReconnect)
             button.translatesAutoresizingMaskIntoConstraints = false
             addSubview(button)
             NSLayoutConstraint.activate([

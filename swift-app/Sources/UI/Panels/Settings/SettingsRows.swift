@@ -101,17 +101,24 @@ final class ConfigFilePage: NSView {
         card.addSubview(status)
 
         NSLayoutConstraint.activate([
-            heading.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
-            heading.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
-            heading.topAnchor.constraint(equalTo: topAnchor, constant: 22),
-            sub.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
-            sub.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
-            sub.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 4),
-
-            card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
-            card.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
             card.topAnchor.constraint(equalTo: sub.bottomAnchor, constant: 16),
 
+            heading.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            heading.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor),
+            heading.topAnchor.constraint(equalTo: topAnchor, constant: 26),
+            sub.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            sub.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor),
+            sub.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 4),
+
+            // Same capped, centered column as the form pages.
+            card.centerXAnchor.constraint(equalTo: centerXAnchor),
+            card.widthAnchor.constraint(lessThanOrEqualToConstant: 640),
+        ])
+        let fillColumn = card.widthAnchor.constraint(equalTo: widthAnchor, constant: -48)
+        fillColumn.priority = .init(999)   // yield to the 640 cap
+
+        NSLayoutConstraint.activate([
+            fillColumn,
             caps.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
             caps.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
             pathField.leadingAnchor.constraint(equalTo: caps.leadingAnchor),
@@ -123,6 +130,7 @@ final class ConfigFilePage: NSView {
             divider1.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
             divider1.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
             divider1.topAnchor.constraint(equalTo: pathField.bottomAnchor, constant: 14),
+            divider1.heightAnchor.constraint(equalToConstant: 1),
 
             open.leadingAnchor.constraint(equalTo: caps.leadingAnchor),
             open.topAnchor.constraint(equalTo: divider1.bottomAnchor, constant: 12),
@@ -132,6 +140,7 @@ final class ConfigFilePage: NSView {
             divider2.leadingAnchor.constraint(equalTo: divider1.leadingAnchor),
             divider2.trailingAnchor.constraint(equalTo: divider1.trailingAnchor),
             divider2.topAnchor.constraint(equalTo: open.bottomAnchor, constant: 14),
+            divider2.heightAnchor.constraint(equalToConstant: 1),
 
             dot.leadingAnchor.constraint(equalTo: caps.leadingAnchor),
             dot.widthAnchor.constraint(equalToConstant: 7),
@@ -161,11 +170,7 @@ final class SettingsSectionRow: NSView {
         super.init(frame: .zero)
         wantsLayer = true
 
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: section.symbol,
-                             accessibilityDescription: nil)
-        icon.contentTintColor = Chrome.theme.iconTint
-        icon.translatesAutoresizingMaskIntoConstraints = false
+        let icon = IconLabel(section.symbol)
         addSubview(icon)
 
         titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
@@ -229,11 +234,29 @@ final class SettingsFormPage: NSView {
 
     private(set) var controlsByKey: [String: NSView] = [:]
     private var previousBottom: NSLayoutYAxisAnchor!
+    /// Card bottom == last row bottom; swapped on every addRow so the
+    /// card always hugs its content (an inequality left it ambiguous
+    /// and CAL stretched it to the full pane).
+
+    /// The group card every row lives in (Dialog card language:
+    /// lifted fill, hairline border, 12pt corners). Full-width rows
+    /// with edge-to-edge dividers read as a spreadsheet on a wide
+    /// window — the column fills the pane but caps at 640pt, centered.
+    private let card = NSView()
+    private var cardBottomConstraint: NSLayoutConstraint?
 
     init(title: String, subtitle: String) {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+
+        card.wantsLayer = true
+        card.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        card.layer?.borderColor = Chrome.theme.hairline.cgColor
+        card.layer?.borderWidth = 1
+        card.layer?.cornerRadius = 12
+        card.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(card)
 
         let heading = NSTextField(labelWithString: title)
         heading.font = .systemFont(ofSize: 17, weight: .semibold)
@@ -251,15 +274,21 @@ final class SettingsFormPage: NSView {
         sub.translatesAutoresizingMaskIntoConstraints = false
         addSubview(sub)
 
+        let fillColumn = card.widthAnchor.constraint(equalTo: widthAnchor, constant: -48)
+        fillColumn.priority = .init(999)   // yield to the 640 cap
         NSLayoutConstraint.activate([
-            heading.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
-            heading.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
-            heading.topAnchor.constraint(equalTo: topAnchor, constant: 22),
-            sub.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
-            sub.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
+            fillColumn,
+            card.widthAnchor.constraint(lessThanOrEqualToConstant: 640),
+            card.centerXAnchor.constraint(equalTo: centerXAnchor),
+            heading.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            heading.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor),
+            heading.topAnchor.constraint(equalTo: topAnchor, constant: 26),
+            sub.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            sub.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor),
             sub.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 4),
+            card.topAnchor.constraint(equalTo: sub.bottomAnchor, constant: 18),
         ])
-        previousBottom = sub.bottomAnchor
+        previousBottom = card.topAnchor
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
@@ -274,9 +303,24 @@ final class SettingsFormPage: NSView {
                 control: NSView) {
         if let key { controlsByKey[key] = control }
 
+        // Divider ABOVE each new row (none after the last): the card's
+        // bottom edge closes the group, a trailing line doubled it.
+        if !rows.isEmpty {
+            let hairline = HairlineView()
+            hairline.translatesAutoresizingMaskIntoConstraints = false
+            card.addSubview(hairline)
+            NSLayoutConstraint.activate([
+                hairline.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+                hairline.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+                hairline.topAnchor.constraint(equalTo: previousBottom),
+                hairline.heightAnchor.constraint(equalToConstant: 1),
+            ])
+            previousBottom = hairline.bottomAnchor
+        }
+
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
+        card.addSubview(row)
         rows.append(row)
         row.addSubview(control)
 
@@ -297,36 +341,37 @@ final class SettingsFormPage: NSView {
             detailField.translatesAutoresizingMaskIntoConstraints = false
             row.addSubview(detailField)
             NSLayoutConstraint.activate([
-                detailField.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 24),
+                detailField.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 16),
                 detailField.trailingAnchor.constraint(lessThanOrEqualTo: control.leadingAnchor, constant: -12),
                 detailField.topAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 1),
             ])
             labelBottom = detailField.bottomAnchor
         }
 
-        let hairline = HairlineView()
-        hairline.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(hairline)
-
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor),
-            row.topAnchor.constraint(equalTo: previousBottom, constant: 2),
+            row.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            row.topAnchor.constraint(equalTo: previousBottom),
             row.heightAnchor.constraint(equalToConstant: 56),
-            titleField.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 24),
+            titleField.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 16),
             titleField.trailingAnchor.constraint(lessThanOrEqualTo: control.leadingAnchor, constant: -12),
-            titleField.topAnchor.constraint(equalTo: row.topAnchor, constant: detail == nil ? 18 : 9),
-            control.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -24),
+            control.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -16),
             control.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            hairline.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
-            hairline.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
-            hairline.topAnchor.constraint(equalTo: row.bottomAnchor),
-            hairline.heightAnchor.constraint(equalToConstant: 1),
         ])
+        if detail?.isEmpty != false {
+            // Single-line row: optically center the label.
+            titleField.centerYAnchor.constraint(equalTo: row.centerYAnchor)
+                .isActive = true
+        } else {
+            titleField.topAnchor.constraint(equalTo: row.topAnchor, constant: 10)
+                .isActive = true
+        }
         _ = labelBottom
-        previousBottom = hairline.bottomAnchor
-        // Close the chain: the page's intrinsic height = its rows.
-        bottomAnchor.constraint(greaterThanOrEqualTo: hairline.bottomAnchor)
+        previousBottom = row.bottomAnchor
+        cardBottomConstraint?.isActive = false
+        cardBottomConstraint = card.bottomAnchor.constraint(equalTo: row.bottomAnchor)
+        cardBottomConstraint?.isActive = true
+        bottomAnchor.constraint(greaterThanOrEqualTo: card.bottomAnchor, constant: 24)
             .isActive = true
     }
 

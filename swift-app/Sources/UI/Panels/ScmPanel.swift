@@ -73,7 +73,8 @@ final class ScmPanelView: NSView {
                              collapsedGroups: Set<ScmPanelGroup>,
                              worktrees: Bool)?
 
-    private let branchIcon = NSImageView()
+    private let branchIcon = IconLabel("arrow.triangle.branch", pointSize: 11,
+                                       tint: Chrome.theme.secondaryText)
     private let branchField = NSTextField(labelWithString: "")
     private let abField = NSTextField(labelWithString: "")
     private let messageView = CommitMessageView()
@@ -93,11 +94,6 @@ final class ScmPanelView: NSView {
         // Branch row (tty7 scm_branch_row): git glyph + full-ink sans
         // name — the most important word on the row earns full strength,
         // not a larger size — with the ahead/behind note in muted mono.
-        branchIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch",
-                                   accessibilityDescription: nil)
-        branchIcon.symbolConfiguration = .init(pointSize: 11, weight: .regular)
-        branchIcon.contentTintColor = Chrome.theme.secondaryText
-        branchIcon.translatesAutoresizingMaskIntoConstraints = false
         addSubview(branchIcon)
 
         branchField.font = .systemFont(ofSize: 12.5, weight: .medium)
@@ -128,12 +124,8 @@ final class ScmPanelView: NSView {
         stagedNote.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stagedNote)
 
-        commitButton.bezelStyle = .rounded
-        commitButton.controlSize = .small
-        commitButton.font = .systemFont(ofSize: 11, weight: .medium)
-        commitButton.title = "Commit"
+        commitButton.applyStandardStyle(title: "Commit")
         commitButton.onClick = { [weak self] in self?.commit(all: false) }
-        commitButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(commitButton)
 
         commitMore.onClick = { [weak self] in
@@ -426,10 +418,12 @@ final class ScmPanelView: NSView {
 
     /// One op through the store: success refreshes every git surface
     /// (panel groups, tree badges, sidebar branch line); failure shows
-    /// git's first stderr line. Shared by ScmOp and WorktreeOp.
-    private func run(_ op: ScmCommand, errorTitle: String) {
+    /// git's first stderr line. Shared by ScmOp and WorktreeOp. `root`
+    /// overrides the focused repo — a worktree-row verb runs in THAT
+    /// worktree (merge into its checked-out branch), not the focused one.
+    private func run(_ op: ScmCommand, root: String? = nil, errorTitle: String) {
         guard let st = status else { return }
-        ScmStore.shared.run(op: op, root: st.root, host: host) { [weak self] result in
+        ScmStore.shared.run(op: op, root: root ?? st.root, host: host) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success:
@@ -449,12 +443,16 @@ final class ScmPanelView: NSView {
         row.addAction(symbol: "terminal", tip: "Open Terminal in Worktree") { [weak self] in
             self?.onOpenWorktree?(w.path)
         }
-        // Merge brings the worktree's branch INTO the branch this panel
-        // is on — offered only where that sentence makes sense.
-        if !isCurrent, let branch = w.branch, branch != currentBranch {
+        // Merge acts on the row's own worktree: the focused branch is
+        // brought INTO the branch checked out there — hover main while
+        // on a feature branch, get "merge feature into main" (run in
+        // main's worktree; git refuses to merge into an unchecked-out
+        // branch).
+        if !isCurrent, let currentBranch, let branch = w.branch, branch != currentBranch {
             row.addAction(symbol: "arrow.triangle.branch",
-                          tip: "Merge \(branch) into current branch") { [weak self] in
-                self?.run(WorktreeOp.merge(branch: branch), errorTitle: "Git merge failed")
+                          tip: "Merge \(currentBranch) into \(branch)") { [weak self] in
+                self?.run(WorktreeOp.merge(branch: currentBranch), root: w.path,
+                          errorTitle: "Git merge failed")
             }
         }
         // git refuses to remove the main working tree; the button would

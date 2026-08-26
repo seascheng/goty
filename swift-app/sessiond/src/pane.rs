@@ -144,8 +144,58 @@ impl ReplayRing {
     }
 }
 
+/// Bracketed-paste (DECSET/DECRST 2004) tracker. Private modes live in
+/// the terminal emulator, not the pane: after a GUI restart the fresh
+/// surface loses them, and ghostty then converts pasted newlines to CR
+/// (xterm behavior for unbracketed pastes). The replay ring may have
+/// rotated past the program's startup sequences long ago, so the mode
+/// is tracked as live state and re-sent as an output frame after replay.
+/// ponytail: tracks 2004 only — extend to other private modes (1049,
+/// kitty keyboard flags) if one proves stale after reattach.
+const BRACKETED_PASTE_ON: &[u8] = b"\x1b[?2004h";
+const BRACKETED_PASTE_OFF: &[u8] = b"\x1b[?2004l";
+
+struct BracketedPasteTracker {
+    mode: bool,
+    /// Tail of the previous chunk so a sequence split across reads is
+    /// still matched.
+    carry: Vec<u8>,
+}
+
+impl BracketedPasteTracker {
+    fn new() -> Self {
+        Self {
+            mode: false,
+            carry: Vec::new(),
+        }
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        let mut buf = self.carry.clone();
+        buf.extend_from_slice(bytes);
+        // Last occurrence wins; a raw ESC cannot appear inside an
+        // OSC/DCS payload (it terminates it), so a byte match here is
+        // exactly what a conformant terminal parser would have seen.
+        let on = buf
+            .windows(BRACKETED_PASTE_ON.len())
+            .rposition(|w| w == BRACKETED_PASTE_ON);
+        let off = buf
+            .windows(BRACKETED_PASTE_OFF.len())
+            .rposition(|w| w == BRACKETED_PASTE_OFF);
+        match (on, off) {
+            (Some(on), Some(off)) => self.mode = on > off,
+            (Some(_), None) => self.mode = true,
+            (None, Some(_)) => self.mode = false,
+            (None, None) => {}
+        }
+        let keep = buf.len().min(BRACKETED_PASTE_ON.len() - 1);
+        self.carry = buf[buf.len() - keep..].to_vec();
+    }
+}
+
 struct PaneState {
     ring: ReplayRing,
+    bracketed_paste: BracketedPasteTracker,
     subscriber: Option<SyncSender<OutFrame>>,
     subscriber_epoch: u64,
     alive: bool,
@@ -201,6 +251,7 @@ impl Pane {
             writer: Mutex::new(writer),
             state: Mutex::new(PaneState {
                 ring: ReplayRing::new(size),
+                bracketed_paste: BracketedPasteTracker::new(),
                 subscriber: None,
                 subscriber_epoch: 0,
                 alive: true,
@@ -223,6 +274,19 @@ impl Pane {
         state.subscriber_epoch = state.subscriber_epoch.wrapping_add(1);
         let epoch = state.subscriber_epoch;
         if self.replay_enabled && !state.ring.replay(&sender) {
+            return None;
+        }
+        // Replay restores screen content, not private modes — hand the
+        // tracked bracketed-paste state to the fresh surface before the
+        // attach marker so pasted newlines stay newlines.
+        if state.bracketed_paste.mode
+            && sender
+                .send(OutFrame::new(
+                    protocol::kind::OUTPUT,
+                    BRACKETED_PASTE_ON.to_vec(),
+                ))
+                .is_err()
+        {
             return None;
         }
         if sender
@@ -523,6 +587,7 @@ fn spawn_reader(
                         if pane.replay_enabled {
                             state.ring.append(bytes);
                         }
+                        state.bracketed_paste.feed(bytes);
                         // Build the frame only when someone is attached —
                         // headless panes (parked servers, background
                         // sessions) would otherwise copy every chunk.
@@ -620,6 +685,35 @@ mod tests {
             ring.segments.back().map(|segment| segment.size),
             Some(size(80))
         );
+    }
+
+    #[test]
+    fn bracketed_paste_tracker_sets_and_clears() {
+        let mut tracker = BracketedPasteTracker::new();
+        tracker.feed(b"hello world");
+        assert!(!tracker.mode);
+        tracker.feed(b"\x1b[?2004h");
+        assert!(tracker.mode);
+        tracker.feed(b"\x1b[?2004l");
+        assert!(!tracker.mode);
+    }
+
+    #[test]
+    fn bracketed_paste_tracker_matches_across_chunk_split() {
+        let mut tracker = BracketedPasteTracker::new();
+        tracker.feed(b"\x1b[?20");
+        assert!(!tracker.mode);
+        tracker.feed(b"04h");
+        assert!(tracker.mode);
+    }
+
+    #[test]
+    fn bracketed_paste_tracker_last_occurrence_wins() {
+        let mut tracker = BracketedPasteTracker::new();
+        tracker.feed(b"junk \x1b[?2004h junk \x1b[?2004l");
+        assert!(!tracker.mode);
+        tracker.feed(b" \x1b[?2004h");
+        assert!(tracker.mode);
     }
 
     #[test]

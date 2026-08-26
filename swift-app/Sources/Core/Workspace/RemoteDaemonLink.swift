@@ -225,25 +225,9 @@ final class RemoteDaemonLink {
     // MARK: - ssh helpers (blocking; the queue is serial and off-main)
 
     private func ssh(_ command: String, stdin: Data? = nil) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = SshTransport.options(host: host, command: command)
-        process.standardError = FileHandle.nullDevice
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        if let stdin {
-            let inPipe = Pipe()
-            process.standardInput = inPipe
-            try? process.run()
-            try? inPipe.fileHandleForWriting.write(contentsOf: stdin)
-            inPipe.fileHandleForWriting.closeFile()
-        } else {
-            process.standardInput = FileHandle.nullDevice
-            try? process.run()
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return String(decoding: data, as: UTF8.self)
+        // Best-effort like before: stdout regardless of exit status.
+        let result = Shell.exec(command, host: host, stdin: stdin)
+        return String(decoding: result.stdout, as: UTF8.self)
     }
 
     private func probe() -> (arch: String, home: String)? {

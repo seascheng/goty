@@ -11,46 +11,38 @@ struct GitSummary: Equatable {
     let removed: Int
 }
 
-/// Repo status cache behind the sidebar's space rows.
-///
-/// One fetch per distinct cwd — local repos via `/usr/bin/git`, remote
-/// workspaces via a single ssh exec (branch + shortstat in one round
-/// trip). Fetches run on a private serial queue; the cache itself is
-/// only touched on the main thread (reads happen during row renders).
-/// A TTL plus an in-flight set keep the poll cheap. LOCAL repos ride
-/// RepoWatcher (FSEvents): their TTL is a 30s safety net against a
-/// dropped kernel event, and a change refetches on the next 2s tick —
-/// remote repos have no event source over ssh exec and keep the 5s
-/// poll.
+/// Sidebar space rows' git line: branch + diff counts per repo.
+/// Freshness machinery lives in `GitRepoCache` (shared with ScmStore —
+/// one engine, not two copies); this store owns WHAT to ask (one
+/// round trip: root, worktree list, branch, shortstat) and the parse.
 final class GitStatusStore {
     static let shared = GitStatusStore()
 
-    private var cache: [String: GitSummary?] = [:]
-    /// cwd memo → repo root (nil = known not-a-repo). Root-scoped
-    /// invalidation (`RepoWatcher`) needs the mapping.
-    private var rootFor: [String: String?] = [:]
-    private var fetchedAt: [String: Date] = [:]
-    private var inFlight = Set<String>()
-    /// Last RepoWatcher-driven refetch per root (storm bound).
-    private var eventRefetchedAt: [String: Date] = [:]
-    static let eventMinInterval: TimeInterval = 3
+    private let engine: GitRepoCache<GitSummary>
     /// A summary CHANGED (poll or RepoWatcher path) — the sidebar
     /// re-renders its spaces.
-    var onSummaryChanged: (() -> Void)?
-    private let localTTL: TimeInterval
-    private let remoteTTL: TimeInterval
-    private let queue = DispatchQueue(label: "goty.git-status", qos: .utility)
-
-    init(remoteTTL: TimeInterval = 5, localTTL: TimeInterval = 30) {
-        self.remoteTTL = remoteTTL
-        self.localTTL = localTTL
+    var onSummaryChanged: (() -> Void)? {
+        didSet { engine.onValuesChanged = onSummaryChanged }
     }
 
-    private func ttl(host: String?) -> TimeInterval { host == nil ? localTTL : remoteTTL }
+    init() {
+        engine = GitRepoCache { cwd, host in
+            Self.fetch(cwd: cwd, host: host).map {
+                GitRepoCache<GitSummary>.Answer(root: $0.root, spaceRoot: $0.spaceRoot,
+                                                value: $0.summary)
+            }
+        }
+    }
 
     /// Last known summary for a cwd (main thread).
-    func summary(for cwd: String) -> GitSummary? {
-        cache[cwd] ?? nil
+    func summary(for cwd: String, host: String?) -> GitSummary? {
+        engine.answer(cwd: cwd, host: host)?.value
+    }
+
+    /// The SPACE root for a cwd — the engine's one definition (see
+    /// `GitRepoCache.spaceRoot`).
+    func spaceRoot(for cwd: String, host: String?) -> String? {
+        engine.spaceRoot(cwd: cwd, host: host)
     }
 
     /// Re-fetches the given cwds if stale. `onChange` fires on the main
@@ -59,89 +51,33 @@ final class GitStatusStore {
     /// the TTL (after an SCM panel op moved refs).
     func refresh(cwds: [String], host: String?, force: Bool = false,
                  onChange: (() -> Void)? = nil) {
-        let now = Date()
-        var stale: [String] = []
-        for cwd in Set(cwds)
-        where force || fetchedAt[cwd].map({ now.timeIntervalSince($0) > ttl(host: host) }) ?? true {
-            if !inFlight.contains(cwd) {
-                inFlight.insert(cwd)
-                stale.append(cwd)
-            }
-        }
-        guard !stale.isEmpty else { return }
-
-        queue.async { [weak self] in
-            var changed = false
-            var results: [String: (root: String, summary: GitSummary?)?] = [:]
-            for cwd in stale {
-                results[cwd] = Self.fetch(cwd: cwd, host: host)
-            }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                for (cwd, fetched) in results {
-                    let summary = fetched.flatMap(\.summary)
-                    if (self.cache[cwd] ?? nil) != summary { changed = true }
-                    self.cache[cwd] = summary
-                    self.rootFor[cwd] = fetched?.root
-                    self.fetchedAt[cwd] = now
-                    self.inFlight.remove(cwd)
-                    // Local roots gain an FSEvents stream the first
-                    // time they resolve; changes then invalidate via
-                    // RepoWatcher instead of the clock.
-                    if host == nil, let root = fetched?.root {
-                        RepoWatcher.shared.watch(root)
-                    }
-                }
-                if changed { onChange?(); self.onSummaryChanged?() }
-            }
+        engine.refresh(cwds: cwds, host: host, force: force) { changed, _ in
+            if changed { onChange?() }
         }
     }
 
-    /// RepoWatcher: this LOCAL repo changed on disk. Refetch every cwd
-    /// that resolves to it NOW, rate-bounded per root; `force` rides
-    /// past the TTL. Repos never seen (empty mapping) stay with the
-    /// tick. `onSummaryChanged` fires only when a badge value moved.
-    func rootChanged(root: String) {
-        let now = Date()
-        guard now.timeIntervalSince(eventRefetchedAt[root] ?? .distantPast)
-                >= Self.eventMinInterval else { return }
-        let cwds = rootFor.compactMap { ($0.value ?? nil) == root ? $0.key : nil }
-        guard !cwds.isEmpty else { return }
-        eventRefetchedAt[root] = now
-        refresh(cwds: cwds, host: nil, force: true)
-    }
+    /// RepoWatcher: this LOCAL repo changed on disk — the engine
+    /// refetches every cwd of the root, rate-bounded. Fires
+    /// `onSummaryChanged` only when a value moved.
+    func rootChanged(root: String) { engine.rootChanged(root: root) }
 
     /// One round trip: repo root (rev-parse — also the watcher's key),
     /// branch (symbolic-ref, short hash when detached), then
-    /// worktree-vs-HEAD shortstat (plain diff on an unborn HEAD).
+    /// worktree-vs-HEAD shortstat (plain diff on an unborn HEAD), then
+    /// `worktree list --porcelain` — its FIRST entry is the main
+    /// worktree, the space identity subdirs and linked worktrees share.
     /// Fails closed (`nil`) outside a repo.
-    static func fetch(cwd: String, host: String?) -> (root: String, summary: GitSummary?)? {
+    static func fetch(cwd: String, host: String?) -> (root: String, spaceRoot: String, summary: GitSummary?)? {
         let dir = Shell.forceQuoted(cwd)
         let git = host != nil ? "git" : "/usr/bin/git"
         let command = "cd \(dir) && "
             + "\(git) rev-parse --show-toplevel && "
             + "{ \(git) symbolic-ref --short HEAD || \(git) rev-parse --short HEAD; } && "
-            + "{ \(git) diff HEAD --shortstat || \(git) diff --shortstat; } || exit 1"
-        let proc = Process()
-        if let host {
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-            proc.arguments = SshTransport.options(host: host, command: command)
-        } else {
-            proc.executableURL = URL(fileURLWithPath: "/bin/sh")
-            proc.arguments = ["-c", command]
-        }
-        proc.standardError = FileHandle.nullDevice
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        do {
-            try proc.run()
-        } catch {
-            return nil
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0,
-              let text = String(data: data, encoding: .utf8) else { return nil }
+            + "{ \(git) diff HEAD --shortstat || \(git) diff --shortstat; } && "
+            + "{ \(git) worktree list --porcelain || true; } || exit 1"
+        let result = Shell.exec(command, host: host)
+        guard result.code == 0,
+              let text = String(data: result.stdout, encoding: .utf8) else { return nil }
 
         var lines = text.split(separator: "\n").map(String.init)
         guard let root = lines.first?.trimmingCharacters(in: .whitespaces),
@@ -151,7 +87,15 @@ final class GitStatusStore {
               !branch.isEmpty else { return nil }
         lines.removeFirst()
         let stat = lines.first.map(parseShortstat) ?? (0, 0)
-        return (root, GitSummary(branch: branch, added: stat.0, removed: stat.1))
+        // The space identity: `worktree list` names the main worktree
+        // first — every cwd of the repo (subdir or linked worktree)
+        // collapses onto it. Absent block (old git) degrades to the
+        // local root: subdirs still group, worktrees stay apart. NOT
+        // position-based: a clean tree emits NO shortstat line, so the
+        // worktree block can start one line early.
+        let spaceRoot = lines.first { $0.hasPrefix("worktree ") }
+            .map { String($0.dropFirst("worktree ".count)) } ?? root
+        return (root, spaceRoot, GitSummary(branch: branch, added: stat.0, removed: stat.1))
     }
 
     /// " 3 files changed, 10 insertions(+), 2 deletions(-)" → (10, 2).

@@ -169,7 +169,7 @@ final class SessionDaemon {
     /// constant. Daemons are singleton and detached, so a machine can
     /// serve an old build indefinitely; this is how the client tells.
     /// nil = no daemon / unusable handshake, NOT "old".
-    static let expectedCapability = 2
+    static let expectedCapability = 3
 
     func pingCapability() -> Int? {
         let fd = Self.connect(path: socketPath)

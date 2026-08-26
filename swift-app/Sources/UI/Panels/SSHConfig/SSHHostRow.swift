@@ -20,8 +20,7 @@ final class SSHHostRow: NSView {
         super.init(frame: .zero)
         wantsLayer = true
 
-        let glyph = NSImage(systemSymbolName: "server.rack", accessibilityDescription: nil)
-        iconView.image = glyph
+        iconView.image = NSImage(systemSymbolName: "server.rack", accessibilityDescription: nil)
         iconView.contentTintColor = Chrome.theme.iconTint
         iconView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(iconView)

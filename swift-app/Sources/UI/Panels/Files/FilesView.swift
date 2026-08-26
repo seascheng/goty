@@ -15,7 +15,7 @@ final class FilesView: NSView {
     /// carries (bytes, total-or-nil).
     var onUpload: (([URL], String, @escaping (Int64) -> Void,
                     @escaping (Result<Void, Error>) -> Void) -> Void)?
-    var onDownload: ((String, URL, @escaping (Int64, Int64?) -> Void,
+    var onDownload: ((String, Bool, URL, @escaping (Int64, Int64?) -> Void,
                       @escaping (Result<Void, Error>) -> Void) -> Void)?
 
     private var source: FileSource?
@@ -394,7 +394,8 @@ final class FilesView: NSView {
         // Remote rows can be pulled to this Mac (file or folder).
         if source?.isRemote == true {
             menu.addItem(ActionMenuItem("Download\u{2026}", symbol: "arrow.down.circle") { [weak self] in
-                self?.beginDownload(path: path, name: entry.name)
+                self?.beginDownload(path: path, name: entry.name,
+                                    isDirectory: entry.isDirectory)
             })
         }
         menu.addItem(.separator())
@@ -605,7 +606,7 @@ final class FilesView: NSView {
 
     /// Pick a destination folder, pull the remote path into it, reveal
     /// the result in Finder.
-    private func beginDownload(path: String, name: String) {
+    private func beginDownload(path: String, name: String, isDirectory: Bool) {
         let panel = NSOpenPanel()
         panel.message = "Download \(name) into"
         panel.prompt = "Download"
@@ -613,13 +614,13 @@ final class FilesView: NSView {
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let dest = panel.url else { return }
-        performDownload(remotePath: path, name: name, into: dest)
+        performDownload(remotePath: path, name: name, isDirectory: isDirectory, into: dest)
     }
 
-    func performDownload(remotePath: String, name: String, into dest: URL) {
+    func performDownload(remotePath: String, name: String, isDirectory: Bool, into dest: URL) {
         let id = beginTransfer()
         let started = Date()
-        onDownload?(remotePath, dest,
+        onDownload?(remotePath, isDirectory, dest,
                     progressSink(id: id)) { [weak self] result in
             guard let self else { return }
             self.endTransfer(id: id)

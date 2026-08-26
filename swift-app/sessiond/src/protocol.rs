@@ -13,7 +13,7 @@ pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// host can keep serving an old build indefinitely — this is the only
 /// way the client can tell (2026-08-24: remote workspaces silently
 /// lost agent logo/status to exactly this).
-pub const CAPABILITY: u8 = 2;
+pub const CAPABILITY: u8 = 3;
 
 pub mod kind {
     pub const SPAWN: u8 = 1;

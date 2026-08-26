@@ -26,7 +26,7 @@ final class RightPanelView: NSView {
                     @escaping (Result<Void, Error>) -> Void) -> Void)? {
         didSet { filesView?.onUpload = onUpload }
     }
-    var onDownload: ((String, URL, @escaping (Int64, Int64?) -> Void,
+    var onDownload: ((String, Bool, URL, @escaping (Int64, Int64?) -> Void,
                       @escaping (Result<Void, Error>) -> Void) -> Void)? {
         didSet { filesView?.onDownload = onDownload }
     }
@@ -327,11 +327,7 @@ final class PanelTabButton: NSView {
         wantsLayer = true
         layer?.cornerRadius = 6
 
-        let glyph = NSImageView(image: NSImage(systemSymbolName: symbol,
-                                               accessibilityDescription: text) ?? NSImage())
-        glyph.symbolConfiguration = .init(pointSize: 12, weight: .regular)
-        glyph.contentTintColor = Chrome.theme.iconTint
-        glyph.translatesAutoresizingMaskIntoConstraints = false
+        let glyph = IconLabel(symbol, pointSize: 12)
         addSubview(glyph)
 
         NSLayoutConstraint.activate([

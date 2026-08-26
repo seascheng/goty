@@ -505,8 +505,10 @@ final class ChromeInput: NSView, NSTextViewDelegate {
     }
 
     private func updatePlaceholder() {
-        let focused = window?.firstResponder === textView
-        placeholderLabel.isHidden = focused || !textView.string.isEmpty
+        // Content-driven only: the window's key-focus pass hands the
+        // field first responder before the user types anything, and
+        // focus-hiding left the box permanently empty-looking.
+        placeholderLabel.isHidden = !textView.string.isEmpty
     }
 
     func textDidChange(_ notification: Notification) {

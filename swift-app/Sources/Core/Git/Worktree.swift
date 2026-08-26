@@ -121,7 +121,7 @@ enum WorktreeOp: Equatable {
     }
 
     /// Commands run from the repo root, in order. Absolute paths — no
-    /// prefix guessing; quoting happens in `ScmTransport.join`.
+    /// prefix guessing; quoting happens in `Shell.join`.
     func commands() -> [[String]] {
         switch self {
         case .create(let path, let branch):

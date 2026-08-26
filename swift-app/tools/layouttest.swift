@@ -664,7 +664,10 @@ func run() {
           && AgentActivity("idle") == .idle && AgentActivity("bogus") == nil,
           "extension wire strings map to activities")
 
-    // The badge sits clear of the hover-revealed close button (the
+    // The badge and the hover-revealed close button share the right
+    // column: at REST the badge sits in it (aligned with the dot
+    // column, −8); on HOVER the badge steps aside — the close button
+    // takes the tail, so the two never compete for the same pixels.
     wc.sidebar.render(workspace: repoWs,
                       gitFor: { _ in GitSummary(branch: "gpui-upgrade", added: 0, removed: 0) },
                       statusFor: { _ in SpaceStatus(activity: .working, seen: true, spinner: "⣿") },
@@ -673,9 +676,15 @@ func run() {
     let rowBadge = tabRow(0)?.subviews.compactMap { $0 as? SidebarRowView.SpaceStatusView }.first
     let rowClose = tabRow(0)?.subviews.compactMap { $0 as? IconButton }.first
     check(rowBadge?.isHidden == false, "working space shows its badge")
-    if let rowBadge, let rowClose {
-        check(rowBadge.frame.maxX <= rowClose.frame.minX + 0.5,
-              "badge clear of the close button (\(rowBadge.frame.maxX) ≤ \(rowClose.frame.minX))")
+    if let row = tabRow(0), let rowBadge, let rowClose {
+        check(rowBadge.frame.maxX == row.bounds.maxX - 8,
+              "badge rides the right column at −8 (maxX=\(rowBadge.frame.maxX), row=\(row.bounds.maxX))")
+        row.mouseEntered(with: bandEvent(1))
+        check(rowClose.isHidden == false && rowBadge.isHidden == true,
+              "hover: close button takes the tail, badge steps aside")
+        row.mouseExited(with: bandEvent(1))
+        check(rowBadge.isHidden == false,
+              "leaving hover restores the badge")
     }
 
     print("— heavy terminal overlay must not move regions —")
@@ -1107,11 +1116,12 @@ func run() {
           "main worktree row: Open only (keys=\(rowKeys(panel)), repo=\(repoDir))")
 
     // A linked worktree (created OUTSIDE the app — the panel lists
-    // those too), a commit on its branch, then Merge back through the
-    // row's button: main fast-forwards to it.
+    // those too), a commit on MAIN, then Merge through the side row's
+    // button: the row's verb acts on ITS own worktree — the focused
+    // branch (main) is brought INTO side, so side fast-forwards to it.
     let sidePath = repoParent + "/" + repoName + "-side"
     runsh("cd '\(repoDir)' && git worktree add -q -b side '\(sidePath)'"
-          + " && cd '\(sidePath)' && echo b > b.txt && git add b.txt && git commit -qm side")
+          + " && cd '\(repoDir)' && echo b > b.txt && git add b.txt && git commit -qm main-work")
     panel.refresh(force: true)
     settle()
     let sideRow = wtRows(panel).first { $0.rowKey == "wt:\(sidePath)" }
@@ -1124,7 +1134,7 @@ func run() {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
     check(gitOut("git rev-parse main") == gitOut("git rev-parse side"),
-          "Merge fast-forwards (main=\(gitOut("git rev-parse main")), side=\(gitOut("git rev-parse side")))")
+          "Merge fast-forwards side to main (main=\(gitOut("git rev-parse main")), side=\(gitOut("git rev-parse side")))")
 
     // Remove: confirm dialog auto-answered via the seam; directory
     // goes, branch stays, row disappears.
@@ -1239,6 +1249,25 @@ func run() {
                          focusedTabIndex: 0, sshHost: "srv-a").displayName == "srv-a",
           "remote keeps the host alias as display name")
 
+    // Space identity: one git repo = one space. The resolver collapses
+    // subdirs and linked worktrees onto the repo's main root; a
+    // non-repo path stays its own space.
+    func spaceTab(_ id: String, _ cwd: String?) -> TabState {
+        TabState(id: id, name: id, panes: [PaneState(id: "p-\(id)", cwd: cwd)])
+    }
+    let repoSub = spaceTab("s", "/work/goty/swift-app")
+    let repoWt = spaceTab("w", "/work/goty-wt2")
+    let plainDir = spaceTab("p", "/tmp/notes")
+    let spaceSecs = SpaceGrouping.sections(for: [repoSub, repoWt, plainDir],
+                                            spaceRoot: { cwd in
+        cwd.hasPrefix("/work/goty") ? "/work/goty" : nil
+    })
+    check(spaceSecs.count == 2 && spaceSecs[0].name == "goty"
+              && spaceSecs[0].tabIndexs == [0, 1]
+              && spaceSecs[1].name == "notes" && spaceSecs[1].tabIndexs == [2],
+          "one git repo is one space: subdir + worktree share a section, "
+              + "non-repo paths stay their own")
+
     // Sidebar "+" menu: built pure, fired like the host picker.
     var plusDirs: [String?] = []
     var wtDirs: [String?] = []
@@ -1270,10 +1299,12 @@ func run() {
     RepoWatcher.shared.onRootChanged = nil
 
     // The sidebar's fetch carries the root beside the summary — it is
-    // the watcher's key and the invalidation mapping.
+    // the watcher's key and the invalidation mapping — and the space
+    // root (main worktree first in `worktree list`).
     let fetched = GitStatusStore.fetch(cwd: repoDir, host: nil)
-    check(fetched?.root == repoDir && fetched?.summary?.branch == "main",
-          "git fetch returns root + branch (root=\(fetched?.root ?? "-"))")
+    check(fetched?.root == repoDir && fetched?.spaceRoot == repoDir
+              && fetched?.summary?.branch == "main",
+          "git fetch returns root + space root + branch (root=\(fetched?.root ?? "-"))")
 
     // rootChanged: a RepoWatcher event refetches immediately (not at
     // tick cadence); the surface tick then reads the CACHE (TTL fresh

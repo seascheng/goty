@@ -147,20 +147,12 @@ final class EditorPanelView: NSView {
         }
         close.toolTip = "Back to terminal (Esc)"
         headerBackground.addSubview(close)
-        saveButton.bezelStyle = .rounded
-        saveButton.controlSize = .small
-        saveButton.font = .systemFont(ofSize: 11, weight: .medium)
-        saveButton.title = "Save"
+        saveButton.applyStandardStyle(title: "Save")
         saveButton.onClick = { [weak self] in self?.save() }
-        saveButton.translatesAutoresizingMaskIntoConstraints = false
         headerBackground.addSubview(saveButton)
 
-        previewButton.bezelStyle = .rounded
-        previewButton.controlSize = .small
-        previewButton.font = .systemFont(ofSize: 11, weight: .medium)
-        previewButton.title = "Preview"
+        previewButton.applyStandardStyle(title: "Preview")
         previewButton.onClick = { [weak self] in self?.togglePreview() }
-        previewButton.translatesAutoresizingMaskIntoConstraints = false
         previewButton.isHidden = true
         headerBackground.addSubview(previewButton)
 
@@ -270,12 +262,8 @@ final class EditorPanelView: NSView {
         pathLabel.translatesAutoresizingMaskIntoConstraints = false
         statusBar.addSubview(pathLabel)
 
-        wrapButton.bezelStyle = .rounded
-        wrapButton.controlSize = .small
-        wrapButton.font = .systemFont(ofSize: 10.5)
-        wrapButton.title = "Wrap: Off"
+        wrapButton.applyStatusBarStyle(title: "Wrap: Off")
         wrapButton.onClick = { [weak self] in self?.toggleWrap() }
-        wrapButton.translatesAutoresizingMaskIntoConstraints = false
         statusBar.addSubview(wrapButton)
 
         cursorLabel.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
@@ -283,25 +271,17 @@ final class EditorPanelView: NSView {
         cursorLabel.translatesAutoresizingMaskIntoConstraints = false
         statusBar.addSubview(cursorLabel)
 
-        reloadButton.bezelStyle = .rounded
-        reloadButton.controlSize = .small
-        reloadButton.font = .systemFont(ofSize: 10.5, weight: .medium)
-        reloadButton.title = "Reload"
+        reloadButton.applyStatusBarStyle(title: "Reload")
         reloadButton.onClick = { [weak self] in self?.reloadFromDisk() }
-        reloadButton.translatesAutoresizingMaskIntoConstraints = false
         reloadButton.isHidden = true
         statusBar.addSubview(reloadButton)
 
-        keepButton.bezelStyle = .rounded
-        keepButton.controlSize = .small
-        keepButton.font = .systemFont(ofSize: 10.5)
-        keepButton.title = "Keep Mine"
+        keepButton.applyStatusBarStyle(title: "Keep Mine")
         keepButton.onClick = { [weak self] in
             guard let self, let f = self.currentFile else { return }
             f.conflict = false
             self.renderChrome()
         }
-        keepButton.translatesAutoresizingMaskIntoConstraints = false
         keepButton.isHidden = true
         statusBar.addSubview(keepButton)
         // (Preview button lives in the top bar, next to Save.)

@@ -442,44 +442,6 @@ enum ScmOp: Equatable {
 }
 
 
-// MARK: - Transport (same shape as GitStatus: local git / one ssh exec)
-
-enum ScmTransport {
-    /// Blocking; call off the main thread.
-    static func run(_ command: String, host: String?) -> (code: Int32, stdout: Data, stderr: String) {
-        let proc = Process()
-        if let host {
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-            proc.arguments = SshTransport.options(host: host, command: command)
-        } else {
-            proc.executableURL = URL(fileURLWithPath: "/bin/sh")
-            proc.arguments = ["-c", command]
-        }
-        let out = Pipe()
-        let err = Pipe()
-        proc.standardOutput = out
-        proc.standardError = err
-        do {
-            try proc.run()
-        } catch {
-            return (-1, Data(), "could not run \(host != nil ? "ssh" : "/bin/sh"): \(error.localizedDescription)")
-        }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let errText = String(data: err.fileHandleForReading.readDataToEndOfFile(),
-                             encoding: .utf8) ?? ""
-        proc.waitUntilExit()
-        return (proc.terminationStatus, data, errText)
-    }
-
-    /// One sh-quoted argv element. Quoting every element uniformly is the
-    /// point — deciding per-token which are "safe" is how one gets missed.
-    static func quote(_ arg: String) -> String { Shell.forceQuoted(arg) }
-
-    static func join(_ argv: [String]) -> String {
-        argv.map(quote).joined(separator: " ")
-    }
-}
-
 // MARK: - Store (cwd→root memo, root→status cache, serial writes)
 
 struct ScmOpFailure: Error, Equatable {
@@ -498,76 +460,23 @@ protocol ScmCommand {
 extension ScmOp: ScmCommand {}
 extension WorktreeOp: ScmCommand {}
 
-/// All state main-thread only; every git/ssh round trip on one serial
-/// utility queue (same discipline as GitStatusStore — writes and reads
-/// never interleave on the wire).
+/// The Git panel's data source. Freshness machinery lives in
+/// `GitRepoCache` (shared with GitStatusStore — one engine, not two
+/// copies); this store owns the round trip (root + porcelain status +
+/// worktree list), the parse, and op execution.
 final class ScmStore {
     static let shared = ScmStore()
 
-    private let queue = DispatchQueue(label: "goty.scm", qos: .userInitiated)
-
-    /// cwd memo key → repo root (nil = known not-a-repo).
-    private var rootFor: [String: String?] = [:]
-    /// repo memo key → latest status.
-    private var status: [String: ScmStatus] = [:]
-    private var fetchedAt: [String: Date] = [:]   // cwd memo keys
-    private var inFlight = Set<String>()
-    /// Last RepoWatcher-driven refetch per root — bounds a build storm
-    /// to one exec per window however fast events arrive.
-    private var eventRefetchedAt: [String: Date] = [:]
-    static let eventMinInterval: TimeInterval = 3
+    private let engine: GitRepoCache<ScmStatus>
+    /// Write ops run on their own serial queue (reads/fetches own the
+    /// engine's) — writes never interleave on the wire.
+    private let opQueue = DispatchQueue(label: "goty.scm.ops", qos: .userInitiated)
     /// A RepoWatcher-driven refetch landed — surfaces re-render from
     /// cache (the fetch itself re-armed the TTL; no exec follows).
     var onRepoUpdated: ((String) -> Void)?
 
-    /// REMOTE: 5s — the 2s poll calls in repeatedly and there is no
-    /// event source over ssh exec. LOCAL: 30s — RepoWatcher (FSEvents)
-    /// refetches on change (rate-bounded by `eventMinInterval`), so the
-    /// TTL is only the safety net against a dropped kernel event (same
-    /// split as GitStatusStore).
-    private let localTTL: TimeInterval
-    private let remoteTTL: TimeInterval
-    init(remoteTTL: TimeInterval = 5, localTTL: TimeInterval = 30) {
-        self.remoteTTL = remoteTTL
-        self.localTTL = localTTL
-    }
-    private func ttl(host: String?) -> TimeInterval { host == nil ? localTTL : remoteTTL }
-
-    private static func memo(_ path: String, _ host: String?) -> String {
-        (host ?? "") + "\u{0}" + path
-    }
-
-    /// Last known status for the repo containing `cwd` (main thread).
-    /// nil = not a repo, unreachable, or nothing fetched yet.
-    func cachedStatus(cwd: String, host: String?) -> ScmStatus? {
-        guard let root = rootFor[Self.memo(cwd, host)] ?? nil else { return nil }
-        return status[Self.memo(root, host)]
-    }
-
-    /// The root every write runs from; nil until a status has landed.
-    func repoRoot(cwd: String, host: String?) -> String? {
-        rootFor[Self.memo(cwd, host)] ?? nil
-    }
-
-    /// Resolve the repo root + fetch status in ONE round trip:
-    /// `rev-parse -z --show-toplevel` then `status --porcelain=v2 -z`.
-    /// `onChange` fires on the main thread when the answer landed —
-    /// nil = not a repo / unreachable; the caller decides how to say so.
-    func refreshStatus(cwd: String, host: String?, force: Bool = false,
-                       onChange: ((ScmStatus?) -> Void)? = nil) {
-        let mk = Self.memo(cwd, host)
-        if !force, inFlight.contains(mk) { return }
-        if !force, let at = fetchedAt[mk],
-           Date().timeIntervalSince(at) < ttl(host: host) {
-            // Fresh enough: answer from the cache so a surface's tick
-            // is a read, not an exec (RepoWatcher keeps the cache hot).
-            onChange?(cachedStatus(cwd: cwd, host: host))
-            return
-        }
-        inFlight.insert(mk)
-        fetchedAt[mk] = Date()   // at request time: a slow answer must not re-arm the poll
-
-        queue.async { [weak self] in
+    init() {
+        engine = GitRepoCache { cwd, host in
             let git = host != nil ? "git" : "/usr/bin/git"
             let dir = Shell.forceQuoted(cwd)
             // Three US (\u{1F})-separated sections — root, status, worktree
@@ -579,28 +488,34 @@ final class ScmStore {
                 + "\(git) -c core.quotePath=false status --porcelain=v2 --branch "
                 + "--untracked-files=all -z && printf '\\037' && "
                 + "{ \(git) worktree list --porcelain || true; }"
-            let result = ScmTransport.run(command, host: host)
+            let result = Shell.exec(command, host: host)
+            guard result.code == 0, let text = String(data: result.stdout, encoding: .utf8),
+                  let parsed = Self.parseTransport(text) else { return nil }
+            let mainRoot = parsed.worktrees.first(where: { !$0.bare })?.path ?? parsed.root
+            return GitRepoCache<ScmStatus>.Answer(root: parsed.root, spaceRoot: mainRoot,
+                                                  value: parsed)
+        }
+    }
 
-            let parsed: ScmStatus?
-            if result.code == 0, let text = String(data: result.stdout, encoding: .utf8) {
-                parsed = Self.parseTransport(text)
-            } else {
-                parsed = nil
-            }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.inFlight.remove(mk)
-                self.rootFor[mk] = parsed?.root
-                if let parsed {
-                    self.status[Self.memo(parsed.root, host)] = parsed
-                }
-                // Local roots gain an FSEvents stream; changes then
-                // invalidate via RepoWatcher instead of the clock.
-                if host == nil, let root = parsed?.root {
-                    RepoWatcher.shared.watch(root)
-                }
-                onChange?(parsed)
-            }
+    /// Last known status for the repo containing `cwd` (main thread).
+    /// nil = not a repo, unreachable, or nothing fetched yet.
+    func cachedStatus(cwd: String, host: String?) -> ScmStatus? {
+        engine.answer(cwd: cwd, host: host)?.value
+    }
+
+    /// The root every write runs from; nil until a status has landed.
+    func repoRoot(cwd: String, host: String?) -> String? {
+        engine.answer(cwd: cwd, host: host)?.root
+    }
+
+    /// Resolve the repo root + fetch status in ONE round trip:
+    /// `rev-parse -z --show-toplevel` then `status --porcelain=v2 -z`.
+    /// `onChange` fires on the main thread when the answer landed —
+    /// nil = not a repo / unreachable; the caller decides how to say so.
+    func refreshStatus(cwd: String, host: String?, force: Bool = false,
+                       onChange: ((ScmStatus?) -> Void)? = nil) {
+        engine.refresh(cwds: [cwd], host: host, force: force) { _, results in
+            onChange?((results[cwd] ?? nil)?.value)
         }
     }
 
@@ -609,13 +524,13 @@ final class ScmStore {
     /// half-applied stage is recoverable; burying the reason is not.
     func run(op: ScmCommand, root: String, host: String?,
              completion: ((Result<Void, ScmOpFailure>) -> Void)? = nil) {
-        queue.async { [weak self] in
+        opQueue.async { [weak self] in
             let git = host != nil ? "git" : "/usr/bin/git"
             let dir = Shell.forceQuoted(root)
             var failure: ScmOpFailure?
             for argv in op.commands() {
-                let command = "cd \(dir) && " + git + " " + ScmTransport.join(argv)
-                let result = ScmTransport.run(command, host: host)
+                let command = "cd \(dir) && " + git + " " + Shell.join(argv)
+                let result = Shell.exec(command, host: host)
                 if result.code != 0 {
                     let first = result.stderr
                         .split(separator: "\n")
@@ -641,28 +556,15 @@ final class ScmStore {
     /// Drop the TTL for every cwd that resolved to this repo, so the next
     /// poll refetches immediately.
     func invalidate(root: String, host: String?) {
-        for (mk, resolved) in rootFor where (resolved ?? nil) == root {
-            fetchedAt.removeValue(forKey: mk)
-        }
+        engine.invalidate(root: root, host: host)
     }
 
-    /// RepoWatcher: this LOCAL repo changed on disk. Refetch NOW (not
-    /// at tick cadence), rate-bounded per root — a build storm costs at
-    /// most one exec per `eventMinInterval`; an idle repo costs zero.
-    /// The landing re-arms the TTL for every cwd of the root (the tick
-    /// must not duplicate the fetch) and tells the surfaces to re-read.
+    /// RepoWatcher: this LOCAL repo changed on disk — the engine
+    /// refetches every cwd of the root, rate-bounded; the landing
+    /// tells the surfaces to re-read.
     func rootChanged(root: String) {
-        guard status[Self.memo(root, nil)] != nil else { return }   // never shown → tick owns it
-        let now = Date()
-        guard now.timeIntervalSince(eventRefetchedAt[root] ?? .distantPast)
-                >= Self.eventMinInterval else { return }
-        eventRefetchedAt[root] = now
-        refreshStatus(cwd: root, host: nil, force: true) { [weak self] _ in
-            guard let self else { return }
-            for (mk, resolved) in self.rootFor where (resolved ?? nil) == root {
-                self.fetchedAt[mk] = Date()
-            }
-            self.onRepoUpdated?(root)
+        engine.rootChanged(root: root) { [weak self] in
+            self?.onRepoUpdated?(root)
         }
     }
 

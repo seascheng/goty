@@ -35,8 +35,9 @@ final class SidebarRowView: NSView {
 
     /// Trailing status badge (mirror's agent style): a compact pill on
     /// a status-tinted wash, the state word on the tooltip. Working
-    /// shows the agent's own braille spinner character when the surface
-    /// title carries one; every other state shows its SF symbol.
+    /// shows braille dots that morph — the agent's own title spinner
+    /// when the surface title carries one, else a locally cycled frame
+    /// sequence; every other state shows its SF symbol.
     final class SpaceStatusView: NSView {
         private let iconView = NSImageView()
         private let charField = NSTextField(labelWithString: "")
@@ -85,8 +86,8 @@ final class SidebarRowView: NSView {
             switch s.activity {
             case .working: return AgentSpec.statusWorking
             case .blocked: return AgentSpec.statusWaiting
-            case .idle: return s.seen ? NSColor(hex: "#8A8A98")! : AgentSpec.statusDone
-            case .unknown: return .systemGray
+            case .idle: return s.seen ? AgentSpec.statusIdle : AgentSpec.statusDone
+            case .unknown: return Chrome.theme.secondaryText
             }
         }
 
@@ -102,42 +103,56 @@ final class SidebarRowView: NSView {
 
         private func refresh() {
             guard let s = status else {
-                setSpinning(false)
+                charField.isHidden = true
+                iconView.isHidden = false
+                stopFrameTimer()
                 return
             }
             wash = Self.color(for: s)
             toolTip = stateWord
-            let showChar = s.activity == .working && s.spinner != nil
-            charField.stringValue = s.spinner.map(String.init) ?? ""
+            // goty: working is always braille — the title's own spinner
+            // char when present, else a locally cycled frame sequence.
+            let showChar = s.activity == .working
+            if showChar {
+                charField.stringValue = s.spinner.map(String.init) ?? String(Self.frames[frameIndex])
+            }
             charField.isHidden = !showChar
             iconView.isHidden = showChar
-            iconView.image = NSImage(
-                systemSymbolName: Self.symbol(for: s),
-                accessibilityDescription: stateWord)?
-                .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
-            setSpinning(s.activity == .working && !showChar)
+            if !showChar {
+                iconView.image = NSImage(
+                    systemSymbolName: Self.symbol(for: s),
+                    accessibilityDescription: stateWord)?
+                    .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+                stopFrameTimer()
+            } else if s.spinner == nil {
+                startFrameTimer()
+            } else {
+                stopFrameTimer()
+            }
             needsDisplay = true
         }
 
-        private static let spin = "status-spin"
+        /// Braille spinner frames (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) cycled locally
+        /// while working WITHOUT a title-driven char — the dots morph in
+        /// place, so nothing ever rotates out of the badge bounds (the
+        /// off-center pinwheel bug). Rows are reused across tabs, so
+        /// leaving working (or gaining a live title char) must stop it.
+        private static let frames: [Character] = Array("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+        private var frameIndex = 0
+        private var frameTimer: Timer?
 
-        /// Working animation: the agent's own braille spinner swaps live
-        /// (title-driven); without one the loop glyph ROTATES — a still
-        /// "working" badge reads as done at a glance. Rows are reused
-        /// across tabs, so leaving working must stop the rotation.
-        private func setSpinning(_ on: Bool) {
-            guard on else {
-                iconView.layer?.removeAnimation(forKey: Self.spin)
-                return
+        private func startFrameTimer() {
+            guard frameTimer == nil else { return }
+            frameTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                self.frameIndex = (self.frameIndex + 1) % Self.frames.count
+                self.charField.stringValue = String(Self.frames[self.frameIndex])
             }
-            guard iconView.layer?.animation(forKey: Self.spin) == nil else { return }
-            iconView.wantsLayer = true
-            let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
-            rotation.fromValue = 0
-            rotation.toValue = 2 * Double.pi
-            rotation.duration = 1.1
-            rotation.repeatCount = .infinity
-            iconView.layer?.add(rotation, forKey: Self.spin)
+        }
+
+        private func stopFrameTimer() {
+            frameTimer?.invalidate()
+            frameTimer = nil
         }
 
         override func draw(_ dirtyRect: NSRect) {
@@ -154,8 +169,10 @@ final class SidebarRowView: NSView {
     static let iconSlot: CGFloat = 20
     static let iconLeading: CGFloat = 6
     static let textGap: CGFloat = 6
-    /// Stacks and header containers share this sidebar inset — pills hug
-    /// the panel edge; the icon sits deep inside its pill.
+    /// Stacks and header containers share this sidebar inset — SYMMETRIC
+    /// gutters: the pill hugs the panel edge by the same gap on both
+    /// sides (3 left / 8 right read as a lopsided row when selected);
+    /// the icon sits deep inside its pill.
     static let stackInset: CGFloat = 3
     /// Row fill: selection pill, hover wash, brand avatar disc.
     private var pillColor: NSColor = .clear
@@ -224,9 +241,8 @@ final class SidebarRowView: NSView {
             textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
             textStack.trailingAnchor.constraint(lessThanOrEqualTo: dotView.leadingAnchor, constant: -4),
             dotView.leadingAnchor.constraint(greaterThanOrEqualTo: textStack.trailingAnchor, constant: 6),
-            dotView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
+            dotView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             dotView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            badgeView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -30),
             dotView.heightAnchor.constraint(equalToConstant: 6),
             // Width must be pinned: leading is only a FLOOR (≥), so an
             // unpinned width let the dot stretch from the text to the
@@ -234,6 +250,10 @@ final class SidebarRowView: NSView {
             dotView.widthAnchor.constraint(equalToConstant: 6),
             textStack.trailingAnchor.constraint(lessThanOrEqualTo: badgeView.leadingAnchor, constant: -6),
             badgeView.leadingAnchor.constraint(greaterThanOrEqualTo: textStack.trailingAnchor, constant: 6),
+            // ONE trailing constant for the whole right column (dot and
+            // badge share -8): a second, conflicting -30 constraint from
+            // the initial commit let autolayout break either one at
+            // will — the right margin moved between launches.
             badgeView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             badgeView.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
@@ -322,7 +342,8 @@ final class SidebarRowView: NSView {
         statusRowWash = nil
         if let status, status.activity != .unknown {
             badgeView.status = status
-            badgeView.isHidden = false
+            badgeUp = true
+            badgeView.isHidden = closeRevealed
             dotView.isHidden = true
             avatarDot = nil
             switch status.activity {
@@ -333,6 +354,7 @@ final class SidebarRowView: NSView {
             default: break
             }
         } else {
+            badgeUp = false
             badgeView.isHidden = true
             avatarDot = nil
             if avatar != nil && !hasBrand {
@@ -438,13 +460,22 @@ final class SidebarRowView: NSView {
             owner: self, userInfo: nil))
     }
 
+    /// A live badge is up (configure) — separate from isHidden: hover
+    /// hides it while the close button owns the shared right column.
+    private var badgeUp = false
+    private var closeRevealed = false
     /// Reveal state is written only when it CHANGES: a no-op write
     /// would still dirty layout and keep the cycle alive.
     private func setCloseRevealed(_ revealed: Bool) {
         // Only real tab rows (with an onClose) reveal the close button —
         // never "New Tab" / "Add Remote…" / workspace rows.
         let target = revealed && onClose != nil
+        closeRevealed = target
         if closeButton.isHidden != !target { closeButton.isHidden = !target }
+        // The close button takes the row tail on hover: the badge (same
+        // right column) steps aside — the verb in focus wins.
+        let badgeHidden = !badgeUp || target
+        if badgeView.isHidden != badgeHidden { badgeView.isHidden = badgeHidden }
     }
 
     override func mouseEntered(with event: NSEvent) {

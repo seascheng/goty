@@ -30,6 +30,12 @@ enum SshTransport {
 
     /// The full option set for an exec: fast-fail plus multiplexing.
     static func options(host: String, command: String) -> [String] {
-        ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"] + muxOptions + [host, command]
+        baseOptions + [host, command]
+    }
+
+    /// Fast-fail plus multiplexing, without the destination — for tools
+    /// (scp) that take their own remote/local arguments after options.
+    static var baseOptions: [String] {
+        ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"] + muxOptions
     }
 }

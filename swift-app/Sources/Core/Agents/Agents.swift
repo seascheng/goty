@@ -12,12 +12,14 @@ struct AgentSpec {
     /// Brand hue for the sidebar avatar disc (tty7 `CLIAgent::accent_rgb`).
     let accent: NSColor
 
-    /// goty status palette semantics (goty reference): working=
-    /// amber, blocked=red, done=teal — attention colors that read
-    /// instantly; blue "info" for active work was illegible.
-    static let statusWorking = NSColor(hex: "#F59E00")!
+    /// goty status palette (goty ChromeTheme.statusColor, synced):
+    /// working=amber, blocked=red, done=teal, idle=green — attention
+    /// colors that read instantly; blue "info" for active work was
+    /// illegible.
+    static let statusWorking = NSColor(hex: "#F59E05")!
     static let statusWaiting = NSColor(hex: "#F0595E")!
     static let statusDone = NSColor(hex: "#149996")!
+    static let statusIdle = NSColor(hex: "#21C45E")!
 
 }
 

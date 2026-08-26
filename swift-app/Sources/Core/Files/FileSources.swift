@@ -125,21 +125,12 @@ struct RemoteFileSource: FileSource {
     var isRemote: Bool { true }
 
     func entries(at path: String) throws -> [FileEntry] {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        proc.arguments = SshTransport.options(host: host,
-                                               command: "ls -1Ap \(shellQuoted(path))")
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = Pipe()   // noise stays out of the panel
-        try proc.run()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else {
+        let result = Shell.exec("ls -1Ap \(shellQuoted(path))", host: host)
+        guard result.code == 0 else {
             throw CocoaError(.fileReadUnknown, userInfo: [
-                NSLocalizedDescriptionKey: "ssh \(host): exit \(proc.terminationStatus)"])
+                NSLocalizedDescriptionKey: "ssh \(host): exit \(result.code)"])
         }
-        let text = String(decoding: data, as: UTF8.self)
+        let text = String(decoding: result.stdout, as: UTF8.self)
         return FileEntry.sorted(text.split(separator: "\n").compactMap { line in
             let name = String(line)
             guard !name.isEmpty else { return nil }
@@ -159,28 +150,13 @@ struct RemoteFileSource: FileSource {
     /// set) is piped in — the whole basis of remote file WRITE without
     /// hitting argv size limits.
     private func execData(_ command: String, stdin: Data? = nil) throws -> Data {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        proc.arguments = SshTransport.options(host: host, command: command)
-        let out = Pipe()
-        proc.standardOutput = out
-        proc.standardError = Pipe()
-        let inPipe = Pipe()
-        if stdin != nil {
-            proc.standardInput = inPipe
-        }
-        try proc.run()
-        if let stdin {
-            try inPipe.fileHandleForWriting.write(contentsOf: stdin)
-            try inPipe.fileHandleForWriting.close()
-        }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else {
+        let result = Shell.exec(command, host: host, stdin: stdin)
+        guard result.code == 0 else {
             throw CocoaError(.fileReadUnknown, userInfo: [
-                NSLocalizedDescriptionKey: "ssh \(host): exit \(proc.terminationStatus)"])
+                NSLocalizedDescriptionKey: "ssh \(host): exit \(result.code)"
+                    + (result.stderr.isEmpty ? "" : ": \(result.stderr)")])
         }
-        return data
+        return result.stdout
     }
 
     private func exec(_ command: String) throws {
@@ -228,6 +204,62 @@ struct RemoteFileSource: FileSource {
 
     func write(_ data: Data, to path: String) throws {
         _ = try execData("cat > \(shellQuoted(path))", stdin: data)
+    }
+
+    /// Pull one remote path (file or folder) into a local directory.
+    /// scp streams (no whole-file buffering, recurses folders) over the
+    /// same ControlMaster socket the listings ride. Not through
+    /// Shell.exec: that seam collects whole output only, and scp emits
+    /// no metering to a pipe — per-byte progress is a dest-size poll.
+    /// ponytail: file progress by polling the landed file; folders run
+    /// indeterminate (a real remote walk for the total costs a du).
+    func download(path: String, isDirectory: Bool, into dest: URL,
+                  progress: @escaping (Int64, Int64?) -> Void,
+                  completion: @escaping (Result<Void, Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let total: Int64? = isDirectory ? nil : (try? stat(path).size)
+            progress(0, total)
+
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/scp")
+            proc.arguments = ["-r"] + SshTransport.baseOptions
+                + ["\(host):\(Shell.forceQuoted(path))", dest.path]
+            proc.standardOutput = FileHandle.nullDevice
+            let err = Pipe()
+            proc.standardError = err
+            do { try proc.run() } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(CocoaError(.fileReadUnknown, userInfo: [
+                        NSLocalizedDescriptionKey: "scp: \(error.localizedDescription)"])))
+                }
+                return
+            }
+
+            // Files: watch the landed size while scp runs.
+            if !isDirectory {
+                let landed = dest.appendingPathComponent(
+                    (path as NSString).lastPathComponent).path
+                while proc.isRunning {
+                    Thread.sleep(forTimeInterval: 0.25)
+                    let size = ((try? FileManager.default.attributesOfItem(
+                        atPath: landed))?[.size] as? Int64) ?? 0
+                    progress(size, total)
+                }
+            }
+            let errText = String(data: err.fileHandleForReading.readDataToEndOfFile(),
+                                 encoding: .utf8) ?? ""
+            let code = proc.terminationStatus
+            DispatchQueue.main.async {
+                guard code == 0 else {
+                    completion(.failure(CocoaError(.fileReadUnknown, userInfo: [
+                        NSLocalizedDescriptionKey: "scp: exit \(code)"
+                            + (errText.isEmpty ? "" : ": \(errText)") ])))
+                    return
+                }
+                progress(total ?? 0, total)
+                completion(.success(()))
+            }
+        }
     }
 }
 

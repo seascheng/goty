@@ -126,7 +126,7 @@ final class SystemInfoStore {
         inFlight.insert(key)
         fetchedAt[key] = Date()
         queue.async { [weak self] in
-            let result = ScmTransport.run(SystemInfo.command, host: host)
+            let result = Shell.exec(SystemInfo.command, host: host)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.inFlight.remove(key)

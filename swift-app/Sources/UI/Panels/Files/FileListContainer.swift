@@ -38,8 +38,9 @@ final class FileListContainer: NSView {
                 row = candidate
                 if row.superview !== self { addSubview(row) }
             }
-            row.frame = NSRect(x: 0, y: y, width: bounds.width, height: 26)
-            y += 26
+            let h = (row as? KeyedRow)?.rowHeight ?? 26
+            row.frame = NSRect(x: 0, y: y, width: bounds.width, height: h)
+            y += h
             ordered.append(row)
         }
         orderedRows = ordered
@@ -51,15 +52,20 @@ final class FileListContainer: NSView {
         super.resizeSubviews(withOldSize: oldSize)
         var y: CGFloat = 0
         for row in orderedRows {
-            row.frame = NSRect(x: 0, y: y, width: bounds.width, height: 26)
-            y += 26
+            let h = (row as? KeyedRow)?.rowHeight ?? 26
+            row.frame = NSRect(x: 0, y: y, width: bounds.width, height: h)
+            y += h
         }
     }
 }
 
-/// Identity for row reconciliation.
+/// Identity for row reconciliation. `rowHeight` is the row's height
+/// for the container's manual layout — a row taller than the 26pt
+/// default (e.g. the two-line worktree row) reports it here, or the
+/// container crushes it and its text overflows the row.
 @objc protocol KeyedRow: NSObjectProtocol {
     var rowKey: String { get }
+    @objc optional var rowHeight: CGFloat { get }
 }
 
 

@@ -33,9 +33,12 @@ final class CommitMessageView: NSScrollView {
         super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
         hasVerticalScroller = false
-        drawsBackground = false
+        // The box must DRAW its own soft fill: with drawsBackground =
+        // false the clip-view background assignment is ignored and only
+        // the panel surface (near-black) showed — the input vanished.
+        drawsBackground = true
+        backgroundColor = Chrome.theme.hoverFill
         borderType = .noBorder
-        contentView.backgroundColor = Chrome.theme.hoverFill
         wantsLayer = true
         layer?.cornerRadius = 6
         layer?.masksToBounds = true
@@ -47,7 +50,7 @@ final class CommitMessageView: NSScrollView {
         textView.isRichText = false
         textView.allowsUndo = true
         textView.autoresizingMask = [.width]
-        textView.textContainerInset = NSSize(width: 4, height: 3)
+        textView.textContainerInset = NSSize(width: 4, height: Self.pad)
         textView.delegate = self
         textView.onFocusChange = { [weak self] _ in self?.updatePlaceholder() }
         documentView = textView
@@ -57,12 +60,16 @@ final class CommitMessageView: NSScrollView {
         placeholder.translatesAutoresizingMaskIntoConstraints = false
         addSubview(placeholder)
         // Anchored to the scroll view itself, never the clip view — the
-        // clip view scrolls under the document view.
+        // clip view scrolls under the document view. Top follows the
+        // text block's centered inset (fitHeight keeps both in step).
         placeholder.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9).isActive = true
-        placeholder.topAnchor.constraint(equalTo: topAnchor, constant: 8).isActive = true
+        placeholderTop = placeholder.topAnchor.constraint(equalTo: topAnchor,
+                                                            constant: Self.pad + 1)
+        placeholderTop.isActive = true
 
         heightConstraint = heightAnchor.constraint(equalToConstant: Self.pad * 2 + Self.line)
         heightConstraint.isActive = true
+        fitHeight()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
@@ -82,9 +89,24 @@ final class CommitMessageView: NSScrollView {
         placeholder.isHidden = focused || !textView.string.isEmpty
     }
 
+    private var placeholderTop: NSLayoutConstraint!
+
+    /// Box height AND text vertical centering, computed together (one
+    /// truth): the document block sits mid-viewport at every line
+    /// count — the caret must sit where the eye expects it, not pinned
+    /// to the clip view's top edge.
     private func fitHeight() {
-        let lines = max(1, textView.string.split(separator: "\n", omittingEmptySubsequences: false).count)
-        heightConstraint.constant = Self.pad * 2 + Self.line * CGFloat(min(lines, Self.maxLines))
+        let lines = max(1, textView.string.split(separator: "\n",
+                                                  omittingEmptySubsequences: false).count)
+        let n = CGFloat(min(lines, Self.maxLines))
+        let viewport = Self.pad * 2 + Self.line * n
+        let oneLine = textView.font.map { font in
+            ceil((font.ascender - font.descender + font.leading).rounded())
+        } ?? Self.line * 0.75
+        let insetV = max(Self.pad, (viewport - oneLine * n) / 2)
+        heightConstraint.constant = viewport
+        textView.textContainerInset = NSSize(width: 4, height: insetV)
+        placeholderTop.constant = insetV + 1
     }
 
     override func viewDidMoveToWindow() {
@@ -117,11 +139,59 @@ final class CommitTextView: NSTextView {
     }
 }
 
+/// tty7 action_strip, shared by every row with hover verbs: an opaque
+/// strip covering the tail of the row — hovering must not move a pixel
+/// of it, and buttons stay legible over text (same fill the row paints
+/// on hover; a darker strip read as a black block over the wash).
+/// Buttons append right-to-left; the width grows with them.
+final class ActionStripView: NSView {
+    private(set) var buttons: [IconButton] = []
+    var hasActions: Bool { !buttons.isEmpty }
+    private var widthConstraint: NSLayoutConstraint!
+
+    init(height: CGFloat) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.backgroundColor = Chrome.theme.hoverFill.cgColor
+        heightAnchor.constraint(equalToConstant: height).isActive = true
+        widthConstraint = widthAnchor.constraint(equalToConstant: 0)
+        widthConstraint.isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
+
+    func add(symbol: String, tip: String, onClick: @escaping () -> Void) {
+        let b = IconButton.make(symbol, pointSize: 11, onClick: onClick)
+        b.toolTip = tip
+        b.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(b)
+        if let last = buttons.last {
+            b.trailingAnchor.constraint(equalTo: last.leadingAnchor).isActive = true
+        } else {
+            b.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1).isActive = true
+        }
+        b.centerYAnchor.constraint(equalTo: centerYAnchor).isActive = true
+        b.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        b.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        buttons.append(b)
+        widthConstraint.constant = 22 * CGFloat(buttons.count) + 1
+    }
+}
+
 final class ScmGroupHeaderView: NSView, KeyedRow {
     var onToggle: (() -> Void)?
     var rowKey: String = "hdr"
 
-    private let chevron = NSImageView()
+    /// Section band, TALLER than a row with the title pinned low: the
+    /// air above the title is what separates groups — rows inside a
+    /// group sit flush, so a 26pt centered title read as just another
+    /// row (the low-distinction report).
+    static let height: CGFloat = 36
+    var rowHeight: CGFloat { Self.height }
+
+    private let chevron = IconLabel("chevron.down", pointSize: 9, weight: .semibold,
+                                    tint: Chrome.theme.secondaryText)
     private var actionButtons: [IconButton] = []
     private var isOpen = true
     private var isHovered = false {
@@ -140,11 +210,6 @@ final class ScmGroupHeaderView: NSView, KeyedRow {
         countField.textColor = Chrome.theme.secondaryText
         super.init(frame: .zero)
 
-        chevron.image = NSImage(systemSymbolName: "chevron.down",
-                                accessibilityDescription: nil)
-        chevron.symbolConfiguration = .init(pointSize: 9, weight: .semibold)
-        chevron.contentTintColor = Chrome.theme.secondaryText
-        chevron.translatesAutoresizingMaskIntoConstraints = false
         addSubview(chevron)
 
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -153,17 +218,18 @@ final class ScmGroupHeaderView: NSView, KeyedRow {
         addSubview(countField)
 
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 26),
-            // tty7: title and count at the row's text inset…
+            heightAnchor.constraint(equalToConstant: Self.height),
+            // tty7: title and count at the row's text inset, pinned to
+            // the BOTTOM of the band (air above = the group break)…
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
             countField.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 5),
-            countField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            countField.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
             countField.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -30),
             // …the chevron in the badge column at the right edge, so it
             // and the status letters stack into one column down the panel.
             chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
+            chevron.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
             chevron.widthAnchor.constraint(equalToConstant: 14),
         ])
 
@@ -189,7 +255,7 @@ final class ScmGroupHeaderView: NSView, KeyedRow {
         } else {
             b.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -26).isActive = true
         }
-        b.centerYAnchor.constraint(equalTo: centerYAnchor).isActive = true
+        b.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5).isActive = true
         b.widthAnchor.constraint(equalToConstant: 22).isActive = true
         b.heightAnchor.constraint(equalToConstant: 22).isActive = true
         b.isHidden = !isHovered
@@ -200,13 +266,16 @@ final class ScmGroupHeaderView: NSView, KeyedRow {
         isOpen.toggle()
         chevron.image = NSImage(systemSymbolName: isOpen ? "chevron.down" : "chevron.right",
                                 accessibilityDescription: nil)
+        // symbolConfiguration/tint stay from init — only the glyph swaps.
         onToggle?()
     }
 
     override func draw(_ dirtyRect: NSRect) {
         if isHovered {
+            // A band, not a block: the tall row is mostly air — fill
+            // only the title strip at the bottom.
             Chrome.theme.hoverFill.setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 3, dy: 1),
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 3, dy: 6),
                          xRadius: 6, yRadius: 6).fill()
         }
     }
@@ -219,19 +288,15 @@ final class ScmGroupHeaderView: NSView, KeyedRow {
 
 final class ScmEntryRow: NSView, KeyedRow {
     var rowKey: String = "row"
-    private var actionButtons: [IconButton] = []
-    /// tty7 action_strip: an opaque trailing strip covering the tail of
-    /// the path — hovering a row must not move a single pixel of it, and
-    /// the buttons must stay legible over text. Fully constraint-driven:
-    /// a frame-driven subview inside an autolayout row synthesizes its
+    /// tty7 action_strip: constraint-driven, not frame-driven — a
+    /// frame-driven subview inside an autolayout row synthesizes its
     /// own zero-size constraints and crushes whatever is tied to it
     /// (the empty-rows bug).
-    private let actionStrip = NSView()
-    private var stripWidth: NSLayoutConstraint!
+    private let actionStrip = ActionStripView(height: 22)
     private var isHovered = false {
         didSet {
             needsDisplay = true
-            actionStrip.isHidden = !isHovered || actionButtons.isEmpty
+            actionStrip.isHidden = !isHovered || !actionStrip.hasActions
         }
     }
 
@@ -260,10 +325,7 @@ final class ScmEntryRow: NSView, KeyedRow {
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(label)
 
-        actionStrip.wantsLayer = true
-        actionStrip.layer?.backgroundColor = Chrome.theme.topBarBackground.cgColor
         actionStrip.isHidden = true
-        actionStrip.translatesAutoresizingMaskIntoConstraints = false
         addSubview(actionStrip)
 
         NSLayoutConstraint.activate([
@@ -284,8 +346,6 @@ final class ScmEntryRow: NSView, KeyedRow {
             label.trailingAnchor.constraint(lessThanOrEqualTo: actionStrip.leadingAnchor,
                                             constant: -4),
         ])
-        stripWidth = actionStrip.widthAnchor.constraint(equalToConstant: 0)
-        stripWidth.isActive = true
 
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.inVisibleRect, .activeAlways,
                                                               .mouseEnteredAndExited],
@@ -294,23 +354,8 @@ final class ScmEntryRow: NSView, KeyedRow {
 
     required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
 
-    /// Buttons are appended right-to-left inside the strip; the strip's
-    /// width grows with them.
     func addAction(symbol: String, tip: String, onClick: @escaping () -> Void) {
-        let b = IconButton.make(symbol, pointSize: 11, onClick: onClick)
-        b.toolTip = tip
-        b.translatesAutoresizingMaskIntoConstraints = false
-        actionStrip.addSubview(b)
-        if let first = actionButtons.first {
-            b.trailingAnchor.constraint(equalTo: first.leadingAnchor).isActive = true
-        } else {
-            b.trailingAnchor.constraint(equalTo: actionStrip.trailingAnchor, constant: -1).isActive = true
-        }
-        b.centerYAnchor.constraint(equalTo: actionStrip.centerYAnchor).isActive = true
-        b.widthAnchor.constraint(equalToConstant: 22).isActive = true
-        b.heightAnchor.constraint(equalToConstant: 22).isActive = true
-        actionButtons.append(b)
-        stripWidth.constant = 22 * CGFloat(actionButtons.count) + 1
+        actionStrip.add(symbol: symbol, tip: tip, onClick: onClick)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -332,26 +377,25 @@ final class ScmEntryRow: NSView, KeyedRow {
 /// text lines (branch, muted path) instead of the status letter.
 final class WorktreeRowView: NSView, KeyedRow {
     var rowKey: String = "wt"
-    private var actionButtons: [IconButton] = []
-    private let actionStrip = NSView()
-    private var stripWidth: NSLayoutConstraint!
+    /// Two text lines (branch + path) — taller than the container's
+    /// 26pt default; reported via `rowHeight` so the list lays the row
+    /// out at full height instead of crushing it.
+    static let height: CGFloat = 42
+    var rowHeight: CGFloat { Self.height }
+    private let actionStrip = ActionStripView(height: 26)
     private var isHovered = false {
         didSet {
             needsDisplay = true
-            actionStrip.isHidden = !isHovered || actionButtons.isEmpty
+            actionStrip.isHidden = !isHovered || !actionStrip.hasActions
         }
     }
 
     init(record: WorktreeRecord, isCurrent: Bool) {
         super.init(frame: .zero)
 
-        let glyph = NSImageView()
-        glyph.image = NSImage(systemSymbolName: "arrow.triangle.branch",
-                              accessibilityDescription: nil)
-        glyph.symbolConfiguration = .init(pointSize: 10, weight: .regular)
-        glyph.contentTintColor = isCurrent
-        ? Chrome.theme.gitAdded : Chrome.theme.secondaryText
-        glyph.translatesAutoresizingMaskIntoConstraints = false
+        let glyph = IconLabel("arrow.triangle.branch", pointSize: 10,
+                              tint: isCurrent ? Chrome.theme.gitAdded
+                                              : Chrome.theme.secondaryText)
         addSubview(glyph)
 
         let title = record.branch
@@ -380,16 +424,11 @@ final class WorktreeRowView: NSView, KeyedRow {
         path.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(path)
 
-        actionStrip.wantsLayer = true
-        actionStrip.layer?.backgroundColor = Chrome.theme.topBarBackground.cgColor
         actionStrip.isHidden = true
-        actionStrip.translatesAutoresizingMaskIntoConstraints = false
         addSubview(actionStrip)
 
         NSLayoutConstraint.activate([
-            // Two text lines (branch + path): 32pt clipped the path into
-            // the row below — the reported overflow.
-            heightAnchor.constraint(equalToConstant: 42),
+            heightAnchor.constraint(equalToConstant: Self.height),
             glyph.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             glyph.centerYAnchor.constraint(equalTo: centerYAnchor),
             glyph.widthAnchor.constraint(equalToConstant: 14),
@@ -405,8 +444,6 @@ final class WorktreeRowView: NSView, KeyedRow {
             path.trailingAnchor.constraint(lessThanOrEqualTo: actionStrip.leadingAnchor,
                                            constant: -4),
         ])
-        stripWidth = actionStrip.widthAnchor.constraint(equalToConstant: 0)
-        stripWidth.isActive = true
 
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.inVisibleRect, .activeAlways,
                                                               .mouseEnteredAndExited],
@@ -415,28 +452,13 @@ final class WorktreeRowView: NSView, KeyedRow {
 
     required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
 
-    /// Buttons are appended right-to-left inside the strip; the strip's
-    /// width grows with them (identical to `ScmEntryRow.addAction`).
     func addAction(symbol: String, tip: String, onClick: @escaping () -> Void) {
-        let b = IconButton.make(symbol, pointSize: 11, onClick: onClick)
-        b.toolTip = tip
-        b.translatesAutoresizingMaskIntoConstraints = false
-        actionStrip.addSubview(b)
-        if let first = actionButtons.first {
-            b.trailingAnchor.constraint(equalTo: first.leadingAnchor).isActive = true
-        } else {
-            b.trailingAnchor.constraint(equalTo: actionStrip.trailingAnchor, constant: -1).isActive = true
-        }
-        b.centerYAnchor.constraint(equalTo: actionStrip.centerYAnchor).isActive = true
-        b.widthAnchor.constraint(equalToConstant: 22).isActive = true
-        b.heightAnchor.constraint(equalToConstant: 22).isActive = true
-        actionButtons.append(b)
-        stripWidth.constant = 22 * CGFloat(actionButtons.count) + 1
+        actionStrip.add(symbol: symbol, tip: tip, onClick: onClick)
     }
 
-    /// Verb buttons in addAction order, plus the count — the headless
-    /// harness fires them without touching the private list.
-    var buttonsForTest: [IconButton] { actionButtons }
+    /// Verb buttons in addAction order — the headless harness fires
+    /// them without touching the private list.
+    var buttonsForTest: [IconButton] { actionStrip.buttons }
 
     override func draw(_ dirtyRect: NSRect) {
         if isHovered {

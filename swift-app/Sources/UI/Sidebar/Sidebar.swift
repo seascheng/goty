@@ -273,20 +273,20 @@ final class SidebarView: NSView {
             sep.widthAnchor.constraint(equalToConstant: 1),
             wsHeader.topAnchor.constraint(equalTo: topAnchor, constant: 10),
             wsHeader.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
-            wsHeader.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            wsHeader.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
             wsStack.topAnchor.constraint(equalTo: wsHeader.bottomAnchor, constant: 8),
             wsStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
-            wsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            wsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
             divider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
-            divider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            divider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
             divider.topAnchor.constraint(equalTo: wsStack.bottomAnchor, constant: 10),
             divider.heightAnchor.constraint(equalToConstant: 1),
             tabsHeader.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 10),
             tabsHeader.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
-            tabsHeader.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            tabsHeader.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
             tabsStack.topAnchor.constraint(equalTo: tabsHeader.bottomAnchor, constant: 8),
             tabsStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
-            tabsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            tabsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
         ])
 
         // Collapsed rail: the window titlebar (always up) carries the
@@ -393,6 +393,7 @@ final class SidebarView: NSView {
 
     func render(workspace: WorkspaceState, offline: Bool = false,
                 gitFor: ((String) -> GitSummary?)? = nil,
+                spaceRoot: ((String) -> String?)? = nil,
                 statusFor: ((TabState) -> SpaceStatus?)? = nil,
                 commandFor: ((TabState) -> String?)? = nil,
                 titleFor: ((TabState) -> String?)? = nil) {
@@ -428,7 +429,12 @@ final class SidebarView: NSView {
             let status = running ? statusFor?(tab) : nil
             let title = titleFor?(tab)
             let display = tab.userTitle ?? spec?.label ?? title ?? tab.name
-            signature += "|\(tab.id):\(tab.panes.first?.cwd ?? "-")"
+            // The SPACE key (repo root when inside one), not the raw
+            // cwd: cd-ing into a subdir or another worktree of the same
+            // repo must not re-fire the render — only a real space move
+            // (different key) does.
+            let space = tab.panes.first?.cwd.map { spaceRoot?($0) ?? $0 }
+            signature += "|\(tab.id):\(space ?? "-")"
                 + ":\(tab.icon ?? "-"):\(tab.color ?? "-"):\(tab.userTitle ?? "-")"
                 + ":\(display):\(tab.id == workspace.focusedTab?.id)"
                 + ":\(status.map { "\($0.activity)|\($0.seen)|\($0.spinner.map(String.init) ?? "")" } ?? "-")"
@@ -461,7 +467,7 @@ final class SidebarView: NSView {
         var desired: [NSView] = []
         var nextRows: [String: SidebarRowView] = [:]
         var nextHeaders: [String: SectionHeaderView] = [:]
-        for section in SpaceGrouping.sections(for: workspace.tabs) {
+        for section in SpaceGrouping.sections(for: workspace.tabs, spaceRoot: spaceRoot) {
             if let name = section.name {
                 if !desired.isEmpty {
                     // Plain spacing tile — no identity, no interaction;
@@ -471,12 +477,14 @@ final class SidebarView: NSView {
                     desired.append(gap)
                 }
                 // The group's "+" opens a new space straight into this
-                // directory, next to the space count — and when the
-                // directory is a git repo, a menu offering a worktree
-                // beside it. `isGit` is captured at render cadence: git
-                // events re-render the sections, so the flag tracks the
-                // store without SidebarView holding another closure.
+                // SPACE (the repo root when the section is a repo), next
+                // to the space count — and when the space is a git repo,
+                // a menu offering a worktree beside it. `isGit` is
+                // captured at render cadence: git events re-render the
+                // sections, so the flag tracks the store without
+                // SidebarView holding another closure.
                 let dir = workspace.tabs[section.tabIndexs[0]].panes.first?.cwd
+                    .map { spaceRoot?($0) ?? $0 }
                 let isGit = dir.flatMap { gitFor?($0) } != nil
                 let header: SectionHeaderView
                 if let reused = spaceHeaders[name] {

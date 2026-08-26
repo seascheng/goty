@@ -83,11 +83,18 @@ struct SpaceSection {
 }
 
 enum SpaceGrouping {
-    /// tty7 `sidebar_sections`: group tabs by their first pane's cwd in
-    /// first-appearance order; tabs without a cwd trail in a scratch
-    /// section. All-unknown cwds collapse to one headerless section.
-    static func sections(for tabs: [TabState], scratchTitle: String = "Scratch") -> [SpaceSection] {
-        let keys: [String?] = tabs.map { $0.panes.first?.cwd }
+    /// tty7 `sidebar_sections`, space-keyed: one git REPO is one space
+    /// — `spaceRoot` resolves every cwd inside it (subdirs, linked
+    /// worktrees) to the repo's main worktree root; a non-repo cwd is
+    /// its own space (nil → raw path until a fetch lands). Tabs without
+    /// a cwd trail in a scratch section. All-unknown cwds collapse to
+    /// one headerless section.
+    static func sections(for tabs: [TabState],
+                         spaceRoot: ((String) -> String?)? = nil,
+                         scratchTitle: String = "Scratch") -> [SpaceSection] {
+        let keys: [String?] = tabs.map { tab in
+            tab.panes.first?.cwd.map { spaceRoot?($0) ?? $0 }
+        }
         var order: [String] = []
         for case let key? in keys where !order.contains(key) { order.append(key) }
         if order.isEmpty {
@@ -227,16 +234,7 @@ final class WorkspaceStore {
 /// real PATH. Without this, shells hang mid-init and never print a prompt.
 enum UserShellEnv {
     static let cached: [String] = {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-l", "-c", "env"]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        try? p.run()
-        p.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?
+        String(data: Shell.exec("/bin/zsh -l -c env").stdout, encoding: .utf8)?
             .split(separator: "\n")
             .map(String.init) ?? []
     }()

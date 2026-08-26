@@ -253,7 +253,7 @@ final class AITaskCard: NSView {
             rebuild { group in
                 group.header(target: target, phase: "done")
                 group.rounds(task.rounds)
-                group.markdown(summary)
+                _ = group.markdown(summary)
                 group.buttons {
                     $0.add("Copy", .ghost) { [weak self] in
                         guard let text = self?.lastTranscript else { return }
@@ -271,7 +271,7 @@ final class AITaskCard: NSView {
             lastTranscript = message
             rebuild { group in
                 group.header(target: target, phase: "failed")
-                group.markdown(message)
+                _ = group.markdown(message)
                 group.buttons {
                     $0.add("Copy", .ghost) { [weak self] in
                         guard let text = self?.lastTranscript else { return }

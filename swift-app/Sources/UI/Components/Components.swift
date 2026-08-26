@@ -3,6 +3,22 @@ import AppKit
 
 // MARK: - Shared UI primitives (design-system level)
 
+/// Static glyph view (NOT a button): theme-tinted SF Symbol at an
+/// explicit size, density-aware — the one way rows, headers and tiles
+/// place decorative icons. Use `IconButton` when it clicks.
+final class IconLabel: NSImageView {
+    convenience init(_ symbol: String, pointSize: CGFloat = 12,
+                     weight: NSFont.Weight = .regular, tint: NSColor? = nil) {
+        let base = NSImage(systemSymbolName: symbol, accessibilityDescription: symbol)
+        self.init(image: base ?? NSImage())
+        symbolConfiguration = .init(pointSize: pointSize, weight: weight)
+        contentTintColor = tint ?? Chrome.theme.iconTint
+        imageScaling = .scaleProportionallyUpOrDown
+        unregisterDraggedTypes()
+        translatesAutoresizingMaskIntoConstraints = false
+    }
+}
+
 /// Menu-item icon: palette-tinted SF Symbol at menu scale (crisp).
 func menuItemIcon(_ symbol: String, pointSize: CGFloat = 11) -> NSImage? {
     NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
@@ -149,4 +165,39 @@ class ClosureButton: NSButton {
     /// mouseDown — without this override every closure button in the
     /// app is dead to assistive tech.
     override func performClick(_ sender: Any?) { onClick?() }
+
+    /// Standard constructor: small bezel + medium caption, the panel
+    /// chrome's one titled-button look (was re-styled by hand at every
+    /// call site).
+    static func make(title: String, emphasized: Bool = false,
+                     onClick: (() -> Void)? = nil) -> ClosureButton {
+        let b = ClosureButton()
+        b.bezelStyle = .rounded
+        b.controlSize = emphasized ? .regular : .small
+        b.font = .systemFont(ofSize: emphasized ? 13 : 11, weight: .medium)
+        b.title = title
+        b.onClick = onClick
+        b.translatesAutoresizingMaskIntoConstraints = false
+        return b
+    }
+
+    /// In-place style for buttons created as stored members: the same
+    /// standard look without re-allocating.
+    func applyStandardStyle(title: String) {
+        bezelStyle = .rounded
+        controlSize = .small
+        font = .systemFont(ofSize: 11, weight: .medium)
+        self.title = title
+        translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    /// Status-bar variant: one size down (10.5pt) — the bar's denser
+    /// metric, distinct from panel chrome buttons.
+    func applyStatusBarStyle(title: String) {
+        bezelStyle = .rounded
+        controlSize = .small
+        font = .systemFont(ofSize: 10.5)
+        self.title = title
+        translatesAutoresizingMaskIntoConstraints = false
+    }
 }

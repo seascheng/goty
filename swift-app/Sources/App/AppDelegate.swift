@@ -326,6 +326,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.coordinator.newTab(cwd: path)
         }
 
+        // Remote Files tab → Download: scp -r through the same
+        // ControlMaster the listings ride. Was declared but never
+        // wired — the menu started a transfer that never ran (stuck at
+        // 0 bytes forever).
+        rightPanel.onDownload = { [weak self] path, isDirectory, dest, progress, completion in
+            guard let self, let ws = self.coordinator.store?.focused,
+                  ws.isRemote, let host = ws.sshHost else {
+                DispatchQueue.main.async {
+                    completion(.failure(CocoaError(.fileReadUnknown, userInfo: [
+                        NSLocalizedDescriptionKey: "download: no remote workspace"])))
+                }
+                return
+            }
+            RemoteFileSource(host: host).download(
+                path: path, isDirectory: isDirectory, into: dest,
+                progress: progress, completion: completion)
+        }
+
         // Real keyboard ⌘-combos take the performKeyEquivalent path, so the
         // shortcuts live in the main menu (standard terminal-app practice).
         buildMainMenu()
@@ -385,6 +403,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(ghosttySplitRequested(_:)),
             name: Ghostty.Notification.ghosttyNewSplit, object: nil)
+
+        // Paste protection (ghostty default): multi-line pastes and
+        // OSC 52 clipboard requests must be CONFIRMED by the app —
+        // libghostty relays them as this notification and waits. We
+        // never listened, so every multi-line paste silently died
+        // (single-line pastes skip protection, which is why those
+        // worked and native Ghostty, which shows the dialog, was fine).
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(ghosttyConfirmClipboard(_:)),
+            name: Ghostty.Notification.confirmClipboard, object: nil)
 
         // The chrome-follows-theme design (Chrome.swift) finally has a
         // switcher: Settings reloads the config, libghostty posts this
@@ -700,14 +728,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Rebuild the panel from the focused workspace (Info target + Files
-    /// + Git roots).
+    /// + Git roots). The Files tab follows the SPACE, not the pane cwd:
+    /// one git repo is one space, so the tree roots at the repo's main
+    /// worktree wherever the pane sits (subdir or linked worktree); the
+    /// Git tab still follows the pane's own repo state. The space root
+    /// arrives with the first git fetch for a new cwd — `gitSurfacesStale`
+    /// re-runs this pass when it lands.
     private func updateRightPanel() {
         guard let store = coordinator.store,
               let ws = store.focused else { return }
         let pane = coordinator.activePane(of: ws)
+        let cwd = pane?.cwd
+        let host = ws.sshHost
+        let spaceRoot = cwd.flatMap { GitStatusStore.shared.spaceRoot(for: $0, host: host) } ?? cwd
         wc.rightPanel.setSystemTarget(host: ws.isRemote ? ws.sshHost : nil)
-        wc.rightPanel.setDirectory(pane?.cwd, source: FileSources.source(for: ws))
-        wc.rightPanel.setScmTarget(cwd: pane?.cwd, host: ws.sshHost)
+        wc.rightPanel.setDirectory(spaceRoot, source: FileSources.source(for: ws))
+        wc.rightPanel.setScmTarget(cwd: cwd, host: ws.sshHost)
     }
     // MARK: Coordinator delegate — the only logic→UI seam
 
@@ -844,7 +880,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// resolvers from one pass.
     private func renderTabSurfaces(ws: WorkspaceState, offline: Bool) {
         wc.sidebar.render(workspace: ws, offline: offline,
-                          gitFor: { cwd in GitStatusStore.shared.summary(for: cwd) },
+                          gitFor: { cwd in
+                              GitStatusStore.shared.summary(for: cwd, host: ws.sshHost)
+                          },
+                          spaceRoot: { cwd in
+                              GitStatusStore.shared.spaceRoot(for: cwd, host: ws.sshHost)
+                          },
                           statusFor: spaceStatus,
                           commandFor: { [coordinator] tab in coordinator.effectiveCommand(for: tab) },
                           titleFor: { [coordinator] tab in coordinator.surfaceTitle(for: tab) })
@@ -874,9 +915,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Git data moved (SCM op, RepoWatcher refetch, poll): sidebar
     /// badges re-render, the Git tab re-reads the store caches (TTL
-    /// fresh → cache read, no exec).
+    /// fresh → cache read, no exec), and the Files tab re-resolves its
+    /// space root (the first fetch for a new cwd carries it).
     private func gitSurfacesStale() {
         refreshSidebarSpaces()
+        updateRightPanel()
         wc?.rightPanel.refreshScm()
     }
 
@@ -1089,6 +1132,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default: (vertical, after) = (false, true)   // RIGHT
         }
         coordinator.splitPane(vertical: vertical, after: after)
+    }
+
+    /// Paste protection: libghostty holds the clipboard request until
+    /// the embedder answers. Ask through the standard dialog, then
+    /// complete the pending request either way — a dropped request is
+    /// a paste that goes nowhere.
+    @objc private func ghosttyConfirmClipboard(_ note: Notification) {
+        guard let view = note.object as? Ghostty.SurfaceView,
+              let str = note.userInfo?[Ghostty.Notification.ConfirmClipboardStrKey] as? String,
+              let request = note.userInfo?[Ghostty.Notification.ConfirmClipboardRequestKey]
+                  as? Ghostty.ClipboardRequest
+        else { return }
+        let state = note.userInfo?[Ghostty.Notification.ConfirmClipboardStateKey]
+            as? UnsafeMutableRawPointer
+
+        let title: String
+        if case .paste = request {
+            let lines = str.components(separatedBy: .newlines).count
+            title = "Paste \(lines) lines?"
+        } else {
+            title = "Clipboard Access"
+        }
+        let preview = str.count > 160 ? String(str.prefix(160)) + "…" : str
+        let ok = Dialog.confirm(title: title,
+                                detail: request.text() + "\n\n" + preview,
+                                action: "Confirm")
+
+        switch request {
+        case .paste, .osc_52_read:
+            guard let surface = view.surface else { return }
+            Ghostty.App.completeClipboardRequest(
+                surface, data: str, state: state, confirmed: ok)
+        case .osc_52_write(let pb):
+            guard let pb, ok else { return }
+            pb.clearContents()
+            pb.setString(str, forType: .string)
+        }
     }
 
     /// Focuses the sidebar row so its inline editor can begin (the row
