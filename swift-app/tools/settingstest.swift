@@ -250,6 +250,10 @@ enum SettingsTest {
         }
 
         print("— AI settings —")
+        // Isolate every keychain touch: the settings page's live-write
+        // path and the round-trip below must never touch the user's real
+        // goty.ai items (ACL prompts + credential clobbering).
+        Keychain.serviceOverrideForTests = "goty.ai.test"
         let aiPrefs = AppPreferences(defaults: UserDefaults(suiteName: "aitest")!)
         aiPrefs.aiBaseUrl = "https://api.example.com/v1"
         aiPrefs.aiModel = "m-1"

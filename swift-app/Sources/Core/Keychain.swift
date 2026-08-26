@@ -8,7 +8,12 @@ import Security
 /// v1; a nil `value` deletes the item so callers can clear state with
 /// the same call they use to set it.
 enum Keychain {
-    private static let service = "goty.ai"
+    /// Tests redirect every item into an isolated service so the suite
+    /// never reads or writes the user's real credentials — a real-item
+    /// write from a rebuilt test binary pops a keychain ACL dialog on
+    /// every run (and would clobber the stored key).
+    static var serviceOverrideForTests: String?
+    private static var service: String { serviceOverrideForTests ?? "goty.ai" }
 
     static func setSecret(_ value: String?, for key: String) {
         if let value {
