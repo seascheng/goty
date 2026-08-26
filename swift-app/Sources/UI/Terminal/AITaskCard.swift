@@ -7,6 +7,96 @@ import AppKit
 /// ABOVE the terminal surface, never text written into the Ghostty
 /// buffer. The card never becomes firstResponder outside its input and
 /// edit modes, so arrow keys keep reaching the terminal.
+// MARK: - markdown box (shared control: answers render markdown, stay
+// selectable, and scroll instead of clipping)
+
+/// Selectable, non-editable text box that renders markdown via the
+/// editor's renderer and reports its laid-out height as intrinsic —
+/// the stack grows with content up to `maxHeight`, beyond which the
+/// box scrolls internally (the fixed-height clamp used to silently
+/// eat long answers).
+final class AIMarkdownBox: NSView {
+    private let textView = NSTextView()
+    private let scroll = NSScrollView()
+    var maxHeight: CGFloat = 240
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.backgroundColor = chromeSurface(Chrome.theme.markdownBlockBackground).cgColor
+
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.drawsBackground = false
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 8
+        textView.defaultParagraphStyle = {
+            let p = NSMutableParagraphStyle()
+            p.lineBreakMode = .byWordWrapping
+            return p
+        }()
+
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = textView
+        addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
+
+    func setMarkdown(_ markdown: String) {
+        textView.textStorage?.setAttributedString(MarkdownRenderer.render(
+            markdown, bodySize: 12.5,
+            highlight: { code, lang in
+                HighlightEngine.highlight(
+                    code, language: lang,
+                    font: .monospacedSystemFont(ofSize: 11.5, weight: .regular),
+                    color: Chrome.theme.foreground)
+            }))
+        invalidateIntrinsicContentSize()
+    }
+
+    func setPlainText(_ text: String, font: NSFont) {
+        textView.textColor = Chrome.theme.foreground
+        textView.font = font
+        textView.string = text
+        invalidateIntrinsicContentSize()
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let container = textView.textContainer ?? NSTextContainer()
+        let used = textView.layoutManager?.usedRect(for: container).height ?? 0
+        return NSSize(width: NSView.noIntrinsicMetric,
+                      height: min(maxHeight, ceil(used) + 10))
+    }
+
+    override func layout() {
+        super.layout()
+        // Width comes from the stack; keep the container tracking so the
+        // text re-wraps and the intrinsic height stays honest.
+        let clipWidth = (scroll.contentView as? NSClipView)?.bounds.width ?? bounds.width
+        textView.textContainer?.size = NSSize(width: max(clipWidth, 40),
+                                              height: .greatestFiniteMagnitude)
+        invalidateIntrinsicContentSize()
+    }
+}
+
+// MARK: - card
+
 final class AITaskCard: NSView {
     var onConfirm: (() -> Void)?
     var onEdit: ((AIProposal) -> Void)?
@@ -26,7 +116,19 @@ final class AITaskCard: NSView {
     /// Last bash command seen in a proposal/execution — the Fill
     /// terminal target after completion.
     private var lastBashCommand: String?
+    /// Full transcript of the rendered task — the Copy button source.
+    private var lastTranscript: String?
     private var inputField: ChromeInput?
+
+    /// Transcript for Copy: every round's tool + result, then the
+    /// summary. Mono, plain text — pastes cleanly anywhere.
+    static func transcript(rounds: [AIRound], summary: String) -> String {
+        var lines = rounds.map { r in
+            "[\(r.toolName ?? "tool")] \(r.toolInput)\n\(r.toolResult)"
+        }
+        lines.append(summary)
+        return lines.joined(separator: "\n\n")
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -131,12 +233,17 @@ final class AITaskCard: NSView {
                 group.rounds(task.rounds)
             }
         case .completed(let summary):
+            lastTranscript = Self.transcript(rounds: task.rounds, summary: summary)
             rebuild { group in
                 group.header(target: target, phase: "done")
                 group.rounds(task.rounds)
-                group.label(summary, font: .systemFont(ofSize: 12),
-                            color: Chrome.theme.foreground)
+                group.markdown(summary)
                 group.buttons {
+                    $0.add("Copy", .ghost) { [weak self] in
+                        guard let text = self?.lastTranscript else { return }
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                    }
                     $0.add("Fill terminal", .ghost) { [weak self] in
                         guard let cmd = self?.lastBashCommand else { return }
                         self?.onFill?(cmd)
@@ -145,11 +252,16 @@ final class AITaskCard: NSView {
                 }
             }
         case .failed(let message):
+            lastTranscript = message
             rebuild { group in
                 group.header(target: target, phase: "failed")
-                group.label(message, font: .systemFont(ofSize: 12),
-                            color: Chrome.theme.dangerText)
+                group.markdown(message)
                 group.buttons {
+                    $0.add("Copy", .ghost) { [weak self] in
+                        guard let text = self?.lastTranscript else { return }
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                    }
                     $0.add("Close", .ghost) { [weak self] in self?.onClose?() }
                 }
             }
@@ -280,12 +392,11 @@ final class AITaskCard: NSView {
         func proposal(_ proposal: AIProposal, target: ExecutionTarget) {
             let explanation = proposal.explanation
             if !explanation.isEmpty {
-                add(views: [label(explanation, font: .systemFont(ofSize: 12),
-                                  color: Chrome.theme.secondaryText)])
+                _ = markdown(explanation)
             }
             switch proposal.op {
             case .bash(let command):
-                add(views: [mono(command)])
+                _ = monoSelectable(command)
             case .write(let path, let content):
                 add(views: [mono("write \(path)"),
                             block(content, tint: nil)])
@@ -337,11 +448,32 @@ final class AITaskCard: NSView {
             field.font = font
             field.textColor = color
             field.lineBreakMode = .byWordWrapping
-            field.maximumNumberOfLines = 4
             add(views: [field])
             field.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor,
                                          constant: -24).isActive = true
             return field
+        }
+
+        /// Markdown-rendered, selectable, internally scrolling text
+        /// (answers and explanations — LLMs speak markdown).
+        func markdown(_ text: String) -> AIMarkdownBox {
+            let box = AIMarkdownBox(frame: .zero)
+            box.setMarkdown(text)
+            add(views: [box])
+            box.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor,
+                                       constant: -24).isActive = true
+            return box
+        }
+
+        /// Selectable mono text (tool output, transcripts).
+        func monoSelectable(_ text: String) -> AIMarkdownBox {
+            let box = AIMarkdownBox(frame: .zero)
+            box.maxHeight = 140
+            box.setPlainText(text, font: .monospacedSystemFont(ofSize: 11.5, weight: .regular))
+            add(views: [box])
+            box.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor,
+                                       constant: -24).isActive = true
+            return box
         }
 
         func mono(_ text: String) -> NSTextField {

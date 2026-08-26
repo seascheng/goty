@@ -768,6 +768,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refresh() {
         guard let store = coordinator.store, let ws = store.focused,
               let gapp = ghostty.app else { return }
+        // Panes created before the store knew about them armed with a nil
+        // target; every store pass is a free re-arm (idle panes never see
+        // another foreground report, so the stale unarmed state stuck —
+        // "@ai works in one pane, not another").
+        for host in hostPool.values { host.refreshAITrigger() }
         let titleText = "Goty — \(ws.displayName)"
         window?.title = titleText
         wc.setChromeTitle(titleText)
