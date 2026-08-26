@@ -41,6 +41,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Detach GUI clients only. goty-sessiond owns the PTYs and must
         // outlive this process so sessions survive app restarts.
         hostPool.values.forEach { $0.retire() }
+        // The forwards are OURS though: quit without this leaked one
+        // ssh -N per app launch (12 orphans accumulated across a
+        // crashy evening — each still holding its unlinked socket).
+        remoteLinks.values.forEach { $0.stop() }
     }
     func applicationShouldHandleReopen(_ application: NSApplication,
                                        hasVisibleWindows flag: Bool) -> Bool {

@@ -387,9 +387,11 @@ final class WorktreeRowView: NSView, KeyedRow {
         addSubview(actionStrip)
 
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 32),
+            // Two text lines (branch + path): 32pt clipped the path into
+            // the row below — the reported overflow.
+            heightAnchor.constraint(equalToConstant: 42),
             glyph.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            glyph.topAnchor.constraint(equalTo: topAnchor, constant: 7),
+            glyph.centerYAnchor.constraint(equalTo: centerYAnchor),
             glyph.widthAnchor.constraint(equalToConstant: 14),
             label.leadingAnchor.constraint(equalTo: glyph.trailingAnchor, constant: 6),
             label.topAnchor.constraint(equalTo: topAnchor, constant: 5),

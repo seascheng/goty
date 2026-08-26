@@ -101,7 +101,10 @@ final class SidebarRowView: NSView {
         }
 
         private func refresh() {
-            guard let s = status else { return }
+            guard let s = status else {
+                setSpinning(false)
+                return
+            }
             wash = Self.color(for: s)
             toolTip = stateWord
             let showChar = s.activity == .working && s.spinner != nil
@@ -112,7 +115,29 @@ final class SidebarRowView: NSView {
                 systemSymbolName: Self.symbol(for: s),
                 accessibilityDescription: stateWord)?
                 .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+            setSpinning(s.activity == .working && !showChar)
             needsDisplay = true
+        }
+
+        private static let spin = "status-spin"
+
+        /// Working animation: the agent's own braille spinner swaps live
+        /// (title-driven); without one the loop glyph ROTATES — a still
+        /// "working" badge reads as done at a glance. Rows are reused
+        /// across tabs, so leaving working must stop the rotation.
+        private func setSpinning(_ on: Bool) {
+            guard on else {
+                iconView.layer?.removeAnimation(forKey: Self.spin)
+                return
+            }
+            guard iconView.layer?.animation(forKey: Self.spin) == nil else { return }
+            iconView.wantsLayer = true
+            let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
+            rotation.fromValue = 0
+            rotation.toValue = 2 * Double.pi
+            rotation.duration = 1.1
+            rotation.repeatCount = .infinity
+            iconView.layer?.add(rotation, forKey: Self.spin)
         }
 
         override func draw(_ dirtyRect: NSRect) {

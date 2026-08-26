@@ -2364,11 +2364,19 @@ extension Ghostty.SurfaceView {
 /// Caches a value for some period of time, evicting it automatically when that time expires.
 /// We use this to cache our surface content. This probably should be extracted some day
 /// to a more generic helper.
+///
+/// goty patch: LOCKED. Upstream assumes single-threaded access; goty
+/// reads screen contents from the main thread (agent detect tick,
+/// accessibility queries) while the expiry Task fires on the
+/// cooperative pool — two racing Optional assignments double-released
+/// the old value and killed the whole app with a Swift runtime fatal
+/// (the "app closes itself after a while" evening of 2026-08-25).
 class CachedValue<T> {
     private var value: T?
     private let fetch: () -> T
     private let duration: Duration
     private var expiryTask: Task<Void, Never>?
+    private let lock = NSLock()
 
     init(duration: Duration, fetch: @escaping () -> T) {
         self.duration = duration
@@ -2380,27 +2388,36 @@ class CachedValue<T> {
     }
 
     func get() -> T {
+        lock.lock()
+        defer { lock.unlock() }
         if let value {
             return value
         }
 
         // We don't have a value (or it expired). Fetch and store.
         let result = fetch()
-        let now = ContinuousClock.now
-        let expires = now + duration
+        let expires = ContinuousClock.now + duration
         self.value = result
 
         // Schedule a task to clear the value
         expiryTask = Task { [weak self] in
             do {
                 try await Task.sleep(until: expires)
-                self?.value = nil
-                self?.expiryTask = nil
+                self?.expire()
             } catch {
                 // Task was cancelled, do nothing
             }
         }
 
         return result
+    }
+
+    /// Expiry Task side: the only other writer, now under the same
+    /// lock — value and expiryTask mutations are serialized with get().
+    private func expire() {
+        lock.lock()
+        defer { lock.unlock() }
+        value = nil
+        expiryTask = nil
     }
 }

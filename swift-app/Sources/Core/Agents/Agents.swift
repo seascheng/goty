@@ -12,10 +12,12 @@ struct AgentSpec {
     /// Brand hue for the sidebar avatar disc (tty7 `CLIAgent::accent_rgb`).
     let accent: NSColor
 
-    /// tty7 status palette — reserved for the hook-driven status stream.
-    static let statusWorking = NSColor(hex: "#3B82F6")!
-    static let statusWaiting = NSColor(hex: "#F59E0B")!
-    static let statusDone = NSColor(hex: "#22C55E")!
+    /// goty status palette semantics (goty reference): working=
+    /// amber, blocked=red, done=teal — attention colors that read
+    /// instantly; blue "info" for active work was illegible.
+    static let statusWorking = NSColor(hex: "#F59E00")!
+    static let statusWaiting = NSColor(hex: "#F0595E")!
+    static let statusDone = NSColor(hex: "#149996")!
 
 }
 
