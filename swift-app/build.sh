@@ -82,9 +82,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Goty</string>
-    <key>CFBundleDisplayName</key><string>Goty</string>
-    <key>CFBundleIdentifier</key><string>com.goty.terminal</string>
+    <key>CFBundleName</key><string>Goty AI</string>
+    <key>CFBundleDisplayName</key><string>Goty AI</string>
+    <key>CFBundleIdentifier</key><string>com.goty.ai</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
     <key>CFBundleExecutable</key><string>goty</string>
@@ -103,10 +103,10 @@ PLIST
 # endless "Goty wants to access files in your Downloads folder" dialogs).
 # Nested Mach-O first, then the bundle; the linux-musl ELF is a resource
 # uploaded over ssh, never executed on macOS, so it stays unsigned.
-codesign --force --sign - --identifier com.goty.terminal.sessiond \
+codesign --force --sign - --identifier com.goty.ai.sessiond \
     "$APP/Contents/MacOS/goty-sessiond"
-codesign --force --sign - --identifier com.goty.terminal.libghostty \
+codesign --force --sign - --identifier com.goty.ai.libghostty \
     "$APP/Contents/MacOS/CGhostty/lib/libghostty-internal.dylib"
-codesign --force --sign - --identifier com.goty.terminal "$APP"
+codesign --force --sign - --identifier com.goty.ai "$APP"
 
 echo "built: $(pwd)/goty and $APP"
