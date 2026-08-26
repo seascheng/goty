@@ -160,7 +160,7 @@ final class SettingsRootView: NSView, ThemeRefreshable {
             headerStrip.heightAnchor.constraint(equalToConstant: 44),
             // 84 clears the traffic-light capsules (they own the
             // top-left ~70pt — sidebar DragStrip's rule).
-            windowTitle.leadingAnchor.constraint(equalTo: headerStrip.leadingAnchor, constant: 84),
+            windowTitle.centerXAnchor.constraint(equalTo: headerStrip.centerXAnchor),
             windowTitle.centerYAnchor.constraint(equalTo: headerStrip.centerYAnchor),
             windowTitle.trailingAnchor.constraint(lessThanOrEqualTo: pathLabel.leadingAnchor, constant: -8),
             pathLabel.trailingAnchor.constraint(equalTo: headerStrip.trailingAnchor, constant: -14),

@@ -161,6 +161,9 @@ final class IconButton: NSView {
 class ClosureButton: NSButton {
     var onClick: (() -> Void)?
     override func mouseDown(with event: NSEvent) { onClick?() }
+    /// Pointing hand over every closure button (the AI-panel cursor
+    /// report) — one base class, product-wide.
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
     /// AX presses (VoiceOver, AppleScript) come through here, not
     /// mouseDown — without this override every closure button in the
     /// app is dead to assistive tech.

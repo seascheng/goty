@@ -145,43 +145,27 @@ final class SidebarView: NSView {
     private lazy var wsHeader: NSView = sectionHeader("Servers",
                                                      plus: { [weak self] anchor in
         guard let self else { return }
-        let menu = hostPickerMenu(hosts: SSHConfig.hosts())
-        // Fly out from the '+' itself (top-right corner, extending
-        // right), not from the header's leading edge.
-        menu.popUp(positioning: nil, at: NSPoint(x: anchor.bounds.width,
-                                                 y: anchor.bounds.height), in: anchor)
+        // Product-styled flyout from the '+' itself — the system NSMenu
+        // chrome ignored the theme (the styled-popup report).
+        HostFlyout.show(anchor: anchor,
+                        entries: self.hostPickerEntries(hosts: SSHConfig.hosts()),
+                        onPick: { [weak self] entry in self?.fireHostPicker(entry) })
     }, emphasized: true)
 
-    /// Host picker for the Servers '+': one item per SSH alias, then the
-    /// manager entry (parse/add/edit/delete of ~/.ssh/config — hosts
-    /// not in the file get added THERE, not through a prompt). Built
-    /// pure (hosts passed in) so tests can inspect and fire it — each
-    /// item must carry its host, or the click does nothing (the
-    /// 2026-08-23 dead-items bug).
-    func hostPickerMenu(hosts: [String]) -> NSMenu {
-        let menu = NSMenu()
-        for host in hosts {
-            let item = NSMenuItem(title: host, action: #selector(hostMenuAction),
-                                  keyEquivalent: "")
-            item.target = self
-            item.representedObject = host
-            menu.addItem(item)
-        }
-        if !menu.items.isEmpty { menu.addItem(.separator()) }
-        let manage = NSMenuItem(title: "Manage Hosts…", action: #selector(hostMenuAction),
-                                keyEquivalent: "")
-        manage.target = self
-        manage.representedObject = NSNull()
-        manage.image = menuItemIcon("server.rack", pointSize: 10)
-        menu.addItem(manage)
-        return menu
+    /// Host picker for the Servers '+': one entry per SSH alias, then
+    /// the manager entry (parse/add/edit/delete of ~/.ssh/config —
+    /// hosts not in the file get added THERE, not through a prompt).
+    /// Pure list + pure router — the flyout renders it, tests fire it
+    /// (the 2026-08-23 dead-items bug: every entry must carry its host
+    /// or the click does nothing).
+    func hostPickerEntries(hosts: [String]) -> [HostPickerEntry] {
+        hosts.map { .host($0) } + [.manage]
     }
 
-    @objc fileprivate func hostMenuAction(_ sender: NSMenuItem) {
-        if sender.representedObject is NSNull {
-            onManageSSHConfig?()  // ~/.ssh/config manager overlay
-        } else if let host = sender.representedObject as? String {
-            onAddWorkspace?(host)
+    func fireHostPicker(_ entry: HostPickerEntry) {
+        switch entry {
+        case .host(let host): onAddWorkspace?(host)
+        case .manage: onManageSSHConfig?()  // ~/.ssh/config manager overlay
         }
     }
 

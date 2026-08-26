@@ -184,16 +184,15 @@ func run() {
     wc.sidebar.onAddWorkspace = { addedHosts.append($0) }
     var openedManager = false
     wc.sidebar.onManageSSHConfig = { openedManager = true }
-    let picker = wc.sidebar.hostPickerMenu(hosts: ["alpha", "beta"])
-    check(picker.items.count == 4 && picker.items[2].isSeparatorItem,
-          "picker = hosts + separator + manage entry (\(picker.items.count) items)")
-    check(picker.items[3].title == "Manage Hosts…", "manage entry is the last item")
-    for item in picker.items where !item.isSeparatorItem {
-        _ = NSApp.sendAction(item.action!, to: item.target, from: item)
+    let picker = wc.sidebar.hostPickerEntries(hosts: ["alpha", "beta"])
+    check(picker.count == 3 && picker[2] == .manage,
+          "picker = hosts + manage entry (\(picker.count) entries)")
+    for entry in picker {
+        wc.sidebar.fireHostPicker(entry)
     }
     check(addedHosts == ["alpha", "beta"],
-          "host items fire onAddWorkspace (\(addedHosts))")
-    check(openedManager, "manage item opens the SSH config manager")
+          "host entries fire onAddWorkspace (\(addedHosts))")
+    check(openedManager, "manage entry opens the SSH config manager")
 
 
     print("— SSH config document (Core, pure) —")

@@ -62,10 +62,12 @@ final class CommitMessageView: NSScrollView {
         // Anchored to the scroll view itself, never the clip view — the
         // clip view scrolls under the document view. Top follows the
         // text block's centered inset (fitHeight keeps both in step).
+        // Centered in the box: the placeholder is only VISIBLE while
+        // the box is empty-and-unfocused (single 30pt line), so the
+        // box's center IS the first line's center — a top pin sat high
+        // by the inset delta (the git-input report).
         placeholder.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9).isActive = true
-        placeholderTop = placeholder.topAnchor.constraint(equalTo: topAnchor,
-                                                            constant: Self.pad + 1)
-        placeholderTop.isActive = true
+        placeholder.centerYAnchor.constraint(equalTo: centerYAnchor).isActive = true
 
         heightConstraint = heightAnchor.constraint(equalToConstant: Self.pad * 2 + Self.line)
         heightConstraint.isActive = true
@@ -89,8 +91,6 @@ final class CommitMessageView: NSScrollView {
         placeholder.isHidden = focused || !textView.string.isEmpty
     }
 
-    private var placeholderTop: NSLayoutConstraint!
-
     /// Box height AND text vertical centering, computed together (one
     /// truth): the document block sits mid-viewport at every line
     /// count — the caret must sit where the eye expects it, not pinned
@@ -106,7 +106,6 @@ final class CommitMessageView: NSScrollView {
         let insetV = max(Self.pad, (viewport - oneLine * n) / 2)
         heightConstraint.constant = viewport
         textView.textContainerInset = NSSize(width: 4, height: insetV)
-        placeholderTop.constant = insetV + 1
     }
 
     override func viewDidMoveToWindow() {
