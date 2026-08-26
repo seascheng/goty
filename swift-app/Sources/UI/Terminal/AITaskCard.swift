@@ -616,7 +616,13 @@ final class AITaskCard: NSView {
             let field = NSTextField(labelWithString: text)
             field.font = font
             field.textColor = color
+            // lineBreakMode alone does NOT wrap an NSTextField label —
+            // cell.wraps is the switch (without it the label stays a
+            // single line and clips under the width cap).
             field.lineBreakMode = .byWordWrapping
+            field.cell?.wraps = true
+            field.cell?.truncatesLastVisibleLine = true
+            field.maximumNumberOfLines = 0
             add(views: [field])
             field.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor,
                                          constant: -24).isActive = true
