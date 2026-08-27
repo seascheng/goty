@@ -54,6 +54,15 @@ final class PaneHost: NSView {
     /// block is the very next enqueue, adding no latency.
     private var coalescedOutput: [Data] = []
     private var coalesceDrainScheduled = false
+    /// streamQueue only. While set (a moment after a resize request),
+    /// the coalescing drain postpones itself: a SIGWINCH-triggered TUI
+    /// repaint arrives as clear-then-redraw batches, and merging them
+    /// into one present removes the first-switch flicker.
+    private var holdDrainUntil: Date?
+    /// How long after a resize the drain holds. Long enough to span a
+    /// TUI's clear/redraw gap (tens of ms), short enough to read as a
+    /// single content update, not a stall.
+    private static let repaintHoldInterval: TimeInterval = 0.12
     /// Grid currently installed in the core; equal-size updates are skipped
     /// so a resize that lands on the live geometry causes no reflow at all.
     private var installedGrid: (columns: UInt16, rows: UInt16)?
@@ -352,10 +361,26 @@ final class PaneHost: NSView {
         guard !coalesceDrainScheduled else { return }
         coalesceDrainScheduled = true
         streamQueue.async { [weak self] in
-            guard let self else { return }
-            self.coalesceDrainScheduled = false
-            self.flushCoalescedOutput()
+            self?.runCoalescedDrain()
         }
+    }
+
+    /// streamQueue only. The drain body. Inside a repaint-hold window
+    /// (see holdDrainUntil) it reschedules itself past the deadline —
+    /// the TUI's clear-screen batch and its repaint batch then merge
+    /// into ONE process_output + present, and the empty in-between
+    /// frame never gets drawn (the core has no damage to render until
+    /// the merged block arrives).
+    private func runCoalescedDrain() {
+        if let until = holdDrainUntil, Date() < until {
+            streamQueue.asyncAfter(deadline: .now() + until.timeIntervalSinceNow) { [weak self] in
+                self?.runCoalescedDrain()
+            }
+            return
+        }
+        coalesceDrainScheduled = false
+        holdDrainUntil = nil
+        flushCoalescedOutput()
     }
 
     /// streamQueue only. Feed everything coalesced to the core as one
@@ -736,11 +761,22 @@ final class PaneHost: NSView {
         }
     }
 
-    /// streamQueue only: the layout-driven half of the resize protocol.
+    /// streamQueue only. The layout-driven half of the resize protocol.
     private func streamResizeIfNeeded(_ grid: SessionGrid) {
         guard attached, !retired, grid != lastRequestedGrid else { return }
         targetGrid = grid
         lastRequestedGrid = grid
+        // Repaint-hold: when this resize actually changes the PTY size
+        // the daemon emits SIGWINCH and a full-screen TUI repaints in
+        // TWO batches (clear screen, then content) a few tens of ms
+        // apart. Presenting them separately is the first-switch flicker
+        // (text -> blank -> text). Hold the coalescing drain briefly so
+        // both batches land in one frame; the old text stays on the
+        // layer until then. Cost: output arriving right after a resize
+        // shows ~120ms later. Same-size resizes are already a no-op in
+        // sessiond (no SIGWINCH, no repaint) — but only the DAEMON
+        // knows; holding here is harmless for that case.
+        holdDrainUntil = Date().addingTimeInterval(Self.repaintHoldInterval)
         session?.resize(grid)
     }
 
