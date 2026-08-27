@@ -66,8 +66,16 @@ final class ChromeButton: ClosureButton, ThemeRefreshable {
 
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
+        // Press feedback: the bezel is off (self-painted chrome), so
+        // NSButton's native highlight never shows — dim the whole
+        // painted button for the duration of the press. super's
+        // tracking loop returns on mouse-up (inside = click), so the
+        // restore covers cancel-by-dragging-out too.
+        layer?.opacity = 0.72
         super.mouseDown(with: event)
+        layer?.opacity = 1
     }
+
 
 
     init(title: String, style: Style, compact: Bool = false) {

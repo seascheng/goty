@@ -23,7 +23,7 @@ final class SSHHostEditor: NSView {
     private let aliasField = ChromeInput(placeholder: "e.g. build-box", icon: "at")
     private let hostNameField = ChromeInput(placeholder: "hostname or IP", icon: "globe")
     private let userField = ChromeInput(placeholder: "ssh user", icon: "person")
-    private let portField = ChromeInput(placeholder: "22", icon: "hash")
+    private let portField = ChromeInput(placeholder: "22", icon: "number")
     private let formContainer = NSView()
     private let placeholderLabel = NSTextField(
         labelWithString: "Select a host to edit — or add one with +")

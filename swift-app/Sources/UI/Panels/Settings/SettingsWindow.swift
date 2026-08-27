@@ -171,7 +171,7 @@ final class SettingsRootView: NSView, ThemeRefreshable {
             listColumn.leadingAnchor.constraint(equalTo: leadingAnchor),
             listColumn.topAnchor.constraint(equalTo: headerStrip.bottomAnchor),
             listColumn.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
-            listColumn.widthAnchor.constraint(equalToConstant: 260),
+            listColumn.widthAnchor.constraint(equalToConstant: 216),
 
             divider.leadingAnchor.constraint(equalTo: listColumn.trailingAnchor),
             divider.topAnchor.constraint(equalTo: headerStrip.bottomAnchor),

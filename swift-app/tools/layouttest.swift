@@ -74,6 +74,12 @@ func run() {
             sidebar.onSpaceFoldsChange = { fired = $0 }
             sidebar.toggleSpaceFold("/tmp/fold-a")
             check(fired == ["/tmp/fold-a"], "fold reports the folded space")
+            check(sidebar.spaceHeaderExpandedForTest("/tmp/fold-a") == false
+                  && sidebar.spaceHeaderExpandedForTest("/tmp/fold-b") == true,
+                  "fold flips its own chevron, not the other section's")
+            check(sidebar.tabsRowsForTest[0].isHidden && sidebar.tabsRowsForTest[1].isHidden,
+                  "fold hides only its own section's rows")
+            check(!sidebar.tabsRowsForTest[2].isHidden, "other space's rows stay visible")
             check(sidebar.tabsVisibleForTest.count == 4,
                   "visible = other rows + both headers + its gap")
             // A new tab in the folded space re-renders — it must land hidden.
@@ -91,6 +97,8 @@ func run() {
             check(sidebar.tabsVisibleForTest.count == 3,
                   "folded sections keep their spacing tiles (2 headers + 1 gap)")
             sidebar.toggleSpaceFold("/tmp/fold-a")
+            check(sidebar.spaceHeaderExpandedForTest("/tmp/fold-a") == true,
+                  "expand flips the chevron back")
             sidebar.toggleSpaceFold("/tmp/fold-b")
             check(sidebar.tabsRowsForTest.allSatisfy { !$0.isHidden }, "expand restores every row")
         }

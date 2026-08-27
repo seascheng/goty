@@ -118,6 +118,8 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         toggleButton.symbol = expanded ? "chevron.down" : "chevron.right"
     }
 
+    var isExpandedForTest: Bool { lastExpanded }
+
     /// Theme flip: re-run the last configure — the static SERVERS/
     /// SPACES headers are built once and never re-rendered by data
     /// passes, so without this they carry the launch theme forever.
@@ -228,20 +230,28 @@ final class SidebarView: NSView {
     /// tab rows, NOT the header). Rebuilt every render; reuse keeps the
     /// views identity-stable so toggling just flips isHidden.
     private var spaceSectionViews: [String: [NSView]] = [:]
+    /// Fold key (directory root) → that section's header — the icon flip
+    /// target. NOT spaceHeaders: that map is keyed by DISPLAY name, and
+    /// the two keys differ ("fold-a" vs "/tmp/fold-a") — looking the
+    /// header up by fold key there always missed, freezing the chevron
+    /// at its configure-time glyph (the icon-never-flips report).
+    private var spaceFoldHeaders: [String: SectionHeaderView] = [:]
     var onSpaceFoldsChange: (([String]) -> Void)?
 
     /// Restore folds (AppWindowController, before the first render).
     func setFoldedSpaces(_ names: Set<String>) {
         spaceFolds = names
-        for (name, views) in spaceSectionViews where spaceFolds.contains(name) {
-            views.forEach { $0.isHidden = true }
+        for (name, views) in spaceSectionViews {
+            let folded = spaceFolds.contains(name)
+            views.forEach { $0.isHidden = folded }
+            spaceFoldHeaders[name]?.setExpanded(!folded)
         }
         onSpaceFoldsChange?(Array(names))
     }
 
     func toggleSpaceFold(_ name: String) {
         if !spaceFolds.insert(name).inserted { spaceFolds.remove(name) }
-        spaceHeaders[name]?.setExpanded(!spaceFolds.contains(name))
+        spaceFoldHeaders[name]?.setExpanded(!spaceFolds.contains(name))
         onSpaceFoldsChange?(Array(spaceFolds))
         for view in spaceSectionViews[name] ?? [] {
             view.isHidden = spaceFolds.contains(name)
@@ -257,6 +267,10 @@ final class SidebarView: NSView {
     }
     var tabsVisibleForTest: [NSView] {
         tabsStack.arrangedSubviews.filter { !$0.isHidden }
+    }
+    /// Chevron state of a space section (fold key = directory root).
+    func spaceHeaderExpandedForTest(_ foldKey: String) -> Bool? {
+        spaceFoldHeaders[foldKey]?.isExpandedForTest
     }
     /// Host picker for the Servers '+': one entry per SSH alias, then
     /// the manager entry (parse/add/edit/delete of ~/.ssh/config —
@@ -549,6 +563,7 @@ final class SidebarView: NSView {
             // row dies, so the reuse maps reset with them.
             tabRows.removeAll()
             spaceHeaders.removeAll()
+            spaceFoldHeaders.removeAll()
             spaceSectionViews.removeAll()
             tabsStack.arrangedSubviews.forEach { tabsStack.removeView($0) }
             addRow(tabsStack, text: "Offline — reconnect to see sessions",
@@ -558,6 +573,7 @@ final class SidebarView: NSView {
         var desired: [NSView] = []
         var nextRows: [String: SidebarRowView] = [:]
         var nextHeaders: [String: SectionHeaderView] = [:]
+        var nextFoldHeaders: [String: SectionHeaderView] = [:]
         var nextSectionViews: [String: [NSView]] = [:]
         for section in SpaceGrouping.sections(for: workspace.tabs, spaceRoot: spaceRoot) {
             var sectionViews: [NSView] = []   // this section's foldable members
@@ -609,6 +625,7 @@ final class SidebarView: NSView {
                    toggle: { [weak self] in self?.toggleSpaceFold(foldKey) },
                    expanded: !spaceFolds.contains(foldKey))
                 nextHeaders[name] = header
+                nextFoldHeaders[foldKey] = header
                 desired.append(header)
             }
             for idx in section.tabIndexs {
@@ -688,6 +705,7 @@ final class SidebarView: NSView {
         }
         tabRows = nextRows
         spaceHeaders = nextHeaders
+        spaceFoldHeaders = nextFoldHeaders
         spaceSectionViews = nextSectionViews
         // Fresh rows land visible; folded sections stay folded.
         for (name, views) in spaceSectionViews where spaceFolds.contains(name) {
