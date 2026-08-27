@@ -27,6 +27,12 @@ func run() {
             card.layoutSubtreeIfNeeded()
             check(card.isTextViewSelectableForTest, "AI markdown renders as a selectable inline field")
             if let field = card.selectableFieldForTest {
+                // The width cap must actually bind: without
+                // translatesAutoresizingMaskIntoConstraints=false the ≤ constraint is
+                // ignored and the label lays out at intrinsic width,
+                // clipping every line (the ellipsis report).
+                check(field.bounds.width <= card.bounds.width - 12,
+                      "inline text caps at card width (field \(Int(field.bounds.width)) vs card \(Int(card.bounds.width)))")
                 let p = card.convert(NSPoint(x: field.bounds.midX, y: field.bounds.midY), from: field)
                 let hit = card.hitTest(p)
                 let chain = hit.map { String(describing: type(of: $0)) } ?? "nil"

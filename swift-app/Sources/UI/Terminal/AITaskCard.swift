@@ -8,6 +8,15 @@ import AppKit
 /// buffer. The card never becomes firstResponder outside its input and
 /// edit modes, so arrow keys keep reaching the terminal.
 
+/// The card's document MUST be flipped: NSClipView is flipped, and a
+/// non-flipped document inverts every scroll coordinate — the clip's
+/// bottom-pin math lands at the visual TOP and wheel scrolling reads
+/// reversed (the "scroll direction is backwards" report; verified with
+/// /tmp/scrollprobe: flipped doc + clip.scroll survives layout, doc
+/// frame stays pinned at the origin).
+private final class FlippedStack: NSStackView {
+    override var isFlipped: Bool { true }
+}
 
 final class AITaskCard: NSView {
     var onConfirm: (() -> Void)?
@@ -18,7 +27,7 @@ final class AITaskCard: NSView {
     /// Input mode (⌘⇧A): Enter submits the typed request.
     var onSubmit: ((String) -> Void)?
 
-    private let stack = NSStackView()
+    private let stack = FlippedStack()
     /// The ask that started the running task — shown as the card's
     /// title line (the user's own words, not a phase label).
     private var taskQuestion: String?
@@ -129,6 +138,13 @@ final class AITaskCard: NSView {
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.onUserScroll = { [weak self] in
+            // Post-wheel position decides the pin: at/near the bottom
+            // = keep following; anywhere above = the user is reading.
+            guard let self else { return }
+            let clip = self.scrollView.contentView
+            self.pinnedToBottom = clip.bounds.maxY >= self.stack.bounds.height - 4
+        }
         scrollView.documentView = stack
         addSubview(scrollView)
         NSLayoutConstraint.activate([
@@ -155,15 +171,25 @@ final class AITaskCard: NSView {
     }
 
     private var bodyHeight: NSLayoutConstraint?
-    /// The card's body scroller — the clip view owns scrolling (the
-    /// document view's bounds origin is the clip's to manage).
-    private let scrollView = NSScrollView()
+    /// Scroll view that reports USER wheel scrolling — the stick-to-
+    /// bottom pin must never fight a reader who scrolled up.
+    private final class CardScrollView: NSScrollView {
+        var onUserScroll: (() -> Void)?
+        override func scrollWheel(with event: NSEvent) {
+            super.scrollWheel(with: event)
+            onUserScroll?()
+        }
+    }
+    private let scrollView = CardScrollView()
+    /// True while the body should follow new content (user at/near the
+    /// bottom). Flips off the moment the user wheels away; back on when
+    /// they wheel to the bottom again.
+    private var pinnedToBottom = true
     /// Fixed title-bar fields (question + meta) — pinned above the
     /// scrolling body, set by Group.header on every render.
     private let titleField = NSTextField(labelWithString: "")
     private let metaField = NSTextField(labelWithString: "")
     private let closeButton = IconButton()
-
     override func layout() {
         super.layout()
         bodyHeight?.isActive = false
@@ -172,13 +198,18 @@ final class AITaskCard: NSView {
         bodyHeight?.isActive = true
         if pendingScroll {
             pendingScroll = false
-            DispatchQueue.main.async { [stack] in
-                // Force the re-measured height to LAND first — reading
-                // bounds.height before the constraint pass completes
-                // scrolls to the PRE-growth height, which during
-                // streaming looked like the card jumping to its top.
-                stack.layoutSubtreeIfNeeded()
-                stack.scroll(NSPoint(x: 0, y: stack.bounds.height))
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                // Force the re-measured height to LAND first; then pin
+                // THROUGH THE CLIP VIEW. Scrolling the document view's
+                // own bounds desyncs from the clip view — it bounces
+                // back to the TOP on the next growth (the md-document
+                // jump-to-top report).
+                self.stack.layoutSubtreeIfNeeded()
+                guard self.pinnedToBottom else { return }   // reader wins
+                let clip = self.scrollView.contentView
+                clip.scroll(to: NSPoint(x: 0, y: self.stack.bounds.height - clip.bounds.height))
+                self.scrollView.reflectScrolledClipView(clip)
             }
         }
     }
@@ -438,15 +469,14 @@ final class AITaskCard: NSView {
         }
 
 
-        /// The model's own reasoning for one round: muted mono preview,
-        /// capped at 2 lines — it's context for the line under it.
+        /// The model's reasoning (streaming AND completed rounds): muted
+        /// mono that wraps and stays selectable — no line cap anywhere
+        /// (the think-text never-wraps reports).
         func thinkingBlock(_ text: String) {
-            let body = mono(text)
+            let body = monoSelectable(text)
             body.textColor = Chrome.theme.secondaryText
-            body.lineBreakMode = .byTruncatingTail
-            body.maximumNumberOfLines = 2
-            body.cell?.truncatesLastVisibleLine = true
         }
+
 
         func proposal(_ proposal: AIProposal, target: ExecutionTarget) {
             let explanation = proposal.explanation
@@ -632,9 +662,17 @@ final class AITaskCard: NSView {
         }
 
         /// One view directly into the stack (input field etc.).
-        func add(_ view: NSView) { stack.addView(view, in: .leading) }
+        func add(_ view: NSView) {
+            // Arranged content MUST drop the autoresizing mask — the
+            // width-cap constraints the builders add (≤ stack - 24) are
+            // silently ignored otherwise, and wrapping labels laid out
+            // at intrinsic width get clipped mid-line (the think-text
+            // ellipsis report).
+            view.translatesAutoresizingMaskIntoConstraints = false
+            stack.addView(view, in: .leading)
+        }
         func add(views: [NSView]) {
-            for view in views { stack.addView(view, in: .leading) }
+            for view in views { add(view) }
         }
     }
 }
