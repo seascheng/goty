@@ -9,14 +9,21 @@ final class OutputTail {
     private static let capacity = 8192
     private static let maxLines = 64
 
-    func append(_ bytes: [UInt8]) {
-        guard !bytes.isEmpty else { return }
+    /// Hot path: takes the producer's buffer directly (stream frames
+    /// arrive as UnsafeBufferPointer over the IPC Data) — one copy into
+    /// the ring, no intermediate Array allocation per frame.
+    func append(_ bytes: UnsafeBufferPointer<UInt8>) {
+        guard let base = bytes.baseAddress, bytes.count > 0 else { return }
         lock.lock()
         ring.append(contentsOf: bytes)
         if ring.count > Self.capacity {
             ring.removeFirst(ring.count - Self.capacity)
         }
         lock.unlock()
+    }
+
+    func append(_ bytes: [UInt8]) {
+        bytes.withUnsafeBufferPointer { append($0) }
     }
 
     var snapshot: String {

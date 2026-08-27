@@ -412,14 +412,16 @@ final class PaneHost: NSView {
     /// streamQueue only. `agentContentSeq` is also read by the main-thread
     /// detect tick — sharedStateLock covers that pair.
     private func processOutput(_ data: Data, surface: ghostty_surface_t, present: Bool) {
-        aiTail.append(Array(data))
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress, !raw.isEmpty else { return }
+            let buf = UnsafeBufferPointer(
+                start: base.assumingMemoryBound(to: UInt8.self), count: raw.count)
+            // Buffer straight into the ring: no per-frame Array copy.
+            aiTail.append(buf)
             sharedStateLock.lock()
             agentContentSeq &+= 1
             sharedStateLock.unlock()
-            agentOsc.observe(UnsafeBufferPointer(
-                start: base.assumingMemoryBound(to: UInt8.self), count: raw.count))
+            agentOsc.observe(buf)
             ghostty_surface_process_output(
                 surface, base.assumingMemoryBound(to: UInt8.self), UInt(raw.count))
         }
