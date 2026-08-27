@@ -255,22 +255,11 @@ extension Ghostty {
         /// Event monitor (see individual events for why)
         private var eventMonitor: Any?
 
-        /// Discrete wheel detents arrive as one large event on macOS. Pay
-        /// their pixel distance out at display cadence; precision gestures
-        /// already carry OS-provided momentum and stay on the direct path.
-        private var scrollAnimation: ScrollAnimation?
-        private var scrollDisplayLink: CADisplayLink?
-
-        private struct ScrollAnimation {
-            var remainingX: Double
-            var remainingY: Double
-            var lastTimestamp: CFTimeInterval
-        }
-
-        private static let scrollAnimationFrame: CFTimeInterval = 1.0 / 60.0
-        private static let scrollAnimationSmooth = 0.4
-        private static let scrollAnimationMinimum = 0.05
-        private static let scrollAnimationMinimumJump = 1.0
+        /// (Removed: discrete-wheel CADisplayLink smoothing. Upstream
+        /// forwards every wheel event as one sendMouseScroll and lets the
+        /// core's viewport handle it; an animated fan-out multiplied core
+        /// work per gesture by ~30x on large scrollbacks and turned one
+        /// alt-screen wheel tick into a burst of arrow-key sequences.)
 
         // We need to support being a first responder so that we can get input events
         override var acceptsFirstResponder: Bool { return true }
@@ -458,7 +447,6 @@ extension Ghostty {
 
             // Cancel progress report timer
             progressReportTimer?.invalidate()
-            scrollDisplayLink?.invalidate()
         }
 
         func focusDidChange(_ focused: Bool) {
@@ -1088,83 +1076,21 @@ extension Ghostty {
             let precision = event.hasPreciseScrollingDeltas
 
             if precision {
-                cancelScrollAnimation()
+                // We do a 2x speed multiplier. This is subjective, it "feels" better to me.
                 x *= 2
                 y *= 2
-                sendMouseScroll(x: x, y: y, precision: true,
-                                momentum: .init(event.momentumPhase), to: surfaceModel)
-                return
+
+                // TODO(mitchellh): do we have to scale the x/y here by window scale factor?
             }
 
-            let cellHeight = max(Double(cellSize.height), 1)
-            let jump = max(abs(x), abs(y))
-            if jump < cellHeight * Self.scrollAnimationMinimumJump {
-                cancelScrollAnimation()
-                sendMouseScroll(x: x, y: y, precision: false, momentum: .none,
-                                to: surfaceModel)
-                return
-            }
-
-            queueScrollAnimation(x: x * cellHeight * 3, y: y * cellHeight * 3)
+            let scrollEvent = Ghostty.Input.MouseScrollEvent(
+                x: x,
+                y: y,
+                mods: .init(precision: precision, momentum: .init(event.momentumPhase))
+            )
+            surfaceModel.sendMouseScroll(scrollEvent)
         }
 
-        private func sendMouseScroll(x: Double, y: Double, precision: Bool,
-                                     momentum: Ghostty.Input.Momentum,
-                                     to surfaceModel: Ghostty.Surface) {
-            surfaceModel.sendMouseScroll(.init(
-                x: x, y: y,
-                mods: .init(precision: precision, momentum: momentum)))
-        }
-
-        private func queueScrollAnimation(x: Double, y: Double) {
-            if scrollAnimation != nil {
-                scrollAnimation?.remainingX += x
-                scrollAnimation?.remainingY += y
-                return
-            }
-
-            scrollAnimation = ScrollAnimation(
-                remainingX: x, remainingY: y, lastTimestamp: CACurrentMediaTime())
-            let link = displayLink(target: self, selector: #selector(advanceScrollAnimation(_:)))
-            scrollDisplayLink = link
-            link.add(to: .main, forMode: .common)
-        }
-
-        private func cancelScrollAnimation() {
-            scrollAnimation = nil
-            scrollDisplayLink?.invalidate()
-            scrollDisplayLink = nil
-        }
-
-        @objc private func advanceScrollAnimation(_ link: CADisplayLink) {
-            guard var animation = scrollAnimation, let surfaceModel else {
-                cancelScrollAnimation()
-                return
-            }
-
-            let elapsed = max(link.timestamp - animation.lastTimestamp,
-                              Self.scrollAnimationFrame * 0.1)
-            animation.lastTimestamp = link.timestamp
-            let frames = min(elapsed / Self.scrollAnimationFrame, 8)
-            let consumed = 1 - pow(1 - Self.scrollAnimationSmooth, frames)
-            var stepX = animation.remainingX * consumed
-            var stepY = animation.remainingY * consumed
-
-            let last = max(abs(animation.remainingX - stepX),
-                           abs(animation.remainingY - stepY)) <= Self.scrollAnimationMinimum
-            if last {
-                stepX = animation.remainingX
-                stepY = animation.remainingY
-                cancelScrollAnimation()
-            } else {
-                animation.remainingX -= stepX
-                animation.remainingY -= stepY
-                scrollAnimation = animation
-            }
-
-            sendMouseScroll(x: stepX, y: stepY, precision: true,
-                            momentum: .none, to: surfaceModel)
-        }
 
         override func pressureChange(with event: NSEvent) {
             guard let surface = self.surface else { return }
