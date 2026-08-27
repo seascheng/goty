@@ -6,15 +6,15 @@
     <language>en</language>
   <item>
     <title>Version 0.1.0 (Build 1)</title>
-    <pubDate>Thu, 27 Aug 2026 07:03:08 +0000</pubDate>
+    <pubDate>Thu, 27 Aug 2026 07:21:55 +0000</pubDate>
     <sparkle:version>1</sparkle:version>
     <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
     <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
     <description><![CDATA[<ul><li>Initial public release.</li><li>- Native macOS terminal workbench: Ghostty core (libghostty), real AppKit chrome</li><li>- Sessions outlive the app via goty-sessiond (Rust) — quit, crash, or reboot; shells keep running</li><li>- Servers from ~/.ssh/config, each with its own remote daemon and parked sessions</li><li>- Agent awareness: Claude Code, Codex &amp; co. — brand icons, live status, git context</li><li>- @ai inline card: streaming markdown, executable bash/write/edit proposals</li><li>- Themed by your own Ghostty config; Sparkle auto-updates</li></ul>]]></description>
     <enclosure url="https://github.com/seascheng/goty/releases/download/v0.1.0/Goty-0.1.0-arm64.dmg"
                type="application/octet-stream"
-               sparkle:edSignature="R8a7c5HdrD3XqNs8F8G8BKimcj9vybTqwESCYH8p1jK8ZmqSJKZhE3IZlt6sbxY+StG0bnu05JQaAC0yqOLEAA=="
-               length="12904565" />
+               sparkle:edSignature="jU/8fQwnITub6Vt5rZIJ5Dg6AXkpa0thvdYy5TPMs2hMcrtfyGpzU7CopfKVGRvXbGdJPteKH+F27sbnFC8KDA=="
+               length="12900296" />
   </item>
   </channel>
 </rss>
