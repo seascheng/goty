@@ -27,7 +27,14 @@ def is_monochrome(png: Path) -> bool:
     try:
         from PIL import Image
     except ImportError:
-        return False
+        # A silent False here misclassifies every monochrome glyph as a
+        # color brand: maskKinds regenerates EMPTY, the glyphs render as
+        # native black lines, and on a dark sidebar they vanish (the
+        # black-agent-icons bug). Fail the build instead.
+        raise SystemExit(
+            "is_monochrome needs Pillow; run via:\n"
+            "  python3 -m pip install --user pillow\n"
+            "then regenerate")
     with Image.open(png) as im:
         im = im.convert("RGBA")
         for r, g, b, a in im.getdata():

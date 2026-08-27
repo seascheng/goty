@@ -22,8 +22,19 @@ cargo build --release --manifest-path sessiond/Cargo.toml
 # regenerate: mtime-based skipping missed asset swaps with preserved
 # timestamps (stale color icons shipped while Assets held new monochrome
 # ones). The generator reads ~30 small PNGs — negligible.
+#
+# Pillow is REQUIRED for the monochrome-mask classification: without it
+# the old generator silently classified every glyph as a color brand and
+# shipped black icons on dark sidebars. The generator now fails loudly;
+# keep a dedicated venv so the host python stays untouched (created on
+# first build, network needed once).
 if command -v python3 >/dev/null 2>&1; then
-    python3 tools/gen_agent_icons.py
+    ICON_VENV=tools/.icon-venv
+    if ! "$ICON_VENV/bin/python" -c "import PIL" >/dev/null 2>&1; then
+        python3 -m venv "$ICON_VENV"
+        "$ICON_VENV/bin/pip" install -q pillow
+    fi
+    "$ICON_VENV/bin/python" tools/gen_agent_icons.py
 fi
 
 # Sparkle (auto-update): pinned release fetched on demand (gitignored,

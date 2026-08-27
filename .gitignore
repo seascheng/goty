@@ -5,6 +5,7 @@ swift-app/Goty.app/
 swift-app/sessiond/target/
 swift-app/CGhostty/lib/
 swift-app/vendor-sparkle/
+swift-app/tools/.icon-venv/
 dist/
 swift-app/*.o
 .DS_Store

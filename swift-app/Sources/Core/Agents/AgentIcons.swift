@@ -25,7 +25,7 @@ enum AgentBrandIcons {
     /// Brands whose glyph is a pure monochrome mask (black lines +
     /// alpha): rendered as template so the host tints them — white on a
     /// dark sidebar. Everything else keeps its native palette.
-    static let maskKinds: Set<String> = []
+    static let maskKinds: Set<String> = ["amp", "claude", "cline", "codex", "copilot", "cursor", "droid", "gemini", "goose", "grok", "kimi", "omp", "opencode", "pi", "qwen"]
 
     /// 18pt image with one pixel-exact rep per display scale; the
     /// sidebar slot maps 1:1 onto the backing store, no resampling.
