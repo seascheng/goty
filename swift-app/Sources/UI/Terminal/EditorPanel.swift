@@ -49,8 +49,8 @@ final class EditorPanelView: NSView {
     private let headerBackground = NSView()
     private let nameLabel = NSTextField(labelWithString: "No file open")
     private let dirtyDot = NSView(frame: NSRect(x: 0, y: 0, width: 6, height: 6))
-    private let reloadButton = ClosureButton()
-    private let keepButton = ClosureButton()
+    private let reloadButton = ChromeButton(title: "Reload", style: .ghost, compact: true)
+    private let keepButton = ChromeButton(title: "Keep Mine", style: .ghost, compact: true)
     private let scrollView = NSScrollView()
     /// Line-number gutter (tty7 Input line_number(true)): a sibling
     /// column that draws one number per LOGICAL line, synced to the
@@ -73,11 +73,11 @@ final class EditorPanelView: NSView {
     }()
     private let statusBar = NSView()
     private let pathLabel = NSTextField(labelWithString: "")
-    private let wrapButton = ClosureButton()
+    private let wrapButton = ChromeButton(title: "Wrap: Off", style: .ghost, compact: true)
     private let cursorLabel = NSTextField(labelWithString: "")
     private let emptyLabel = NSTextField(labelWithString: "Open a file from the tree")
-    private let saveButton = ClosureButton()
-    private let previewButton = ClosureButton()
+    private let saveButton = ChromeButton(title: "Save", style: .primary)
+    private let previewButton = ChromeButton(title: "Preview", style: .ghost)
     private let previewScroll = NSScrollView()
     private let previewTextView: MarkdownPreviewTextView = {
         // Same TextKit1-by-construction as the editor body (see above).
@@ -119,8 +119,8 @@ final class EditorPanelView: NSView {
     /// ponytail: nameLabel/dirtyDot assume their init-time semantic
     /// colors — state-driven recolors win on their next state change.
     @objc private func themeChanged() {
-        layer?.backgroundColor = Chrome.theme.background.cgColor
-        headerBackground.layer?.backgroundColor = Chrome.theme.topBarBackground.cgColor
+        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        headerBackground.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         nameLabel.textColor = Chrome.theme.secondaryText
         applyFont()
     }
@@ -128,14 +128,14 @@ final class EditorPanelView: NSView {
         super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.backgroundColor = Chrome.theme.background.cgColor
+        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
         NotificationCenter.default.addObserver(
             self, selector: #selector(themeChanged),
             name: Chrome.themeDidChange, object: nil)
 
         // Header: filename, dirty dot, close (= back to terminal).
         headerBackground.wantsLayer = true
-        headerBackground.layer?.backgroundColor = Chrome.theme.topBarBackground.cgColor
+        headerBackground.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         headerBackground.translatesAutoresizingMaskIntoConstraints = false
         addSubview(headerBackground)
 
@@ -161,11 +161,9 @@ final class EditorPanelView: NSView {
         }
         close.toolTip = "Back to terminal (Esc)"
         headerBackground.addSubview(close)
-        saveButton.applyStandardStyle(title: "Save")
         saveButton.onClick = { [weak self] in self?.save() }
         headerBackground.addSubview(saveButton)
 
-        previewButton.applyStandardStyle(title: "Preview")
         previewButton.onClick = { [weak self] in self?.togglePreview() }
         previewButton.isHidden = true
         headerBackground.addSubview(previewButton)
@@ -256,7 +254,7 @@ final class EditorPanelView: NSView {
 
         // Status bar: path, wrap toggle, Ln/Col (tty7 26pt strip).
         statusBar.wantsLayer = true
-        statusBar.layer?.backgroundColor = Chrome.theme.topBarBackground.cgColor
+        statusBar.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         statusBar.translatesAutoresizingMaskIntoConstraints = false
         addSubview(statusBar)
 
@@ -276,7 +274,6 @@ final class EditorPanelView: NSView {
         pathLabel.translatesAutoresizingMaskIntoConstraints = false
         statusBar.addSubview(pathLabel)
 
-        wrapButton.applyStatusBarStyle(title: "Wrap: Off")
         wrapButton.onClick = { [weak self] in self?.toggleWrap() }
         statusBar.addSubview(wrapButton)
 
@@ -284,13 +281,10 @@ final class EditorPanelView: NSView {
         cursorLabel.textColor = Chrome.theme.secondaryText
         cursorLabel.translatesAutoresizingMaskIntoConstraints = false
         statusBar.addSubview(cursorLabel)
-
-        reloadButton.applyStatusBarStyle(title: "Reload")
         reloadButton.onClick = { [weak self] in self?.reloadFromDisk() }
         reloadButton.isHidden = true
         statusBar.addSubview(reloadButton)
 
-        keepButton.applyStatusBarStyle(title: "Keep Mine")
         keepButton.onClick = { [weak self] in
             guard let self, let f = self.currentFile else { return }
             f.conflict = false
@@ -671,13 +665,13 @@ final class EditorPanelView: NSView {
                             color: Chrome.theme.foreground)
                     }))
         }
-        previewScroll.isHidden = !f.preview
+        wrapButton.setTitle(f.wrap ? "Wrap: On" : "Wrap: Off")
         scrollView.isHidden = f.preview
     }
 
     private func applyWrap() {
         guard let f = currentFile else { return }
-        wrapButton.title = f.wrap ? "Wrap: On" : "Wrap: Off"
+        wrapButton.setTitle(f.wrap ? "Wrap: On" : "Wrap: Off")
         if f.wrap {
             textView.isHorizontallyResizable = false
             textView.textContainer?.widthTracksTextView = true
@@ -836,7 +830,7 @@ final class EditorPanelView: NSView {
         dirtyDot.isHidden = !f.dirty
         saveButton.isEnabled = f.dirty && !saving
         previewButton.isHidden = !Self.isMarkdown(f.path)
-        previewButton.title = f.preview ? "Edit" : "Preview"
+        previewButton.setTitle(f.preview ? "Edit" : "Preview")
         reloadButton.isHidden = !f.conflict
         keepButton.isHidden = !f.conflict
         pathLabel.textColor = f.conflict
@@ -847,7 +841,7 @@ final class EditorPanelView: NSView {
         wrapButton.isHidden = f.preview
         scrollView.isHidden = f.preview
         gutter.isHidden = f.preview
-        wrapButton.title = f.wrap ? "Wrap: On" : "Wrap: Off"
+        wrapButton.setTitle(f.wrap ? "Wrap: On" : "Wrap: Off")
     }
 
 }

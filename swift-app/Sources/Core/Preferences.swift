@@ -17,6 +17,8 @@ final class AppPreferences {
 
     private enum Key {
         static let sidebarCollapsed = "sidebarCollapsed"
+        static let serversCollapsed = "serversCollapsed"
+        static let foldedSpaces = "foldedSpaces"
         static let editorFontSize = "editorFontSize"
         static let sidebarWidth = "sidebarWidth"
         static let rightPanelVisible = "rightPanelVisible"
@@ -34,6 +36,9 @@ final class AppPreferences {
         self.defaults = defaults
         // Load once; property observers persist every change.
         sidebarCollapsed = defaults.bool(forKey: Key.sidebarCollapsed)
+        serversCollapsed = defaults.bool(forKey: Key.serversCollapsed)
+        foldedSpaces = (defaults.data(forKey: Key.foldedSpaces))
+            .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
         sidebarWidth = defaults.double(forKey: Key.sidebarWidth) >= 160
             ? defaults.double(forKey: Key.sidebarWidth) : 200
         rightPanelVisible = defaults.bool(forKey: Key.rightPanelVisible)
@@ -52,6 +57,17 @@ final class AppPreferences {
 
     var sidebarCollapsed: Bool {
         didSet { defaults.set(sidebarCollapsed, forKey: Key.sidebarCollapsed) }
+    }
+    /// SERVERS rows folded away in the sidebar (the header chevron).
+    var serversCollapsed: Bool {
+        didSet { defaults.set(serversCollapsed, forKey: Key.serversCollapsed) }
+    }
+    /// Directory sections (spaces) folded away in the sidebar, by name.
+    /// Stale names (renamed/moved dirs) are harmless — no section, no
+    /// fold; they never match again.
+    var foldedSpaces: [String] {
+        didSet { defaults.set(try? JSONEncoder().encode(foldedSpaces),
+                              forKey: Key.foldedSpaces) }
     }
     var sidebarWidth: Double {
         didSet { defaults.set(sidebarWidth, forKey: Key.sidebarWidth) }

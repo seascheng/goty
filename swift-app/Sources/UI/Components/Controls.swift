@@ -25,7 +25,7 @@ enum ControlMetrics {
 /// (Chrome.theme), so buttons paint their own fill/border/title from
 /// theme tokens. Colors re-apply on viewDidMoveToWindow (the IconButton
 /// rule) so a future ghostty-theme switch repaints on re-present.
-final class ChromeButton: ClosureButton {
+final class ChromeButton: ClosureButton, ThemeRefreshable {
     enum Style {
         /// Filled with the theme accent (ghostty selection-background).
         case primary
@@ -35,6 +35,7 @@ final class ChromeButton: ClosureButton {
     }
 
     private let style: Style
+    private let compact: Bool
     private var titleText: String = ""
 
     static func make(_ title: String, style: Style,
@@ -42,6 +43,14 @@ final class ChromeButton: ClosureButton {
         let b = ChromeButton(title: title, style: style)
         b.onClick = onClick
         return b
+    }
+
+    /// Runtime title change (Preview↔Edit, Wrap On/Off): re-paints the
+    /// themed title — assigning `.title` directly would drop the theme
+    /// color (plain NSAttributedString vs ours).
+    func setTitle(_ t: String) {
+        titleText = t
+        applyTheme()
     }
 
     /// Gate + dim: a disabled action button must LOOK disabled (the
@@ -61,8 +70,9 @@ final class ChromeButton: ClosureButton {
     }
 
 
-    init(title: String, style: Style) {
+    init(title: String, style: Style, compact: Bool = false) {
         self.style = style
+        self.compact = compact
         self.titleText = title
         super.init(frame: .zero)
         // Self-painted chrome: the native bezel must be OFF or macOS
@@ -70,17 +80,22 @@ final class ChromeButton: ClosureButton {
         // different sizes (the 2026-08-24 worktree-window report).
         isBordered = false
         controlSize = .small
-        font = .systemFont(ofSize: 12, weight: .medium)
+        font = .systemFont(ofSize: compact ? 10.5 : 12, weight: .medium)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
         // The component owns its design-system size: every ChromeButton
         // in the product is buttonHeight tall and at least buttonMinWidth
         // wide — call sites position, never resize (2026-08-24 report:
-        // per-call-site sizing grew unequal buttons).
-        widthAnchor.constraint(
-            greaterThanOrEqualToConstant: ControlMetrics.buttonMinWidth).isActive = true
-        heightAnchor.constraint(
-            equalToConstant: ControlMetrics.buttonHeight).isActive = true
+        // per-call-site sizing grew unequal buttons). Compact (status
+        // bars): 22pt, no width floor — the same theming path.
+        if !compact {
+            widthAnchor.constraint(
+                greaterThanOrEqualToConstant: ControlMetrics.buttonMinWidth).isActive = true
+            heightAnchor.constraint(
+                equalToConstant: ControlMetrics.buttonHeight).isActive = true
+        } else {
+            heightAnchor.constraint(equalToConstant: 22).isActive = true
+        }
         applyTheme()
     }
 
@@ -111,10 +126,15 @@ final class ChromeButton: ClosureButton {
         }
     }
 
+    /// ThemeRefreshable: re-paint on the app-wide fan-out — until now
+    /// a flip while the dialog stayed open kept the OLD accent fill.
+    func retheme() { applyTheme() }
+
     private func attributed(_ text: String, color: NSColor) -> NSAttributedString {
         NSAttributedString(
             string: text,
-            attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            attributes: [.font: NSFont.systemFont(ofSize: compact ? 10.5 : 12,
+                                                  weight: .medium),
                          .foregroundColor: color])
     }
 }
@@ -380,10 +400,15 @@ final class ChromeSlider: NSView {
 /// what we set on it. An owned text view (the CommitMessageView
 /// recipe) keeps OUR colors permanently: clear background, theme
 /// selection fill, theme insertion point, no focus ring.
-/// Explicit acts only: Escape fires onEscape, Return fires onReturn.
-final class ChromeInput: NSView, NSTextViewDelegate {
+/// Explicit acts only: Escape fires onEscape, Return fires onReturn
+/// (single line) or makes a newline (multiline — ⌘⏎ fires onCommandReturn).
+/// ThemeRefreshable: the app-wide retheme walk recolors every input.
+final class ChromeInput: NSView, NSTextViewDelegate, ThemeRefreshable {
     var onEscape: (() -> Void)?
     var onReturn: (() -> Void)?
+    /// ⌘⏎ — the multiline commit act (git box). Single-line inputs
+    /// keep the old behavior: ⌘⏎ falls through to onReturn.
+    var onCommandReturn: (() -> Void)?
     /// Fired on every USER edit (tests and programmatic sets call
     /// their own refresh) — the worktree card's live preview.
     var onDidChange: (() -> Void)?
@@ -393,16 +418,44 @@ final class ChromeInput: NSView, NSTextViewDelegate {
         set {
             textView.string = newValue
             updatePlaceholder()
+            refitHeight()
         }
+    }
+
+    /// Textarea sizing: rest at restLines tall, grow with the text's
+    /// newline count, cap at maxLines so the panel's list keeps its
+    /// air (beyond the cap it clips). Single-line boxes never resize.
+    private func refitHeight() {
+        guard multiline, let boxHeight else { return }
+        let lines = max(1, textView.string.split(separator: "\n",
+                                                  omittingEmptySubsequences: false).count)
+        // Textarea: REST at restLines tall, grow past it with the text,
+        // cap at maxLines. Text is top-anchored (set at init).
+        let n = CGFloat(min(max(lines, restLines), maxLines))
+        let lineH = textView.font.map { ceil($0.ascender - $0.descender + $0.leading) } ?? 15
+        boxHeight.constant = max(ControlMetrics.inputHeight,
+                                  Self.multilinePad * 2 + lineH * n)
     }
 
     private let placeholderLabel = NSTextField(labelWithString: "")
     fileprivate let textView = InputTextView()
+    private static let multilinePad: CGFloat = 5
     private let placeholderText: String
     private var iconView: NSImageView?
+    /// Multiline (git commit box): wraps, Return makes a newline, the
+    /// box grows line by line to maxLines (tty7's arithmetic — one line
+    /// at rest so the panel's list keeps its air).
+    private let multiline: Bool
+    private let maxLines: Int
+    private var boxHeight: NSLayoutConstraint?
+    private let restLines: Int
 
-    init(placeholder: String = "", icon: String? = nil) {
+    init(placeholder: String = "", icon: String? = nil,
+         multiline: Bool = false, restLines: Int = 3, maxLines: Int = 6) {
         self.placeholderText = placeholder
+        self.multiline = multiline
+        self.restLines = restLines
+        self.maxLines = maxLines
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
@@ -415,7 +468,8 @@ final class ChromeInput: NSView, NSTextViewDelegate {
         let container = NSTextContainer(
             size: NSSize(width: CGFloat.greatestFiniteMagnitude,
                         height: ControlMetrics.inputHeight))
-        container.widthTracksTextView = false   // no wrap — clip instead
+        container.widthTracksTextView = multiline   // wrap in multiline, clip single-line
+        if multiline { container.heightTracksTextView = true }
         let layout = NSLayoutManager()
         storage.addLayoutManager(layout)
         layout.addTextContainer(container)
@@ -428,26 +482,37 @@ final class ChromeInput: NSView, NSTextViewDelegate {
         textView.drawsBackground = false
         textView.backgroundColor = .clear
         textView.focusRingType = .none
-        textView.isVerticallyResizable = false
-        textView.isHorizontallyResizable = true
+        textView.isVerticallyResizable = multiline
+        textView.isHorizontallyResizable = !multiline
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
-                                  height: ControlMetrics.inputHeight)
-        textView.autoresizingMask = [.width]
+                                  height: multiline ? CGFloat.greatestFiniteMagnitude
+                                                    : ControlMetrics.inputHeight)
+        textView.autoresizingMask = multiline ? [] : [.width]
         textView.textContainerInset = .zero
         textView.textContainer?.lineFragmentPadding = 0
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
         textView.font = .systemFont(ofSize: 12.5, weight: .regular)
         // NSTextView starts its first line at the TOP of its bounds;
-        // center the single line by insetting half the slack (the
-        // CommitMessageView lesson — without this the text hugs the
-        // top edge of the input).
+        // single-line boxes center the line by insetting half the slack
+        // (without this the text hugs the top edge of the input).
         let lineHeight = layout.defaultLineHeight(
             for: .systemFont(ofSize: 12.5, weight: .regular))
+        // Single line: center the line in the fixed-height box. Multiline:
+        // a small vertical pad — the box grows with the text instead.
         textView.textContainerInset = NSSize(
-            width: 0, height: max(0, (ControlMetrics.inputHeight - lineHeight) / 2))
+            width: 0,
+            height: multiline ? Self.multilinePad
+                              : max(0, (ControlMetrics.inputHeight - lineHeight) / 2))
+        if multiline {
+            textView.swallowsReturn = false   // Return is a newline; ⌘⏎ commits
+            boxHeight = heightAnchor.constraint(
+                equalToConstant: ControlMetrics.inputHeight)
+            boxHeight?.isActive = true
+        }
         textView.onKeyEscape = { [weak self] in self?.onEscape?() }
         textView.onKeyReturn = { [weak self] in self?.onReturn?() }
+        textView.onCommandReturn = { [weak self] in self?.onCommandReturn?() }
         textView.onFocusChange = { [weak self] _ in self?.updatePlaceholder() }
         textView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(textView)
@@ -485,8 +550,19 @@ final class ChromeInput: NSView, NSTextViewDelegate {
             textView.topAnchor.constraint(equalTo: topAnchor),
             textView.bottomAnchor.constraint(equalTo: bottomAnchor),
             placeholderLabel.leadingAnchor.constraint(equalTo: textLeading, constant: textLeadingConstant),
-            placeholderLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        // Single-line: the box centers its line, so the box center is
+        // the line center. Multiline (textarea): text is TOP-anchored —
+        // the placeholder sits on the first line, where the caret will
+        // land, not on the box's center.
+        placeholderLabel.centerYAnchor.constraint(
+            equalTo: multiline ? textView.topAnchor : centerYAnchor,
+            constant: multiline ? Self.multilinePad + lineHeight / 2 : 0
+        ).isActive = true
+        if multiline {
+            textView.textContainerInset = NSSize(width: 0, height: Self.multilinePad)
+            refitHeight()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
@@ -531,14 +607,16 @@ final class ChromeInput: NSView, NSTextViewDelegate {
     }
 
     func textDidChange(_ notification: Notification) {
-        // Single line, always: pasted newlines become spaces.
-        if textView.string.contains(where: { $0 == "\n" || $0 == "\r" }) {
+        // Single line, always: pasted newlines become spaces. Multiline
+        // keeps them (that's the point) — and the box refits.
+        if !multiline, textView.string.contains(where: { $0 == "\n" || $0 == "\r" }) {
             textView.string = textView.string
                 .replacingOccurrences(of: "\r\n", with: " ")
                 .replacingOccurrences(of: "\n", with: " ")
                 .replacingOccurrences(of: "\r", with: " ")
         }
         updatePlaceholder()
+        refitHeight()
         onDidChange?()
     }
 
@@ -561,12 +639,13 @@ final class ChromeInput: NSView, NSTextViewDelegate {
         focus()
         textView.selectAll(nil)
     }
-
-
     fileprivate final class InputTextView: NSTextView {
         var onKeyEscape: (() -> Void)?
         var onKeyReturn: (() -> Void)?
+        var onCommandReturn: (() -> Void)?
         var onFocusChange: ((Bool) -> Void)?
+        /// false in multiline boxes: plain Return inserts a newline.
+        var swallowsReturn = true
 
         override func becomeFirstResponder() -> Bool {
             let ok = super.becomeFirstResponder()
@@ -585,8 +664,16 @@ final class ChromeInput: NSView, NSTextViewDelegate {
         }
 
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
-            if event.keyCode == 36 {   // Return commits (explicit act)
-                onKeyReturn?()
+            if event.keyCode == 36 {   // Return
+                // ⌘⏎ is the multiline commit act when wired; single-line
+                // callers never wire it and keep the old fallthrough.
+                if event.modifierFlags.contains(.command), let onCommandReturn {
+                    onCommandReturn()
+                    return true
+                }
+                // Multiline: let the text view insert the newline.
+                if !swallowsReturn { return false }
+                onKeyReturn?()   // explicit act
                 return true
             }
             return super.performKeyEquivalent(with: event)

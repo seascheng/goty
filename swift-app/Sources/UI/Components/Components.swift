@@ -6,17 +6,52 @@ import AppKit
 /// Static glyph view (NOT a button): theme-tinted SF Symbol at an
 /// explicit size, density-aware — the one way rows, headers and tiles
 /// place decorative icons. Use `IconButton` when it clicks.
-final class IconLabel: NSImageView {
+final class IconLabel: NSImageView, ThemeRefreshable {
+    private var explicitTint: NSColor?
     convenience init(_ symbol: String, pointSize: CGFloat = 12,
                      weight: NSFont.Weight = .regular, tint: NSColor? = nil) {
         let base = NSImage(systemSymbolName: symbol, accessibilityDescription: symbol)
         self.init(image: base ?? NSImage())
         symbolConfiguration = .init(pointSize: pointSize, weight: weight)
+        explicitTint = tint
         contentTintColor = tint ?? Chrome.theme.iconTint
         imageScaling = .scaleProportionallyUpOrDown
         unregisterDraggedTypes()
         translatesAutoresizingMaskIntoConstraints = false
     }
+
+    /// ThemeRefreshable: decorative glyphs re-tint with the theme
+    /// (branch icon in the git header) unless the call site chose a
+    /// color — same rule as IconButton.
+    func retheme() { contentTintColor = explicitTint ?? Chrome.theme.iconTint }
+}
+
+/// The ONE window-title label — the main window's "Goty" recipe:
+/// 12pt medium, secondaryText, theme-follows on the fan-out. Every
+/// titled window's band label (main, SETTINGS, SSH HOSTS) uses this;
+/// per-window attributed strings drifted into three different looks
+/// that followed the theme three different ways.
+final class ChromeTitleLabel: NSTextField, ThemeRefreshable {
+    init(_ title: String) {
+        super.init(frame: .zero)
+        isEditable = false
+        isSelectable = false
+        isBordered = false
+        drawsBackground = false
+        stringValue = title
+        font = .systemFont(ofSize: 12, weight: .medium)
+        textColor = Chrome.theme.secondaryText
+        lineBreakMode = .byTruncatingMiddle
+        maximumNumberOfLines = 1
+        cell?.truncatesLastVisibleLine = true
+        // TAMIC=false or every position constraint on this label loses
+        // to the autoresizing mask (the "title under the lights" report).
+        translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
+
+    func retheme() { textColor = Chrome.theme.secondaryText }
 }
 
 /// Menu-item icon: palette-tinted SF Symbol at menu scale (crisp).
@@ -66,9 +101,15 @@ final class ActionMenuItem: NSMenuItem {
 
     @objc private func fire() { onFire?() }
 }
-final class IconButton: NSView {
+final class IconButton: NSView, ThemeRefreshable {
     var onClick: (() -> Void)?
     var tint: NSColor = .secondaryLabelColor { didSet { applyIcon() } }
+    /// True while the tile still owns the make()-time themed tint.
+    /// A call site that assigns its own color sets this false so the
+    /// theme fan-out leaves it alone; every other tile re-tints on
+    /// every flip (the SettingsNavRow rule) instead of keeping its
+    /// baked color — the light-theme-invisible titlebar buttons.
+    var usesThemeTint = true
     /// Explicit glyph point size (tty7: 13pt on 32pt tiles).
     var pointSize: CGFloat = 13 { didSet { applyIcon() } }
     var symbol: String = "plus" { didSet { applyIcon() } }
@@ -158,6 +199,13 @@ final class IconButton: NSView {
         b.onClick = onClick
         b.translatesAutoresizingMaskIntoConstraints = false
         return b
+    }
+
+    /// ThemeRefreshable: re-tint on the app-wide fan-out (titlebar
+    /// toggles, sidebar +, git chevron, row action strips).
+    func retheme() {
+        guard usesThemeTint else { return }
+        tint = Chrome.theme.iconTint
     }
 }
 

@@ -155,7 +155,12 @@ import Foundation
         _ = lt.filter([0x0D])
         check(pending == 3, "ctrl-r recall defers")
         type("@ai typed after recall\r")    // ctrl-u was NOT sent; fresh typed line
-        check(fired.last == "typed after recall", "typed trigger still wins after recalls")
+        type("@ai 测试一下")
+        _ = lt.filter([0x7F])   // backspace over a multibyte char
+        _ = lt.filter([0x7F])   // and again
+        type("好\r")
+        check(fired.last == "测试好",
+              "backspace removes whole CJK chars (no dangling UTF-8 lead)")
 
         print("— Screen-row matcher —")
         check(LineTrigger.requestFromScreenRow("➜  goty git:(main) ✗ @ai 测试一下") == "测试一下",

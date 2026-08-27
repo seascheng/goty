@@ -48,10 +48,10 @@ final class SettingsRootView: NSView, ThemeRefreshable {
     private var searchQuery = ""
     private let searchField = ChromeInput(placeholder: "Search settings", icon: "magnifyingglass")
     private var sectionRows: [SettingsSectionRow] = []
-    private let pageHost = NSView()  // no scrollview: pages are fixed row lists that always fit
+    private let pageScroll = NSScrollView()  // search pages can outgrow the viewport — scroll, never resize the window
     // Chrome baked at init but re-baked by retheme() (theme flips).
     private let headerStrip = NSView()
-    private let windowTitle = NSTextField(labelWithString: "")
+    private let windowTitle = ChromeTitleLabel("SETTINGS")
     private let pathLabel = NSTextField(labelWithString: "")
     private let listColumn = NSView()
     private let statusBar = NSView()
@@ -67,16 +67,12 @@ final class SettingsRootView: NSView, ThemeRefreshable {
         // Top strip (44pt): window title + config path — the traffic
         // lights' band (transparent titlebar, app chrome).
         headerStrip.wantsLayer = true
-        headerStrip.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        headerStrip.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         headerStrip.translatesAutoresizingMaskIntoConstraints = false
         addSubview(headerStrip)
 
-        let windowTitle = NSTextField(labelWithString: "SETTINGS")
-        windowTitle.attributedStringValue = NSAttributedString(
-            string: "SETTINGS",
-            attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-                         .foregroundColor: Chrome.theme.foreground,
-                         .kern: 0.8])
+        // TAMIC is the component's job (it remembers the "title under
+        // the lights" report); here only placement remains.
         headerStrip.addSubview(windowTitle)
 
         let home = NSHomeDirectory()
@@ -98,7 +94,7 @@ final class SettingsRootView: NSView, ThemeRefreshable {
         // Left column: search box (tty7's settings search) + sections.
         listColumn.translatesAutoresizingMaskIntoConstraints = false
         listColumn.wantsLayer = true
-        listColumn.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        listColumn.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         addSubview(listColumn)
 
         searchField.onDidChange = { [weak self] in
@@ -135,17 +131,20 @@ final class SettingsRootView: NSView, ThemeRefreshable {
         divider.translatesAutoresizingMaskIntoConstraints = false
         addSubview(divider)
 
-        // Right column: the page host. No scrollview — every section
-        // is a fixed list of ≤6 rows (≈350pt) that fits the window;
-        // scroll chrome for fitting content is noise (user report).
-        pageHost.wantsLayer = true
-        pageHost.layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
-        pageHost.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(pageHost)
+        // Right column: the page host. Section pages are fixed row
+        // lists, but a SEARCH page (a 1-char query matches dozens of
+        // specs) can outgrow the viewport — the host scrolls instead
+        // of resizing the window (the "window became very long"
+        // report: the root's fitting size WAS the window's).
+        pageScroll.hasVerticalScroller = true
+        pageScroll.autohidesScrollers = true
+        pageScroll.drawsBackground = false
+        pageScroll.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(pageScroll)
 
         // Status bar across the bottom (tty7 26pt strip).
         statusBar.wantsLayer = true
-        statusBar.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        statusBar.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         statusBar.translatesAutoresizingMaskIntoConstraints = false
         addSubview(statusBar)
         hintLabel.stringValue = "Changes write the config file and apply to open terminals immediately."
@@ -179,10 +178,10 @@ final class SettingsRootView: NSView, ThemeRefreshable {
             divider.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
             divider.widthAnchor.constraint(equalToConstant: 1),
 
-            pageHost.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
-            pageHost.topAnchor.constraint(equalTo: headerStrip.bottomAnchor),
-            pageHost.trailingAnchor.constraint(equalTo: trailingAnchor),
-            pageHost.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+            pageScroll.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
+            pageScroll.topAnchor.constraint(equalTo: headerStrip.bottomAnchor),
+            pageScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pageScroll.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
             statusBar.bottomAnchor.constraint(equalTo: bottomAnchor),
             statusBar.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -242,15 +241,9 @@ final class SettingsRootView: NSView, ThemeRefreshable {
     /// search box, and reload the page (its rows build fresh anyway).
     func retheme() {
         layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
-        headerStrip.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
-        listColumn.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
-        pageHost.layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
-        statusBar.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
-        windowTitle.attributedStringValue = NSAttributedString(
-            string: "SETTINGS",
-            attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-                         .foregroundColor: Chrome.theme.foreground,
-                         .kern: 0.8])
+        headerStrip.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
+        listColumn.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
+        statusBar.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         pathLabel.textColor = Chrome.theme.secondaryText
         hintLabel.textColor = Chrome.theme.secondaryText
         searchField.retheme()
@@ -278,13 +271,12 @@ final class SettingsRootView: NSView, ThemeRefreshable {
         currentPage?.removeFromSuperview()
         let page = searchQuery.isEmpty ? buildPage(section) : searchPage(searchQuery)
         page.translatesAutoresizingMaskIntoConstraints = false
-        pageHost.addSubview(page)
-        NSLayoutConstraint.activate([
-            page.leadingAnchor.constraint(equalTo: pageHost.leadingAnchor),
-            page.trailingAnchor.constraint(equalTo: pageHost.trailingAnchor),
-            page.topAnchor.constraint(equalTo: pageHost.topAnchor),
-            page.bottomAnchor.constraint(equalTo: pageHost.bottomAnchor),
-        ])
+        pageScroll.documentView = page
+        // Width tracks the clip view (never a horizontal scrollbar);
+        // height stays free — tall search results SCROLL, they don't
+        // grow the window.
+        page.widthAnchor.constraint(
+            equalTo: pageScroll.contentView.widthAnchor).isActive = true
         currentPage = page
     }
 
@@ -838,9 +830,9 @@ final class SettingsRootView: NSView, ThemeRefreshable {
     // Test surface (headless harness).
     var sectionRowCountForTest: Int { sectionRows.count }
     var currentPageForTest: SettingsFormPage? {
-        pageHost.subviews.compactMap { $0 as? SettingsFormPage }.last
+        pageScroll.documentView as? SettingsFormPage
     }
-    var pageHostForTest: NSView { pageHost }
+    var pageHostForTest: NSView { pageScroll }
     func selectForTest(_ s: SettingsSection) { select(s) }
     /// Types a query exactly as the field would (didChange → rebuild).
     func searchForTest(_ q: String) {
@@ -888,7 +880,12 @@ final class SettingsWindowController: NSObject {
         // the file/live config path it already owns.
         let translucent = (root.resolvedDouble("background-opacity") ?? 1) < 0.999
         window.isOpaque = !translucent
-        window.backgroundColor = translucent ? .clear : nil
+        // .clear, NOT ghostty's white@0.001: white flips our CA layers to
+        // LINEAR compositing while the terminal surface stays gamma — the
+        // whole dialog reads lighter than the terminal (see
+        // AppWindowController.applyChromeTheme). Settings has no surface,
+        // but parity with the MAIN window's chrome is the same contract.
+        window.backgroundColor = translucent ? .clear : Chrome.theme.background
         if translucent, let gapp = root.liveAppForTranslucency?() {
             ghostty_set_window_background_blur(
                 gapp, Unmanaged.passUnretained(window).toOpaque())

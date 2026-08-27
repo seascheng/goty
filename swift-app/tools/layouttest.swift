@@ -20,23 +20,80 @@ func run() {
         if cond { print("  ok  \(name)") } else { failures += 1; print("FAIL  \(name)") }
     }
 
-        // — AITaskCard hit-testing: markdown box selectability —
+        // — AITaskCard: markdown flows INLINE (selectable label) —
         do {
             let card = AITaskCard(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
             card.renderForTest(markdown: "## head\n\nbody **bold** text\n\n- one\n- two\n")
             card.layoutSubtreeIfNeeded()
-            let box = card.firstSubviewOfType(AIMarkdownBox.self)
-            check(box != nil, "AI card builds a markdown box")
-            check(card.isTextViewSelectableForTest, "AI answer text is selectable")
-            if let box {
-                let p = card.convert(NSPoint(x: box.bounds.midX, y: box.bounds.midY), from: box)
+            check(card.isTextViewSelectableForTest, "AI markdown renders as a selectable inline field")
+            if let field = card.selectableFieldForTest {
+                let p = card.convert(NSPoint(x: field.bounds.midX, y: field.bounds.midY), from: field)
                 let hit = card.hitTest(p)
                 let chain = hit.map { String(describing: type(of: $0)) } ?? "nil"
-                check(chain.contains("TextView"), "hit-test reaches the text view (got \(chain))")
+                check(chain.contains("Field"), "hit-test reaches the text field (got \(chain))")
             }
         }
 
-    // assertions below describe the fully-open window.
+        // — Sidebar SERVERS fold: chevron hides the rows, not the header —
+        do {
+            let sidebar = SidebarView()
+            let servers = [
+                WorkspaceState(id: UUID(), name: "Local", tabs: [], focusedTabIndex: 0, sshHost: nil),
+                WorkspaceState(id: UUID(), name: "box", tabs: [], focusedTabIndex: 0, sshHost: "box"),
+            ]
+            sidebar.renderWorkspaces(servers, focusedIndex: 0)
+            check(sidebar.wsRowsForTest.count == 2, "SERVERS lists both workspaces")
+            check(sidebar.wsRowsForTest.allSatisfy { !$0.isHidden }, "rows visible while expanded")
+            var fired: Bool?
+            sidebar.onServersExpandChange = { fired = $0 }
+            sidebar.setServersExpanded(false)
+            check(sidebar.wsRowsForTest.allSatisfy { $0.isHidden }, "fold hides every server row")
+            check(!sidebar.wsHeaderForTest.isHidden, "fold keeps the SERVERS header")
+            check(fired == false, "fold reports the expansion change")
+            sidebar.setServersExpanded(true)
+            check(sidebar.wsRowsForTest.allSatisfy { !$0.isHidden }, "expand restores the rows")
+            // A data pass under a fold rebuilds rows — they must stay hidden.
+            sidebar.setServersExpanded(false)
+            sidebar.renderWorkspaces(servers, focusedIndex: 0)
+            check(sidebar.wsRowsForTest.allSatisfy { $0.isHidden }, "rebuilt rows honor the fold")
+        }
+        // — Sidebar per-space fold: one directory section folds alone —
+        do {
+            let sidebar = SidebarView()
+            func spaceTab(_ id: String, _ cwd: String) -> TabState {
+                TabState(id: id, name: id, panes: [PaneState(id: "p-\(id)", cwd: cwd)])
+            }
+            var ws = WorkspaceState(id: UUID(), name: "local",
+                tabs: [spaceTab("a", "/tmp/fold-a"), spaceTab("b", "/tmp/fold-a"),
+                       spaceTab("c", "/tmp/fold-b")],
+                focusedTabIndex: 0, sshHost: nil)
+            sidebar.render(workspace: ws)
+            check(sidebar.tabsRowsForTest.count == 3, "two spaces render three rows")
+            check(sidebar.tabsRowsForTest.allSatisfy { !$0.isHidden }, "rows visible while expanded")
+            var fired: [String]?
+            sidebar.onSpaceFoldsChange = { fired = $0 }
+            sidebar.toggleSpaceFold("/tmp/fold-a")
+            check(fired == ["/tmp/fold-a"], "fold reports the folded space")
+            check(sidebar.tabsVisibleForTest.count == 4,
+                  "visible = other rows + both headers + its gap")
+            // A new tab in the folded space re-renders — it must land hidden.
+            // Section regrouping puts d INSIDE fold-a: row order a, b, d, c.
+            ws.tabs.append(spaceTab("d", "/tmp/fold-a"))
+            sidebar.render(workspace: ws)
+            let rows = sidebar.tabsRowsForTest
+            check(rows.count == 4 && rows[0].isHidden && rows[1].isHidden
+                  && rows[2].isHidden && !rows[3].isHidden,
+                  "rebuilt rows honor the fold (new tab included)")
+            // Fold BOTH sections (fold-a still folded): the spacing
+            // tiles must stay — a folded header keeps its distance from
+            // the section above.
+            sidebar.toggleSpaceFold("/tmp/fold-b")
+            check(sidebar.tabsVisibleForTest.count == 3,
+                  "folded sections keep their spacing tiles (2 headers + 1 gap)")
+            sidebar.toggleSpaceFold("/tmp/fold-a")
+            sidebar.toggleSpaceFold("/tmp/fold-b")
+            check(sidebar.tabsRowsForTest.allSatisfy { !$0.isHidden }, "expand restores every row")
+        }
     let d = UserDefaults.standard
     d.set(false, forKey: "sidebarCollapsed")
     d.set(200.0, forKey: "sidebarWidth")
@@ -1130,13 +1187,19 @@ func run() {
     func wtRows(_ v: NSView) -> [WorktreeRowView] {
         v.subviews.compactMap { $0 as? WorktreeRowView } + v.subviews.flatMap(wtRows)
     }
+    /// Wall-clock settle: `run(mode:before:)` returns on ANY event, so
+    /// a round-count budget collapses to milliseconds under event churn
+    /// (the 2026-08-27 load-13 failures: 500 nominal rounds ran in
+    /// ~1s). Rounds now only size the slices; the deadline is real.
     func settle(_ rounds: Int = 24) {
-        for _ in 0..<rounds {
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        let deadline = Date().addingTimeInterval(TimeInterval(rounds) * 0.05)
+        while Date() < deadline {
+            RunLoop.current.run(mode: .default,
+                                before: Date().addingTimeInterval(0.05))
         }
     }
     panel.setTarget(cwd: repoDir, host: nil)
-    settle()
+    settle(60)
     check(rowKeys(panel).contains("hdr:worktrees"),
           "Worktrees group header present")
     let mainRow = wtRows(panel).first { $0.rowKey == "wt:\(repoDir)" }
@@ -1151,12 +1214,12 @@ func run() {
     runsh("cd '\(repoDir)' && git worktree add -q -b side '\(sidePath)'"
           + " && cd '\(repoDir)' && echo b > b.txt && git add b.txt && git commit -qm main-work")
     panel.refresh(force: true)
-    settle()
+    settle(60)
     let sideRow = wtRows(panel).first { $0.rowKey == "wt:\(sidePath)" }
     check(sideRow != nil && sideRow?.buttonsForTest.count == 3,
           "linked worktree row: Open + Merge + Remove (keys=\(rowKeys(panel)), side=\(sidePath))")
     sideRow?.buttonsForTest[1].onClick?()   // Merge
-    settle(40)
+    settle(90)
     func gitOut(_ cmd: String) -> String {
         shOut("cd '\(repoDir)' && " + cmd)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1168,14 +1231,14 @@ func run() {
     // goes, branch stays, row disappears.
     Dialog.presenterOverride = { _, _ in "ok" }
     wtRows(panel).first { $0.rowKey == "wt:\(sidePath)" }?.buttonsForTest[2].onClick?()
-    settle(40)
+    settle(90)
     Dialog.presenterOverride = nil
     check(!FileManager.default.fileExists(atPath: sidePath),
           "worktree directory removed")
     check(gitOut("git branch --list side") == "side",
           "branch kept after worktree remove (branches=\(gitOut("git branch")))")
     panel.refresh(force: true)
-    settle()
+    settle(60)
     check(!rowKeys(panel).contains("wt:\(sidePath)"),
           "row gone after remove")
 
@@ -1185,7 +1248,7 @@ func run() {
     let coord = WorkspaceCoordinator()   // store nil: git effects only
     var createResult: Result<String, ScmOpFailure>?
     coord.createWorktree(name: "two", cwd: repoDir, host: nil) { createResult = $0 }
-    settle(40)
+    settle(90)
     let expectTarget = WorktreePlan.target(root: repoDir, name: "two")
     if case .success(let target)? = createResult {
         check(target == expectTarget,
@@ -1321,7 +1384,7 @@ func run() {
     RepoWatcher.shared.onRootChanged = { watchedRoots.append($0) }
     RepoWatcher.shared.watch(repoDir)
     runsh("cd '\(repoDir)' && echo change > touched.txt")
-    settle(40)   // FSEvents latency 0.4s + delivery
+    settle(90)   // FSEvents latency 0.4s + delivery (heavy-load headroom)
     check(watchedRoots.contains(repoDir),
           "RepoWatcher fires for a local repo change (roots=\(watchedRoots))")
     RepoWatcher.shared.onRootChanged = nil
@@ -1341,7 +1404,7 @@ func run() {
     ScmStore.shared.onRepoUpdated = { _ in repoUpdated = true }
     runsh("cd '\(repoDir)' && echo x > wt-event.txt")
     ScmStore.shared.rootChanged(root: repoDir)
-    settle(40)
+    settle(90)
     check(repoUpdated, "rootChanged refetches and reports")
     panel.refresh(force: false)   // the surface tick: cache read, no exec
     settle()

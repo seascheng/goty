@@ -83,8 +83,19 @@ final class LineTrigger {
                 // (the shell still sees the backspace byte).
                 if line.count > Self.prefix.count {
                     line.removeLast()
-                    while let last = line.last, last & 0xC0 == 0x80, line.count > Self.prefix.count {
-                        line.removeLast()  // UTF-8 continuation
+                    // Remove the WHOLE UTF-8 character, not one byte:
+                    // continuation bytes first, then the LEAD byte they
+                    // belong to. Stopping at the lead byte left it
+                    // dangling and the next append made the line invalid
+                    // UTF-8 → U+FFFD in the card title (the Chinese
+                    // mojibake report).
+                    while let last = line.last, last & 0xC0 == 0x80,
+                          line.count > Self.prefix.count {
+                        line.removeLast()
+                    }
+                    if let last = line.last, last >= 0xC2,
+                       line.count > Self.prefix.count {
+                        line.removeLast()   // lead of the truncated sequence
                     }
                 }
                 out.append(b)

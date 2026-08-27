@@ -1,5 +1,6 @@
 // goty — see CLAUDE.md for the working principles.
 import AppKit
+import GhosttyKit
 
 // MARK: - SSH config manager (standalone window, master-detail)
 
@@ -41,17 +42,11 @@ final class SSHConfigManagerView: NSView {
         // lights' band (transparent titlebar, main-window chrome).
         let headerStrip = NSView()
         headerStrip.wantsLayer = true
-        headerStrip.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        headerStrip.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         headerStrip.translatesAutoresizingMaskIntoConstraints = false
         addSubview(headerStrip)
 
-        let windowTitle = NSTextField(labelWithString: "SSH HOSTS")
-        windowTitle.attributedStringValue = NSAttributedString(
-            string: "SSH HOSTS",
-            attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-                         .foregroundColor: Chrome.theme.foreground,
-                         .kern: 0.8])
-        windowTitle.translatesAutoresizingMaskIntoConstraints = false
+        let windowTitle = ChromeTitleLabel("SSH HOSTS")
         headerStrip.addSubview(windowTitle)
         let home = NSHomeDirectory()
         let rawPath = store.url.path
@@ -111,7 +106,7 @@ final class SSHConfigManagerView: NSView {
         // Status bar across the bottom (tty7 26pt strip).
         let statusBar = NSView()
         statusBar.wantsLayer = true
-        statusBar.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        statusBar.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         statusBar.translatesAutoresizingMaskIntoConstraints = false
         addSubview(statusBar)
         hintLabel.font = .systemFont(ofSize: 10.5)
@@ -391,12 +386,29 @@ final class SSHConfigWindowController: NSObject {
             name: Chrome.themeDidChange, object: nil)
     }
 
+    /// The window follows the config's translucency — the exact
+    /// SettingsWindow/ghostty TerminalWindow recipe: opaque windows
+    /// carry the page color, translucent ones go white@0.001 (NOT
+    /// .clear — transparent black tints the CGS blur's base; see
+    /// applyWindowTranslucency there) + blur, and the manager root's
+    /// single chromeSurface fill composites like the terminal surface.
+    private func applyWindowTranslucency() {
+        let translucent = Chrome.theme.backgroundOpacity < 0.999
+        window.isOpaque = !translucent
+        window.backgroundColor = translucent ? .clear : Chrome.theme.background
+        if translucent, let gapp = liveGhostty?.app {
+            ghostty_set_window_background_blur(
+                gapp, Unmanaged.passUnretained(window).toOpaque())
+        }
+    }
+
     @objc private func themeChanged() {
         window.appearance = NSAppearance(
             named: Chrome.theme.isDark ? .darkAqua : .aqua)
         let fresh = SSHConfigManagerView(store: store)
         window.contentView = fresh
         manager = fresh
+        applyWindowTranslucency()
     }
 
     /// Re-reads the file (see reload()) and brings the window front,
@@ -411,6 +423,7 @@ final class SSHConfigWindowController: NSObject {
         } else {
             window.center()
         }
+        applyWindowTranslucency()
         window.makeKeyAndOrderFront(nil)
     }
 }

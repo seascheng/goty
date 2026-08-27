@@ -7,124 +7,7 @@ import AppKit
 /// ABOVE the terminal surface, never text written into the Ghostty
 /// buffer. The card never becomes firstResponder outside its input and
 /// edit modes, so arrow keys keep reaching the terminal.
-// MARK: - markdown box (shared control: answers render markdown, stay
-// selectable, and scroll instead of clipping)
 
-/// Selectable, non-editable text box that renders markdown via the
-/// editor's renderer and reports its laid-out height as intrinsic —
-/// the stack grows with content up to `maxHeight`, beyond which the
-/// box scrolls internally (the fixed-height clamp used to silently
-/// eat long answers).
-final class AIMarkdownBox: NSView {
-    private let textView = NSTextView()
-    private let scroll = NSScrollView()
-    var maxHeight: CGFloat = 320
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.cornerRadius = 6
-        layer?.backgroundColor = chromeSurface(Chrome.theme.markdownBlockBackground).cgColor
-
-        textView.isEditable = false
-        textView.isSelectable = true
-        textView.isRichText = true
-        textView.drawsBackground = false
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.lineFragmentPadding = 8
-        textView.defaultParagraphStyle = {
-            let p = NSMutableParagraphStyle()
-            p.lineBreakMode = .byWordWrapping
-            return p
-        }()
-
-        scroll.borderType = .noBorder
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = textView
-        addSubview(scroll)
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
-
-    func setMarkdown(_ markdown: String) {
-        textView.textStorage?.setAttributedString(MarkdownRenderer.render(
-            markdown, bodySize: 12.5,
-            highlight: { code, lang in
-                HighlightEngine.highlight(
-                    code, language: lang,
-                    font: .monospacedSystemFont(ofSize: 11.5, weight: .regular),
-                    color: Chrome.theme.foreground)
-            }))
-        invalidateIntrinsicContentSize()
-    }
-
-    func setPlainText(_ text: String, font: NSFont) {
-        textView.textColor = Chrome.theme.foreground
-        textView.font = font
-        textView.string = text
-        invalidateIntrinsicContentSize()
-    }
-
-    var textViewSelectableForTest: Bool { textView.isSelectable }
-
-    override var intrinsicContentSize: NSSize {
-        let container = textView.textContainer ?? NSTextContainer()
-        // NSTextView lays out lazily (on draw); force it or usedRect is
-        // 0 until the first draw — which never comes when the card is
-        // mid-measure.
-        textView.layoutManager?.ensureLayout(for: container)
-        let used = textView.layoutManager?.usedRect(for: container).height ?? 0
-        return NSSize(width: NSView.noIntrinsicMetric,
-                      height: min(maxHeight, ceil(used) + 10))
-    }
-
-    /// Re-derive the text container width from the current frame.
-    /// Called from layout() AND from the owning card before it measures
-    /// fitting height — invalidateIntrinsicContentSize is ignored
-    /// during a layout pass, so the card can't wait for the box to
-    /// invalidate itself.
-    func syncTextContainer() {
-        let clipWidth = scroll.contentView.bounds.width
-        textView.textContainer?.size = NSSize(width: max(clipWidth, 40),
-                                              height: .greatestFiniteMagnitude)
-    }
-
-    override func layout() {
-        super.layout()
-        // Width comes from the stack; keep the container tracking so the
-        // text re-wraps and the intrinsic height stays honest.
-        syncTextContainer()
-        invalidateIntrinsicContentSize()
-    }
-}
-
-// MARK: - small NSView helper
-
-extension NSView {
-    /// Depth-first search for the first descendant of the given type
-    /// (stack-nested cards etc.).
-    func firstSubviewOfType<T: NSView>(_ type: T.Type) -> T? {
-        for v in subviews {
-            if let hit = v as? T { return hit }
-            if let hit = v.firstSubviewOfType(type) { return hit }
-        }
-        return nil
-    }
-}
-
-// MARK: - card
 
 final class AITaskCard: NSView {
     var onConfirm: (() -> Void)?
@@ -132,9 +15,6 @@ final class AITaskCard: NSView {
     var onCancel: (() -> Void)?
     var onContinue: (() -> Void)?
     var onClose: (() -> Void)?
-    /// Fill terminal: emits the proposal's command; the host appends the
-    /// trailing space and sends it as plain input (never auto-runs).
-    var onFill: ((String) -> Void)?
     /// Input mode (⌘⇧A): Enter submits the typed request.
     var onSubmit: ((String) -> Void)?
 
@@ -145,25 +25,20 @@ final class AITaskCard: NSView {
     private var inputMode = false
     private var editMode = false
     private var editingProposal: AIProposal?
-    /// Last bash command seen in a proposal/execution — the Fill
-    /// terminal target after completion.
-    private var lastBashCommand: String?
-    /// Full transcript of the rendered task — the Copy button source.
-    private var lastTranscript: String?
     /// Last rendered task/target — the theme-change re-render source.
     private var lastTask: AITask?
     private var lastTarget: ExecutionTarget?
     private var inputField: ChromeInput?
 
-    /// Transcript for Copy: every round's tool + result, then the
-    /// summary. Mono, plain text — pastes cleanly anywhere.
-    static func transcript(rounds: [AIRound], summary: String) -> String {
-        var lines = rounds.map { r in
-            (r.reasoning.map { "[think] " + $0 + "\n" } ?? "")
-                + "[\(r.toolName ?? "tool")] \(r.toolInput)\n\(r.toolResult)"
-        }
-        lines.append(summary)
-        return lines.joined(separator: "\n\n")
+    /// The Settings-window translucency, exactly: ONE background@opacity
+    /// fill and theme text on top — no blur (the Settings window itself
+    /// runs unblurred: no background-blur in the config). An in-window
+    /// NSVisualEffectView was tried here and STARVED text rendering
+    /// (box paints from layer properties; NSTextFields need display
+    /// passes the effect view's per-frame invalidation ate) — 2026-08-27
+    /// "card shows no text" report.
+    private func applyBackdrop() {
+        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
     }
 
     override init(frame frameRect: NSRect) {
@@ -172,7 +47,7 @@ final class AITaskCard: NSView {
         layer?.cornerRadius = ControlMetrics.radius + 2
         layer?.borderWidth = 1
         layer?.borderColor = Chrome.theme.hairline.cgColor
-        layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        applyBackdrop()
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(themeChanged),
@@ -184,30 +59,91 @@ final class AITaskCard: NSView {
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
+        // Fixed title bar: the question and the always-on close stay
+        // PINNED; only the body scrolls. The old header lived inside
+        // the document and scrolled away with the rounds.
+        titleField.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        titleField.textColor = Chrome.theme.foreground
+        titleField.lineBreakMode = .byTruncatingTail
+        titleField.maximumNumberOfLines = 1
+        titleField.cell?.truncatesLastVisibleLine = true
+        titleField.cell?.wraps = false
+        titleField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        titleField.setContentCompressionResistancePriority(.init(200), for: .horizontal)
+        // The header NEVER yields vertically: when the pane cap binds,
+        // the solver must shrink the BODY scroller (its hug is 999),
+        // not crush the title (labels default to 750 — the "titlebar
+        // collapses at max height" report).
+        titleField.setContentCompressionResistancePriority(.required, for: .vertical)
+        titleField.setContentHuggingPriority(.required, for: .vertical)
+        titleField.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(titleField)
+
+        metaField.font = .systemFont(ofSize: 11)
+        metaField.textColor = Chrome.theme.secondaryText
+        metaField.lineBreakMode = .byTruncatingTail
+        metaField.maximumNumberOfLines = 1
+        metaField.cell?.truncatesLastVisibleLine = true
+        metaField.cell?.wraps = false
+        metaField.setContentCompressionResistancePriority(.init(200), for: .horizontal)
+        metaField.setContentCompressionResistancePriority(.required, for: .vertical)
+        metaField.setContentHuggingPriority(.required, for: .vertical)
+        metaField.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(metaField)
+
+        // Always-on close (title-bar right): closing cancels a running
+        // agent (AppDelegate wires onClose to cancel).
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        closeButton.symbol = "xmark"
+        closeButton.tint = Chrome.theme.secondaryText
+        closeButton.usesThemeTint = false
+        closeButton.pointSize = 12
+        closeButton.onClick = { [weak self] in self?.onClose?() }
+        addSubview(closeButton)
+
+        let headerRule = HairlineView()
+        headerRule.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(headerRule)
+
+        NSLayoutConstraint.activate([
+            titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            titleField.topAnchor.constraint(equalTo: topAnchor, constant: 7),
+            titleField.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -6),
+            metaField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            metaField.topAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 1),
+            metaField.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -6),
+            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            closeButton.centerYAnchor.constraint(equalTo: titleField.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 22),
+            closeButton.heightAnchor.constraint(equalToConstant: 22),
+            headerRule.leadingAnchor.constraint(equalTo: leadingAnchor),
+            headerRule.trailingAnchor.constraint(equalTo: trailingAnchor),
+            headerRule.topAnchor.constraint(equalTo: metaField.bottomAnchor, constant: 6),
+            headerRule.heightAnchor.constraint(equalToConstant: 1),
+        ])
+
         // The stack scrolls instead of crushing: the card hugs its
         // content up to the pane cap (required constraint from the
-        // host), beyond which the body scrolls — long answers used to
-        // get squeezed to one line. Header scrolling away with the
-        // body is fine for v1; split header/footer zones if it bothers.
-        let scroll = NSScrollView()
-        scroll.borderType = .noBorder
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = stack
-        addSubview(scroll)
+        // host), beyond which the BODY scrolls under the fixed header.
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = stack
+        addSubview(scrollView)
         NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
-            stack.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: headerRule.bottomAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            stack.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
         ])
-        let hug = heightAnchor.constraint(equalTo: stack.heightAnchor)
+        // The card = fixed header + body; the body hugs its content
+        // (yielding to the host's pane cap, beyond which it scrolls).
+        let hug = scrollView.heightAnchor.constraint(equalTo: stack.heightAnchor)
         hug.priority = .init(999)   // yield to the pane cap
         hug.isActive = true
         // The stack's height is pinned EXPLICITLY to its fitting
@@ -216,37 +152,20 @@ final class AITaskCard: NSView {
         bodyHeight = stack.heightAnchor.constraint(equalToConstant: 0)
         bodyHeight?.priority = .init(999)   // yield to the pane cap
         bodyHeight?.isActive = true
-
-        // Always-on close (top-right, floats over the scroll body): the
-        // user closes whenever they want — closing cancels a running
-        // agent (AppDelegate wires onClose to cancel). The per-phase
-        // bottom Close buttons went away with it.
-        let close = IconButton()
-        close.translatesAutoresizingMaskIntoConstraints = false
-        close.symbol = "xmark"
-        close.tint = Chrome.theme.secondaryText
-        close.pointSize = 12
-        close.onClick = { [weak self] in self?.onClose?() }
-        addSubview(close)
-        NSLayoutConstraint.activate([
-            close.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            close.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            close.widthAnchor.constraint(equalToConstant: 22),
-            close.heightAnchor.constraint(equalToConstant: 22),
-        ])
     }
 
     private var bodyHeight: NSLayoutConstraint?
+    /// The card's body scroller — the clip view owns scrolling (the
+    /// document view's bounds origin is the clip's to manage).
+    private let scrollView = NSScrollView()
+    /// Fixed title-bar fields (question + meta) — pinned above the
+    /// scrolling body, set by Group.header on every render.
+    private let titleField = NSTextField(labelWithString: "")
+    private let metaField = NSTextField(labelWithString: "")
+    private let closeButton = IconButton()
 
     override func layout() {
         super.layout()
-        // fittingSize honors an active height constraint, so measure
-        // with it detached. Markdown boxes must sync their text
-        // container FIRST (their layout() runs after ours — measuring
-        // against a stale width crushed long answers to one line).
-        for case let box as AIMarkdownBox in stack.subviews {
-            box.syncTextContainer()
-        }
         bodyHeight?.isActive = false
         let fitting = ceil(stack.fittingSize.height)
         bodyHeight?.constant = fitting
@@ -281,7 +200,6 @@ final class AITaskCard: NSView {
             field.onReturn = { [weak self] in self?.submitInput() }
             field.onEscape = { [weak self] in self?.onClose?() }
             self.inputField = field
-            group.add(field)
             field.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
         }
         window?.makeFirstResponder(inputField)
@@ -293,14 +211,13 @@ final class AITaskCard: NSView {
         inputMode = false
         onSubmit?(text)
     }
-
-    // MARK: render
-
     /// Container chrome re-baked + content re-rendered from the stored
     /// task on theme flips (content colors are build-time).
     @objc private func themeChanged() {
+        applyBackdrop()
         layer?.borderColor = Chrome.theme.hairline.cgColor
-        layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        titleField.textColor = Chrome.theme.foreground
+        metaField.textColor = Chrome.theme.secondaryText
         if let task = lastTask, let target = lastTarget {
             render(task: task, target: target)
         }
@@ -328,7 +245,6 @@ final class AITaskCard: NSView {
             }
         case .awaitingConfirmation:
             if let proposal = task.pendingProposal {
-                if case .bash(let command) = proposal.op { lastBashCommand = command }
                 rebuild { group in
                     group.header(question: taskQuestion, target: target,
                                  phase: "confirmation required")
@@ -364,40 +280,21 @@ final class AITaskCard: NSView {
                 }
             }
         case .executing:
-            if case .bash(let command)? = task.pendingProposal?.op { lastBashCommand = command }
             rebuild { group in
                 group.header(question: taskQuestion, target: target, phase: "executing…")
                 group.rounds(task.rounds)
             }
         case .completed(let summary):
-            lastTranscript = Self.transcript(rounds: task.rounds, summary: summary)
             rebuild { group in
                 group.header(question: taskQuestion, target: target, phase: "done")
                 group.rounds(task.rounds)
                 _ = group.markdown(summary)
-                group.buttons {
-                    $0.add("Copy", .ghost) { [weak self] in
-                        guard let text = self?.lastTranscript else { return }
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(text, forType: .string)
-                    }
-                    $0.add("Fill terminal", .ghost) { [weak self] in
-                        guard let cmd = self?.lastBashCommand else { return }
-                        self?.onFill?(cmd)
-                    }
-                }
             }
         case .failed(let message):
-            lastTranscript = message
             rebuild { group in
                 group.header(question: taskQuestion, target: target, phase: "failed")
                 _ = group.markdown(message)
                 group.buttons {
-                    $0.add("Copy", .ghost) { [weak self] in
-                        guard let text = self?.lastTranscript else { return }
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(text, forType: .string)
-                    }
                     $0.add("Close", .ghost) { [weak self] in self?.onClose?() }
                 }
             }
@@ -476,23 +373,18 @@ final class AITaskCard: NSView {
 
     // MARK: content builders
 
-    /// One rebuild pass: clears the stack, hands the group builder the
-    /// section helpers, all wired to this card's stack.
-    // MARK: test surface
-
+    var isTextViewSelectableForTest: Bool { selectableFieldForTest != nil }
+    var selectableFieldForTest: NSView? {
+        stack.views.compactMap { $0 as? NSTextField }.first { $0.isSelectable }
+    }
     func renderForTest(markdown: String) {
         rebuild { group in _ = group.markdown(markdown) }
-    }
-    var isTextViewSelectableForTest: Bool {
-        firstSubviewOfType(AIMarkdownBox.self)?.textViewSelectableForTest ?? false
     }
 
     private func rebuild(_ build: (Group) -> Void) {
         for view in stack.views { stack.removeView(view) }
         inputField = nil
         build(Group(card: self))
-        // New content lands at the bottom of the (now scrollable) body.
-        // Scrolling HERE ran before the height re-measure landed, so the
         // resize snapped the view back to the top — scroll AFTER layout.
         pendingScroll = true
         // The scroll view isolates layout: stack changes don't mark the
@@ -513,18 +405,11 @@ final class AITaskCard: NSView {
         func header(question: String?, target: ExecutionTarget?, phase: String) {
             let name = target?.displayName ?? "Local"
             let cwd = target?.cwd ?? "~"
-            // The user's original ask IS the title — one bold line,
-            // truncated; the meta line (AI · phase · target) sits
-            // quietly under it.
-            if let question, !question.isEmpty {
-                let q = label(question, font: .systemFont(ofSize: 12.5, weight: .semibold),
-                              color: Chrome.theme.foreground)
-                q.lineBreakMode = .byTruncatingTail
-                q.maximumNumberOfLines = 1
-                q.cell?.truncatesLastVisibleLine = true
-            }
-            label("AI · \(phase) · \(name) · \(cwd)",
-                  font: .systemFont(ofSize: 11), color: Chrome.theme.secondaryText)
+            // The FIXED title bar: the user's original ask (one bold
+            // truncated line) and the meta line (AI · phase · target)
+            // update IN PLACE — they never scroll away with the body.
+            card.titleField.stringValue = question ?? ""
+            card.metaField.stringValue = "AI · \(phase) · \(name) · \(cwd)"
         }
 
         func rounds(_ rounds: [AIRound]) {
@@ -535,8 +420,7 @@ final class AITaskCard: NSView {
                     thinkingBlock(think)
                 }
                 // pi/omp shape: one line per round — tool name + the
-                // result's first line, tail-truncated. The full result
-                // stays in Copy; detail here is noise.
+                // result's first line, tail-truncated (detail is noise).
                 let name = round.toolName ?? "tool"
                 let first = round.toolResult
                     .split(separator: "\n", omittingEmptySubsequences: true)
@@ -552,6 +436,7 @@ final class AITaskCard: NSView {
                                   color: Chrome.theme.secondaryText)])
             }
         }
+
 
         /// The model's own reasoning for one round: muted mono preview,
         /// capped at 2 lines — it's context for the line under it.
@@ -634,26 +519,54 @@ final class AITaskCard: NSView {
             return field
         }
 
-        /// Markdown-rendered, selectable, internally scrolling text
-        /// (answers and explanations — LLMs speak markdown).
-        func markdown(_ text: String) -> AIMarkdownBox {
-            let box = AIMarkdownBox(frame: .zero)
-            box.setMarkdown(text)
-            add(views: [box])
-            box.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor,
-                                       constant: -24).isActive = true
-            return box
+        /// Markdown flows INLINE with the rest of the card: one
+        /// attributed selectable label in the stack. The old box was a
+        /// nested text editor in its OWN scroll view inside the card's
+        /// scroller — two scroll systems fought for the pin during
+        /// streaming (the "md scrolling is chaotic" report).
+        @discardableResult
+        func markdown(_ text: String) -> NSTextField {
+            let field = NSTextField(labelWithString: "")
+            field.textColor = Chrome.theme.foreground
+            field.attributedStringValue = MarkdownRenderer.render(
+                text, bodySize: 12.5,
+                highlight: { code, lang in
+                    HighlightEngine.highlight(
+                        code, language: lang,
+                        font: .monospacedSystemFont(ofSize: 11.5, weight: .regular),
+                        color: Chrome.theme.foreground)
+                })
+            field.isSelectable = true
+            field.lineBreakMode = .byWordWrapping
+            field.cell?.wraps = true
+            field.cell?.truncatesLastVisibleLine = false
+            field.maximumNumberOfLines = 0
+            field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            add(views: [field])
+            field.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor,
+                                         constant: -24).isActive = true
+            return field
         }
 
-        /// Selectable mono text (tool output, transcripts).
-        func monoSelectable(_ text: String) -> AIMarkdownBox {
-            let box = AIMarkdownBox(frame: .zero)
-            box.maxHeight = 180
-            box.setPlainText(text, font: .monospacedSystemFont(ofSize: 11.5, weight: .regular))
-            add(views: [box])
-            box.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor,
-                                       constant: -24).isActive = true
-            return box
+        /// Selectable mono text (tool output, transcripts) — flat like
+        /// everything else; the stack scrolls, no internal scroller.
+        @discardableResult
+        func monoSelectable(_ text: String) -> NSTextField {
+            let field = NSTextField(labelWithString: text)
+            field.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+            field.textColor = Chrome.theme.foreground
+            field.isSelectable = true
+            field.lineBreakMode = .byWordWrapping
+            field.cell?.wraps = true
+            field.cell?.truncatesLastVisibleLine = false
+            field.maximumNumberOfLines = 0
+            field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            add(views: [field])
+            field.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor,
+                                         constant: -24).isActive = true
+            return field
         }
 
         func mono(_ text: String) -> NSTextField {

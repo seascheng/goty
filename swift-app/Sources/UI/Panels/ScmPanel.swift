@@ -50,7 +50,7 @@ enum ScmPanelGroup: CaseIterable {
 /// The Git tab body: branch line, commit box, and the four change
 /// groups. Follows the focused pane's repository; every action runs
 /// through ScmStore (off-main, one serial queue per process).
-final class ScmPanelView: NSView {
+final class ScmPanelView: NSView, ThemeRefreshable {
     /// Any op landed → the sidebar's branch/counts are stale too.
     var onGitActivity: (() -> Void)?
     /// Latest landed status — the Files tree's badges come from the same
@@ -77,13 +77,16 @@ final class ScmPanelView: NSView {
                                        tint: Chrome.theme.secondaryText)
     private let branchField = NSTextField(labelWithString: "")
     private let abField = NSTextField(labelWithString: "")
-    private let messageView = CommitMessageView()
+    private let messageView = ChromeInput(
+        placeholder: "Message (⌘⏎ to commit)", multiline: true)
     private let listContainer = FileListContainer()
     private let listScroll = NSScrollView()
     private let stateLabel = NSTextField(labelWithString: "")
     private let stagedNote = NSTextField(labelWithString: "")
-    private let commitButton = ClosureButton()
-    /// The split control's chevron half: Commit's alternatives live in
+    /// git add — stage everything (the row/group hover actions stage
+    /// per-path; the COMMIT row carries the always-visible one).
+    private let addButton = ChromeButton(title: "Add", style: .ghost)
+    private let commitButton = ChromeButton(title: "Commit", style: .primary)
     /// its menu (tty7's joined split control).
     private let commitMore = IconButton.make("chevron.down", pointSize: 9)
 
@@ -111,8 +114,7 @@ final class ScmPanelView: NSView {
 
         // Commit box (tty7: soft rounded fill, no outline, one line at
         // rest so the file list — the thing the panel is for — starts
-        // near the top of a 260pt column).
-        messageView.onCommandEnter = { [weak self] in self?.commit(all: false) }
+        messageView.onCommandReturn = { [weak self] in self?.commit(all: false) }
         messageView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(messageView)
 
@@ -123,8 +125,9 @@ final class ScmPanelView: NSView {
         stagedNote.textColor = Chrome.theme.secondaryText
         stagedNote.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stagedNote)
-
-        commitButton.applyStandardStyle(title: "Commit")
+        addButton.toolTip = "Stage all changes (git add -A)"
+        addButton.onClick = { [weak self] in self?.act(.stageAll) }
+        addSubview(addButton)
         commitButton.onClick = { [weak self] in self?.commit(all: false) }
         addSubview(commitButton)
 
@@ -166,11 +169,14 @@ final class ScmPanelView: NSView {
             messageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             stagedNote.topAnchor.constraint(equalTo: messageView.bottomAnchor, constant: 6),
             stagedNote.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            stagedNote.centerYAnchor.constraint(equalTo: commitButton.centerYAnchor),
             commitButton.topAnchor.constraint(equalTo: messageView.bottomAnchor, constant: 4),
+            addButton.trailingAnchor.constraint(equalTo: commitButton.leadingAnchor, constant: -6),
+            addButton.centerYAnchor.constraint(equalTo: commitButton.centerYAnchor),
             commitButton.trailingAnchor.constraint(equalTo: commitMore.leadingAnchor, constant: 0),
             commitMore.centerYAnchor.constraint(equalTo: commitButton.centerYAnchor),
             commitMore.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            commitMore.widthAnchor.constraint(equalToConstant: 14),
+            commitMore.heightAnchor.constraint(equalTo: commitButton.heightAnchor),
             listScroll.topAnchor.constraint(equalTo: commitButton.bottomAnchor, constant: 8),
             listScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             listScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -246,13 +252,7 @@ final class ScmPanelView: NSView {
         if let ahead = st.ahead { ab += "↑\(ahead)" }
         if let behind = st.behind { ab += "\(ab.isEmpty ? "" : " ")↓\(behind)" }
         abField.stringValue = ab
-        if (st.ahead ?? 0) > 0 && (st.behind ?? 0) > 0 {
-            abField.textColor = Chrome.theme.secondaryText
-        } else if (st.behind ?? 0) > 0 {
-            abField.textColor = Chrome.theme.gitRemoved
-        } else {
-            abField.textColor = Chrome.theme.gitAdded
-        }
+        abField.textColor = Self.abColor(st)
 
         var rows: [(key: String, view: NSView)] = []
         for group in ScmPanelGroup.allCases {
@@ -308,6 +308,27 @@ final class ScmPanelView: NSView {
         stateLabel.stringValue = clean ? "No changes" : ""
         stateLabel.isHidden = !clean
     }
+
+    /// Ahead/behind ink: mixed = neutral, behind = removed-red,
+    /// otherwise added-green (one definition for render + retheme).
+    private static func abColor(_ st: ScmStatus) -> NSColor {
+        if (st.ahead ?? 0) > 0 && (st.behind ?? 0) > 0 { return Chrome.theme.secondaryText }
+        if (st.behind ?? 0) > 0 { return Chrome.theme.gitRemoved }
+        return Chrome.theme.gitAdded
+    }
+
+    /// ThemeRefreshable: the persistent header/commit labels don't
+    /// rebuild on render (equal status = equal pixels), so the fan-out
+    /// recolors them here; row/header views are conformers or draw
+    /// live theme with the needsDisplay sweep.
+    func retheme() {
+        branchField.textColor = Chrome.theme.foreground
+        stagedNote.textColor = Chrome.theme.secondaryText
+        stateLabel.textColor = Chrome.theme.secondaryText
+        if let st = status { abField.textColor = Self.abColor(st) }
+        listContainer.subviews.forEach { $0.needsDisplay = true }
+    }
+
 
     private func groupHeader(_ group: ScmPanelGroup, entries: [ScmEntry]) -> ScmGroupHeaderView {
         let header = ScmGroupHeaderView(title: group.title, count: entries.count,
@@ -476,7 +497,7 @@ final class ScmPanelView: NSView {
 
     private func commit(all: Bool) {
         guard let st = status else { return }
-        let message = messageView.text
+        let message = messageView.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else {
             Dialog.error(title: "Nothing to commit",
                          detail: "Write a commit message first.")
@@ -487,7 +508,7 @@ final class ScmPanelView: NSView {
             guard let self else { return }
             switch result {
             case .success:
-                self.messageView.clear()
+                self.messageView.stringValue = ""
                 self.onGitActivity?()
                 self.refresh(force: true)
             case .failure(let f):

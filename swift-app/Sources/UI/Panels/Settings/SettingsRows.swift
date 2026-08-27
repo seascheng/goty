@@ -14,7 +14,7 @@ final class ConfigFilePage: NSView {
          onReload: @escaping () -> Void) {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        layer?.backgroundColor = chromeContainerFill(Chrome.theme.background)?.cgColor
 
         let heading = NSTextField(labelWithString: title)
         heading.font = .systemFont(ofSize: 17, weight: .semibold)
@@ -36,7 +36,7 @@ final class ConfigFilePage: NSView {
         //     hairline border, 12pt corners) ---
         let card = NSView()
         card.wantsLayer = true
-        card.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        card.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         card.layer?.borderColor = Chrome.theme.hairline.cgColor
         card.layer?.borderWidth = 1
         card.layer?.cornerRadius = 12
@@ -256,10 +256,10 @@ final class SettingsFormPage: NSView {
     init(title: String, subtitle: String) {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        layer?.backgroundColor = chromeContainerFill(Chrome.theme.background)?.cgColor
 
         card.wantsLayer = true
-        card.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        card.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         card.layer?.borderColor = Chrome.theme.hairline.cgColor
         card.layer?.borderWidth = 1
         card.layer?.cornerRadius = 12

@@ -1,5 +1,6 @@
 // goty — see CLAUDE.md for the working principles.
 import AppKit
+import GhosttyKit
 
 // MARK: - New Worktree dialog (creation flow v2)
 
@@ -264,10 +265,10 @@ final class WorktreeWindowController: NSObject, NSWindowDelegate {
         // with nothing in it reads as a bug).
         let container = NSView()
         container.wantsLayer = true
-        container.layer?.backgroundColor = Chrome.theme.background.cgColor
+        container.layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
         let strip = NSView()
         strip.wantsLayer = true
-        strip.layer?.backgroundColor = Chrome.theme.topBarBackground.cgColor
+        strip.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         strip.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(strip)
         let stripTitle = NSTextField(labelWithString: "NEW WORKTREE")
@@ -291,6 +292,17 @@ final class WorktreeWindowController: NSObject, NSWindowDelegate {
         window.appearance = NSAppearance(
             named: Chrome.theme.isDark ? .darkAqua : .aqua)
         window.isReleasedWhenClosed = false   // retained by WorktreeWindow
+        // Translucency follows the config (the SettingsWindow recipe):
+        // white@0.001 + blur when translucent, page color when opaque —
+        // the container's single chromeSurface fill then composites
+        // exactly like the terminal surface.
+        let translucent = Chrome.theme.backgroundOpacity < 0.999
+        window.isOpaque = !translucent
+        window.backgroundColor = translucent ? .clear : Chrome.theme.background
+        if translucent, let gapp = liveGhostty?.app {
+            ghostty_set_window_background_blur(
+                gapp, Unmanaged.passUnretained(window).toOpaque())
+        }
         self.window = window
         super.init()
         window.delegate = self

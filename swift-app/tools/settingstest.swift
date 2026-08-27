@@ -238,6 +238,20 @@ enum SettingsTest {
         root.searchForTest("mouse")
         check(root.currentPageForTest?.controlsByKey["mouse-hide-while-typing"] != nil,
               "search matches by key fragment")
+        // A 1-char query matches dozens of specs — the results must
+        // SCROLL inside the fixed viewport, never grow the window's
+        // content (the "window became very long" report: the page WAS
+        // the content size).
+        root.searchForTest("s")
+        root.layoutSubtreeIfNeeded()
+        if let results = root.currentPageForTest {
+            let viewport = root.pageHostForTest.bounds.height
+            check(results.fittingSize.height > viewport
+                  && root.fittingSize.height < results.fittingSize.height,
+                  "broad search scrolls (page \(Int(results.fittingSize.height))pt > viewport \(Int(viewport))pt; root \(Int(root.fittingSize.height))pt stays put)")
+        } else {
+            check(false, "1-char search produced a results page")
+        }
         root.searchForTest("")
         check(root.currentPageForTest !== searchPage,
               "cleared search restores the section page")

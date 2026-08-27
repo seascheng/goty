@@ -19,19 +19,26 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
     private let label = NSTextField(labelWithString: "")
     private let countField = NSTextField(labelWithString: "")
     private var onPlus: ((NSView) -> Void)?
+    private var onToggle: (() -> Void)?
+    private var lastExpanded = true
     private let plusButton = IconButton.make("plus", pointSize: 11)
+    /// Section fold (SERVERS): chevron beside the '+' — down when the
+    /// rows are listed, right when folded away. Hidden unless a toggle
+    /// closure is configured (only the SERVERS header has one).
+    private let toggleButton = IconButton.make("chevron.down", pointSize: 10)
     private let emphasized: Bool
-
+    private var plusFlush: NSLayoutConstraint!
+    private var plusShifted: NSLayoutConstraint!
     init(emphasized: Bool = false) {
         self.emphasized = emphasized
         super.init(frame: .zero)
 
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
-        // Flush with the row's leading edge (the avatar column) — tty7
-        // group headers; the '+' and count own the trailing edge.
         plusButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(plusButton)
+        toggleButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(toggleButton)
         countField.translatesAutoresizingMaskIntoConstraints = false
         addSubview(countField)
         // The anchor for flyout menus is the button itself — hand it to
@@ -40,12 +47,22 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
             guard let self else { return }
             self.onPlus?(self.plusButton)
         }
+        toggleButton.onClick = { [weak self] in self?.onToggle?() }
 
+        // Chevron owns the trailing edge when present; the '+' rides
+        // flush-right otherwise. Two mutually exclusive constraints —
+        // hidden views still occupy constraint space in AppKit.
+        plusFlush = plusButton.trailingAnchor.constraint(equalTo: trailingAnchor,
+                                                        constant: 0)
+        plusFlush.isActive = true
         NSLayoutConstraint.activate([
             label.leadingAnchor.constraint(equalTo: leadingAnchor,
                                            constant: SidebarRowView.iconLeading),
             heightAnchor.constraint(equalToConstant: 20),
-            plusButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0),
+            toggleButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0),
+            toggleButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            toggleButton.widthAnchor.constraint(equalToConstant: 20),
+            toggleButton.heightAnchor.constraint(equalToConstant: 18),
             plusButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             plusButton.widthAnchor.constraint(equalToConstant: 20),
             plusButton.heightAnchor.constraint(equalToConstant: 18),
@@ -54,13 +71,17 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
             countField.trailingAnchor.constraint(equalTo: plusButton.leadingAnchor, constant: -2),
             countField.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        plusShifted = plusButton.trailingAnchor.constraint(
+            equalTo: toggleButton.leadingAnchor, constant: -2)
+        plusShifted.isActive = false
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
-
-    func configure(text: String, plus: ((NSView) -> Void)?, count: Int?) {
+    func configure(text: String, plus: ((NSView) -> Void)?, count: Int?,
+                   toggle: (() -> Void)? = nil, expanded: Bool = true) {
         lastText = text
         lastCount = count
+        lastExpanded = expanded
         label.attributedStringValue = NSAttributedString(string: text.uppercased(), attributes: [
             .font: NSFont.systemFont(ofSize: emphasized ? 11 : 10, weight: .semibold),
             .foregroundColor: emphasized ? Chrome.theme.foreground : Chrome.theme.secondaryText,
@@ -68,6 +89,14 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         ])
         plusButton.isHidden = plus == nil
         onPlus = plus
+        onToggle = toggle
+        // Chevron rides the trailing edge; the '+' makes room only when
+        // a fold actually exists (hidden views still hold constraint
+        // space, so the two placements swap explicitly).
+        toggleButton.isHidden = toggle == nil
+        plusFlush.isActive = toggle == nil
+        plusShifted.isActive = toggle != nil
+        toggleButton.symbol = expanded ? "chevron.down" : "chevron.right"
         if let count {
             countField.attributedStringValue = NSAttributedString(
                 string: String(count),
@@ -81,20 +110,30 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         }
     }
 
+    /// Flip the chevron WITHOUT a full reconfigure — the owning section
+    /// keeps its render-time plus/count closures (toggleSpaceFold).
+    func setExpanded(_ expanded: Bool) {
+        guard expanded != lastExpanded else { return }
+        lastExpanded = expanded
+        toggleButton.symbol = expanded ? "chevron.down" : "chevron.right"
+    }
+
     /// Theme flip: re-run the last configure — the static SERVERS/
     /// SPACES headers are built once and never re-rendered by data
     /// passes, so without this they carry the launch theme forever.
     func retheme() {
-        configure(text: lastText, plus: onPlus, count: lastCount)
+        configure(text: lastText, plus: onPlus, count: lastCount,
+                  toggle: onToggle, expanded: lastExpanded)
     }
 }
 
 /// One-shot builder for the static top-level headers (SERVERS/SPACES);
 /// the Spaces section headers go through SectionHeaderView reuse.
 func sectionHeader(_ text: String, plus: ((NSView) -> Void)? = nil, count: Int? = nil,
-                   emphasized: Bool = false) -> NSView {
+                   emphasized: Bool = false,
+                   toggle: (() -> Void)? = nil, expanded: Bool = true) -> SectionHeaderView {
     let v = SectionHeaderView(emphasized: emphasized)
-    v.configure(text: text, plus: plus, count: count)
+    v.configure(text: text, plus: plus, count: count, toggle: toggle, expanded: expanded)
     return v
 }
 
@@ -142,7 +181,8 @@ final class SidebarView: NSView {
     /// Per-space "+" → "New Worktree…" — the git-repo-only entry of the
     /// space menu. Fires with the section's directory.
     var onNewWorktreeInDir: ((String?) -> Void)?
-    private lazy var wsHeader: NSView = sectionHeader("Servers",
+
+    private lazy var wsHeader: SectionHeaderView = sectionHeader("Servers",
                                                      plus: { [weak self] anchor in
         guard let self else { return }
         // Product-styled flyout from the '+' itself — the system NSMenu
@@ -150,8 +190,74 @@ final class SidebarView: NSView {
         HostFlyout.show(anchor: anchor,
                         entries: self.hostPickerEntries(hosts: SSHConfig.hosts()),
                         onPick: { [weak self] entry in self?.fireHostPicker(entry) })
-    }, emphasized: true)
+    }, emphasized: true,
+       toggle: { [weak self] in self?.setServersExpanded(!(self?.serversExpanded ?? true)) })
 
+    /// SERVERS fold: rows hidden, header keeps its chevron + '+'.
+    /// Persisted through onServersExpandChange (AppPreferences).
+    var onServersExpandChange: ((Bool) -> Void)?
+    private(set) var serversExpanded = true
+
+    func setServersExpanded(_ expanded: Bool) {
+        guard expanded != serversExpanded else { return }
+        serversExpanded = expanded
+        // Hidden arranged subviews collapse in NSStackView — the
+        // section (and everything below it) moves up.
+        wsStack.arrangedSubviews.forEach { $0.isHidden = !expanded }
+        wsHeader.configure(text: "Servers",
+                           plus: { [weak self] anchor in
+                               guard let self else { return }
+                               HostFlyout.show(anchor: anchor,
+                                   entries: self.hostPickerEntries(hosts: SSHConfig.hosts()),
+                                   onPick: { [weak self] entry in
+                                       self?.fireHostPicker(entry) })
+                           },
+                           count: nil,
+                           toggle: { [weak self] in
+                               self?.setServersExpanded(!(self?.serversExpanded ?? true))
+                           },
+                           expanded: expanded)
+        onServersExpandChange?(expanded)
+    }
+
+    /// Per-space fold: which directory sections are folded away (absent
+    /// = expanded). Keyed by section name (the space's directory) so it
+    /// survives tab churn inside the section.
+    private var spaceFolds: Set<String> = []
+    /// Section name → the foldable views beneath it (its spacing tile +
+    /// tab rows, NOT the header). Rebuilt every render; reuse keeps the
+    /// views identity-stable so toggling just flips isHidden.
+    private var spaceSectionViews: [String: [NSView]] = [:]
+    var onSpaceFoldsChange: (([String]) -> Void)?
+
+    /// Restore folds (AppWindowController, before the first render).
+    func setFoldedSpaces(_ names: Set<String>) {
+        spaceFolds = names
+        for (name, views) in spaceSectionViews where spaceFolds.contains(name) {
+            views.forEach { $0.isHidden = true }
+        }
+        onSpaceFoldsChange?(Array(names))
+    }
+
+    func toggleSpaceFold(_ name: String) {
+        if !spaceFolds.insert(name).inserted { spaceFolds.remove(name) }
+        spaceHeaders[name]?.setExpanded(!spaceFolds.contains(name))
+        onSpaceFoldsChange?(Array(spaceFolds))
+        for view in spaceSectionViews[name] ?? [] {
+            view.isHidden = spaceFolds.contains(name)
+        }
+    }
+
+
+    // Test surface for the SERVERS fold.
+    var wsRowsForTest: [NSView] { wsStack.arrangedSubviews }
+    var wsHeaderForTest: NSView { wsHeader }
+    var tabsRowsForTest: [NSView] {
+        tabsStack.arrangedSubviews.compactMap { $0 as? SidebarRowView }
+    }
+    var tabsVisibleForTest: [NSView] {
+        tabsStack.arrangedSubviews.filter { !$0.isHidden }
+    }
     /// Host picker for the Servers '+': one entry per SSH alias, then
     /// the manager entry (parse/add/edit/delete of ~/.ssh/config —
     /// hosts not in the file get added THERE, not through a prompt).
@@ -443,30 +549,27 @@ final class SidebarView: NSView {
             // row dies, so the reuse maps reset with them.
             tabRows.removeAll()
             spaceHeaders.removeAll()
+            spaceSectionViews.removeAll()
             tabsStack.arrangedSubviews.forEach { tabsStack.removeView($0) }
             addRow(tabsStack, text: "Offline — reconnect to see sessions",
                    symbol: "wifi.exclamationmark", selected: false) {}
             return
         }
-        // tty7 spaces: one section per working directory — the section is
-        // named after the directory and every space opened in it is listed
-        // underneath. Unknown cwds trail in Scratch; before any cwd is
-        // known the list stays flat (tty7's single headerless section).
-        //
-        // Rows and headers are REUSED, keyed by tab id / section name: a
-        // pass reconfigures in place and at most reorders arranged views.
-        // Recreating views made every volatile field (the OSC title, the
-        // spinner char riding it) drop and re-fire mouseEntered under a
-        // still cursor — the hover flicker (2026-08-24). Identity-stable
-        // views keep their tracking areas; hover never blinks.
         var desired: [NSView] = []
         var nextRows: [String: SidebarRowView] = [:]
         var nextHeaders: [String: SectionHeaderView] = [:]
+        var nextSectionViews: [String: [NSView]] = [:]
         for section in SpaceGrouping.sections(for: workspace.tabs, spaceRoot: spaceRoot) {
+            var sectionViews: [NSView] = []   // this section's foldable members
+            let dir = workspace.tabs[section.tabIndexs[0]].panes.first?.cwd
+                .map { spaceRoot?($0) ?? $0 }
             if let name = section.name {
                 if !desired.isEmpty {
                     // Plain spacing tile — no identity, no interaction;
-                    // recreating it is invisible.
+                    // recreating it is invisible. NEVER folds: a
+                    // collapsed section keeps its distance from whatever
+                    // is above it, so folding doesn't shift the layout
+                    // (the position-jump report).
                     let gap = NSView()
                     gap.heightAnchor.constraint(equalToConstant: 10).isActive = true
                     desired.append(gap)
@@ -478,9 +581,11 @@ final class SidebarView: NSView {
                 // captured at render cadence: git events re-render the
                 // sections, so the flag tracks the store without
                 // SidebarView holding another closure.
-                let dir = workspace.tabs[section.tabIndexs[0]].panes.first?.cwd
-                    .map { spaceRoot?($0) ?? $0 }
                 let isGit = dir.flatMap { gitFor?($0) } != nil
+                // Fold key = the section's directory ROOT, not the
+                // display name — tail names grow on collision ("goty"
+                // → "ai_project/goty"), which would silently drop folds.
+                let foldKey = dir ?? name
                 let header: SectionHeaderView
                 if let reused = spaceHeaders[name] {
                     header = reused
@@ -500,7 +605,9 @@ final class SidebarView: NSView {
                     } else {
                         self.onNewTabInDir?(dir)
                     }
-                }, count: section.tabIndexs.count)
+                }, count: section.tabIndexs.count,
+                   toggle: { [weak self] in self?.toggleSpaceFold(foldKey) },
+                   expanded: !spaceFolds.contains(foldKey))
                 nextHeaders[name] = header
                 desired.append(header)
             }
@@ -558,6 +665,11 @@ final class SidebarView: NSView {
                               onSetIcon: { [weak self] symbol in self?.onTabIcon?(idx, symbol) })
                 nextRows[tab.id] = row
                 desired.append(row)
+                sectionViews.append(row)
+            }
+            if let name = section.name {
+                // Same root key the toggle closure uses (see foldKey).
+                nextSectionViews[dir ?? name] = sectionViews
             }
         }
         // Drop closed/switched-away views, then land the desired order.
@@ -576,8 +688,12 @@ final class SidebarView: NSView {
         }
         tabRows = nextRows
         spaceHeaders = nextHeaders
+        spaceSectionViews = nextSectionViews
+        // Fresh rows land visible; folded sections stay folded.
+        for (name, views) in spaceSectionViews where spaceFolds.contains(name) {
+            views.forEach { $0.isHidden = true }
+        }
     }
-
     func renderWorkspaces(_ workspaces: [WorkspaceState], focusedIndex: Int,
                           states: [UUID: WorkspaceCoordinator.WsState] = [:]) {
         let signature = "theme=\(themeGeneration)#" + workspaces.map { ws in
@@ -610,6 +726,8 @@ final class SidebarView: NSView {
                 self?.onWorkspaceSelected?(idx)
             }
         }
+        // Fresh rows land visible; a folded SERVERS section stays folded.
+        wsStack.arrangedSubviews.forEach { $0.isHidden = !serversExpanded }
         // Same pass, same signature: the rail is the server list at
         // rail width — one dot per workspace, identical actions.
         railStack.arrangedSubviews.forEach { railStack.removeView($0) }

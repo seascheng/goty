@@ -179,9 +179,9 @@ final class OpenAICompatibleClient: ModelClient {
                           onDelta: onDelta, completion: completion)
             return
         }
-        URLSession.shared.dataTask(with: req) { data, response, error in
+        Self.fallbackDataTask(with: req) { data, response, error in
             if let error {
-                completion(.failure(.transport(error.localizedDescription))); return
+                completion(.failure(.transport(Self.netMessage(error, for: req)))); return
             }
             if let http = response as? HTTPURLResponse {
                 // Models without extended thinking reject the thinking
@@ -202,7 +202,42 @@ final class OpenAICompatibleClient: ModelClient {
                 completion(.failure(.badResponse)); return
             }
             completion(.success(reply))
+        }
+    }
+
+    // MARK: - Transport (system proxy first, direct fallback)
+
+    /// A PROXY-LESS session: macOS proxies (Clash/Surge/sing-box at
+    /// 127.0.0.1) MITM or stall TLS for some API hosts and URLSession
+    /// surfaces that as -1200 "A TLS error caused the secure connection
+    /// to fail." (the api.z.ai report — curl went direct and was fine).
+    private static let directSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.connectionProxyDictionary = [:]   // empty = no system proxy
+        return URLSession(configuration: cfg)
+    }()
+
+    /// The system-proxied session first (a user's proxy is usually
+    /// intentional); a transport-level failure retries ONCE direct.
+    static func fallbackDataTask(with req: URLRequest, attempt: Int = 0,
+                                 completion: @escaping (Data?, URLResponse?, Error?) -> Void) {
+        let session: URLSession = attempt == 0 ? .shared : directSession
+        session.dataTask(with: req) { data, response, error in
+            let ns = (error as NSError?)?.code ?? 0
+            if error != nil, attempt == 0,
+               ns != NSURLErrorCancelled, ns != NSURLErrorNotConnectedToInternet {
+                fallbackDataTask(with: req, attempt: 1, completion: completion)
+                return
+            }
+            completion(data, response, error)
         }.resume()
+    }
+
+    /// Transport failures name the host — "transport(...)" alone never
+    /// said WHERE the network refused to go.
+    static func netMessage(_ error: Error, for req: URLRequest) -> String {
+        let host = req.url?.host ?? "?"
+        return "\(host): \(error.localizedDescription)"
     }
 
     /// SSE streaming pass: parses server-sent events incrementally and
@@ -212,10 +247,12 @@ final class OpenAICompatibleClient: ModelClient {
     /// stream pass).
     private func streamRequest(_ req: URLRequest, messages: [ChatMessage], tools: [ToolSpec],
                                allowThinking: Bool, onDelta: ((StreamDelta) -> Void)?,
+                               session: URLSession = .shared, directFallback: Bool = true,
                                completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
         Task {
+            var receivedAny = false   // never double-fire deltas on fallback
             do {
-                let (bytes, response) = try await URLSession.shared.bytes(for: req)
+                let (bytes, response) = try await session.bytes(for: req)
                 if let http = response as? HTTPURLResponse {
                     if http.statusCode == 400 && apiType == .anthropic && allowThinking {
                         perform(messages: messages, tools: tools, allowThinking: false,
@@ -228,6 +265,7 @@ final class OpenAICompatibleClient: ModelClient {
                 }
                 let parser = SSEChatParser(apiType: apiType)
                 for try await line in bytes.lines {
+                    receivedAny = true
                     for delta in parser.feed(line + "\n") {
                         onDelta?(delta)
                     }
@@ -237,7 +275,17 @@ final class OpenAICompatibleClient: ModelClient {
                 }
                 completion(.success(reply))
             } catch {
-                completion(.failure(.transport(error.localizedDescription)))
+                // Proxy-stalled first byte (the -1200/-1001 class): one
+                // direct retry — but only while NOTHING streamed, or a
+                // resumed task would repeat its deltas.
+                if directFallback, !receivedAny {
+                    streamRequest(req, messages: messages, tools: tools,
+                                  allowThinking: allowThinking, onDelta: onDelta,
+                                  session: Self.directSession, directFallback: false,
+                                  completion: completion)
+                    return
+                }
+                completion(.failure(.transport(Self.netMessage(error, for: req))))
             }
         }
     }

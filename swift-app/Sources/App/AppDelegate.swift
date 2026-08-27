@@ -120,6 +120,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let resolved = ghostty_config_get(app.config.config, &probe, key, UInt(key.utf8.count))
             print("theme-diag: libghostty bg resolved=\(resolved) rgb=\(probe.r),\(probe.g),\(probe.b) env=\(ProcessInfo.processInfo.environment["GHOSTTY_RESOURCES_DIR"] ?? "nil")")
         }
+
+        if ProcessInfo.processInfo.environment["GOTY_DUMP_VIEWS"] == "1" {
+            // Translucency diagnosis: the full view tree once surfaces
+            // are up — a stray fill/alpha behind the ghostty surface is
+            // invisible in review but obvious in this dump.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+                self?.dumpViewTree()
+            }
+        }
         app.delegate = self
 
         // Window shell + the three regions (sidebar / terminal / right
@@ -252,6 +261,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         sidebar.onWidthChange = { [weak self] width in
             self?.wc.setSidebarWidth(width)
+        }
+        sidebar.onServersExpandChange = { [weak self] expanded in
+            self?.prefs.serversCollapsed = !expanded
+        }
+        sidebar.onSpaceFoldsChange = { [weak self] names in
+            self?.prefs.foldedSpaces = names
         }
         sidebar.onCloseTab = { [weak self] idx in
             self?.coordinator.closeTab(index: idx)
@@ -481,6 +496,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// should propagate alone, but the observed reality (only
     /// file-read paths like theme responded) says surfaces also need
     /// the explicit push — belt and braces, both documented APIs.
+    /// GOTY_DUMP_VIEWS=1: the main window's view tree with layer state —
+    /// every fill, alpha, and opacity that participates in compositing.
+    private func dumpViewTree() {
+        guard let content = wc?.window.contentView else { return }
+        print("=== VIEW TREE ===")
+        func dump(_ v: NSView, _ depth: Int) {
+            let pad = String(repeating: "  ", count: depth)
+            let f = v.frame
+            var line = "\(pad)\(type(of: v)) frame=\(Int(f.origin.x)),\(Int(f.origin.y)) \(Int(f.width))x\(Int(f.height))"
+            if v.isHidden { line += " HIDDEN" }
+            if v.alphaValue < 1 { line += String(format: " alpha=%.2f", v.alphaValue) }
+            if let l = v.layer {
+                line += " layer"
+                if let bg = l.backgroundColor {
+                    let c = NSColor(cgColor: bg)?.usingColorSpace(.sRGB)
+                    line += String(format: " bg=(%.0f,%.0f,%.0f,%.2f)",
+                                   c?.redComponent ?? -1, c?.greenComponent ?? -1,
+                                   c?.blueComponent ?? -1, c?.alphaComponent ?? -1)
+                }
+                if l.isOpaque { line += " OPAQUE" }
+                if l.opacity < 1 { line += String(format: " lopacity=%.2f", l.opacity) }
+                if l.contents != nil { line += " contents" }
+                if l.masksToBounds { line += " clipped" }
+            }
+            print(line)
+            for sub in v.subviews { dump(sub, depth + 1) }
+        }
+        dump(content, 0)
+        if let win = wc?.window {
+            print(String(format: "window isOpaque=%@ bg=%@ hasShadow=%@",
+                         win.isOpaque ? "Y" : "N",
+                         String(describing: win.backgroundColor), win.hasShadow ? "Y" : "N"))
+        }
+        print("=== END ===")
+        fflush(stdout)
+    }
+
     private func pushConfigToSurfaces() {
         let fresh = Ghostty.Config(at: GhosttyConfigStore.path)
         guard let cfg = fresh.config, let gapp = ghostty?.app else { return }
@@ -622,9 +674,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             owner?.cancel(taskId: id)
             host.hideAITask()
         }
-        // Spec: fill never auto-runs — command + trailing space, the
-        // user presses Enter themselves.
-        card.onFill = { [weak host] command in host?.sendText(command + " ") }
     }
 
     /// Local panes: the shared daemon, the user's login shell, the user's
@@ -1126,22 +1175,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let cfg = note.userInfo?[Notification.Name.GhosttyConfigChangeKey]
                   as? Ghostty.Config
         else { return }
-        let old = Chrome.theme.background.usingColorSpace(.deviceRGB)
         let candidate = ChromeTheme.from(cfg)
-        let new = candidate.background.usingColorSpace(.deviceRGB)
         if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
             let name = ChromeTheme.configuredThemeName(cfg) ?? "nil"
-            FileHandle.standardError.write("THEME change old=\(old.map { String(format: "%.2f", $0.redComponent) } ?? "?") new=\(new.map { String(format: "%.2f", $0.redComponent) } ?? "?") theme=\(name)\n".data(using: .utf8)!)
+            FileHandle.standardError.write("THEME change old=\(Chrome.theme.background.usingColorSpace(.deviceRGB).map { String(format: "%.2f", $0.redComponent) } ?? "?") new=\(candidate.background.usingColorSpace(.deviceRGB).map { String(format: "%.2f", $0.redComponent) } ?? "?") theme=\(name)\n".data(using: .utf8)!)
         }
         wc?.applyChromeTheme(cfg: cfg)
 
-        // Re-color work on a REAL change — colors (theme switch) or
-        // opacity (slider: topBarBackground and every chromeSurface
-        // fill depend on it). Font-size-style writes change neither
-        // and skip straight through; the settings page rebuilds
-        // WITHOUT rebuilding its page when IT wrote the change (the
-        // rebuild swaps the slider mid-drag — the thumb-snap report).
-        guard old != new || candidate.backgroundOpacity != Chrome.theme.backgroundOpacity else { return }
+        // Re-color work on a REAL change — the WHOLE theme, not just
+        // the background: two themes can share a background and differ
+        // in foreground/accent (the light-theme report: fg-only flips
+        // were swallowed here and every baked label stayed stale).
+        // Font-size-style writes change nothing and skip straight
+        // through; the settings page rebuilds WITHOUT rebuilding its
+        // page when IT wrote the change (the rebuild swaps the slider
+        // mid-drag — the thumb-snap report).
+        guard candidate != Chrome.theme else { return }
         Chrome.theme = candidate
         // OUR chrome follows the terminal theme too (the tty7 rule): the
         // render paths rebuild rows/headers with fresh colors — the

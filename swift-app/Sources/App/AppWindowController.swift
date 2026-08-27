@@ -36,12 +36,12 @@ final class GotyWindow: NSWindow {
 /// surface — empty areas move the window. Below it, the three regions;
 /// with the sidebar collapsed the terminal region grows a tab strip
 /// right under this band (Ghostty's collapsed shape).
-final class TitleBarView: NSView {
+final class TitleBarView: NSView, ThemeRefreshable {
     var onToggleSidebar: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var onToggleRightPanel: (() -> Void)?
 
-    private let titleLabel = NSTextField(labelWithString: "Goty")
+    private let titleLabel = ChromeTitleLabel("Goty")
     private let sidebarToggle = IconButton.make(
         "rectangle.lefthalf.inset.filled", pointSize: 12)
     private let settingsButton = IconButton.make("gearshape", pointSize: 12)
@@ -107,16 +107,12 @@ final class TitleBarView: NSView {
 
     private func applyTheme() {
         layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
-        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        titleLabel.textColor = Chrome.theme.secondaryText
-        titleLabel.lineBreakMode = .byTruncatingMiddle
         // The label must FIGHT for its text width: with only the two
         // spacing inequalities a lazy solve gives it zero width and the
         // band reads empty (the "no title" report).
         titleLabel.setContentHuggingPriority(.required, for: .horizontal)
         titleLabel.setContentCompressionResistancePriority(
             .init(750), for: .horizontal)
-        titleLabel.cell?.truncatesLastVisibleLine = true
     }
 
     func retheme() { applyTheme() }
@@ -262,6 +258,8 @@ final class AppWindowController: NSObject {
 
         // Restore persisted region state — one place, one order.
         sidebar.setCollapsed(prefs.sidebarCollapsed)
+        sidebar.setServersExpanded(!prefs.serversCollapsed)
+        sidebar.setFoldedSpaces(Set(prefs.foldedSpaces))
         terminalArea.setTabStripVisible(prefs.sidebarCollapsed)
         rightPanel.setWidth(prefs.rightPanelWidth)
         rightPanel.setCollapsed(!prefs.rightPanelVisible)
@@ -302,13 +300,34 @@ final class AppWindowController: NSObject {
         // replaced only AFTER the post, so reading it there lags one.
         let conf = cfg ?? liveGhostty?.config
         let opacity = conf?.backgroundOpacity ?? 1
-        let transparent = opacity < 0.999 || (conf?.backgroundBlur.isEnabled ?? false)
+        // Ghostty's own rule (TerminalWindow.syncAppearance): a plain
+        // radius blur NEVER forces transparency — only opacity < 1 (or
+        // the glass styles, which our slider can't write) does. Blur on
+        // an opaque window just no-ops (ghostty_set_window_background_
+        // blur checks opacity itself), while marking it transparent
+        // bought the edge/corner artifacts for nothing.
+        let transparent = opacity < 0.999
         window.isOpaque = !transparent
-        // OPAQUE: the WINDOW carries the page color (not a content-layer
-        // fill — that was the square second background behind the
-        // capsule). TRANSLUCENT: clear window, desktop/blur behind.
-        window.backgroundColor = transparent ? .clear : Chrome.theme.background
-        if let gapp = liveGhostty?.app {
+        // OPAQUE: the WINDOW carries the page color. TRANSLUCENT:
+        // ghostty's exact recipe (TerminalWindow.swift) — white@0.001,
+        // NOT .clear: the near-zero white base keeps the surface's
+        // alpha composite bright/neutral (pixel-probed: .clear darkens
+        // the whole window; real Ghostty at opacity 0.6 over white reads
+        // exactly 119/120 and only with this background). Chrome parity
+        // with the surface is then closed on the COLOR side: theme
+        // colors are P3-tagged raw values (ChromeTheme.themeColor — the
+        // same "Apple-style blending" the surface's P3 IOSurface uses).
+        window.backgroundColor = transparent
+            ? .white.withAlphaComponent(0.001)
+            : Chrome.theme.background
+        // Call ONLY when the config enables blur: the C helper maps a
+        // zero radius to CGSSetWindowBackgroundBlurRadius(win, 0) — which
+        // INSTALLS a zero-radius blur material (a dimming layer behind the
+        // window) rather than skipping it. Pixel-probed against real
+        // Ghostty at opacity 0.6 over pure white: its terminal reads 119
+        // (the exact gamma blend) while ours read 74-113 — everything
+        // darkened by the phantom zero-radius material.
+        if let gapp = liveGhostty?.app, conf?.backgroundBlur.isEnabled == true {
             ghostty_set_window_background_blur(
                 gapp, Unmanaged.passUnretained(window).toOpaque())
         }
@@ -319,9 +338,8 @@ final class AppWindowController: NSObject {
         // — the mismatched-strip bug).
         let bandColor = chromeSurface(Chrome.theme.topBarBackground)
         terminalArea.setBackdrop(bandColor)
-        let translucent = opacity < 0.999 || (conf?.backgroundBlur.isEnabled ?? false)
         for host in terminalArea.paneGrid.visibleHosts {
-            host.setSurfaceBackdrop(translucent ? nil : Chrome.theme.background)
+            host.setSurfaceBackdrop(transparent ? nil : Chrome.theme.background)
         }
 
         titlebar.retheme()

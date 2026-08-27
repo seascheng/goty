@@ -7,7 +7,20 @@ import GhosttyKit
 /// The app shell follows the terminal's theme: colors are read from the
 /// RESOLVED Ghostty config (theme file applied), not hardcoded, so the
 /// sidebar/top bar/pane chrome match whatever theme the user runs.
-struct ChromeTheme {
+/// A theme color from RAW code values, tagged Display P3 — the exact
+/// convention of ghostty's rendering: the terminal writes raw sRGB code
+/// values into a Display-P3-tagged IOSurface ("Apple-style alpha
+/// blending", src/renderer/metal/Target.zig). Tagging our chrome colors
+/// the same way puts CALayer fills on the SAME compositing path, so a
+/// chromeSurface fill and the terminal surface blend identically at
+/// background-opacity < 1 (pixel-probed: sRGB-tagged chrome read 130 vs
+/// the surface's 85 over pure white — the visible mismatch).
+func themeColor(red: CGFloat, green: CGFloat, blue: CGFloat,
+                alpha: CGFloat = 1) -> NSColor {
+    NSColor(displayP3Red: red, green: green, blue: blue, alpha: alpha)
+}
+
+struct ChromeTheme: Equatable {
     let background: NSColor
     var foreground: NSColor
     let accent: NSColor
@@ -17,17 +30,17 @@ struct ChromeTheme {
     var backgroundOpacity: CGFloat = 1
 
     static let fallback = ChromeTheme(
-        background: NSColor(srgbRed: 0.11, green: 0.11, blue: 0.11, alpha: 1),
-        foreground: NSColor(srgbRed: 0.87, green: 0.87, blue: 0.87, alpha: 1),
-        accent: NSColor(srgbRed: 0.30, green: 0.30, blue: 0.30, alpha: 1))
+        background: themeColor(red: 0.11, green: 0.11, blue: 0.11),
+        foreground: themeColor(red: 0.87, green: 0.87, blue: 0.87),
+        accent: themeColor(red: 0.30, green: 0.30, blue: 0.30))
 
     static func from(_ cfg: Ghostty.Config?) -> ChromeTheme {
         guard let handle = cfg?.config else { return .fallback }
         func color(_ key: String) -> NSColor? {
             var v = ghostty_config_color_s()
             guard ghostty_config_get(handle, &v, key, UInt(key.utf8.count)) else { return nil }
-            return NSColor(srgbRed: CGFloat(v.r) / 255, green: CGFloat(v.g) / 255,
-                           blue: CGFloat(v.b) / 255, alpha: 1)
+            return themeColor(red: CGFloat(v.r) / 255, green: CGFloat(v.g) / 255,
+                              blue: CGFloat(v.b) / 255)
         }
         // Explicit config colors win; a theme-only config (theme = Arthur)
         // never surfaces its palette through ghostty_config_get — the
@@ -103,11 +116,11 @@ struct ChromeTheme {
         if value.count == 3 {
             let r = CGFloat((parsed >> 8) & 0xF) / 15, g = CGFloat((parsed >> 4) & 0xF) / 15,
                 b = CGFloat(parsed & 0xF) / 15
-            return NSColor(srgbRed: r, green: g, blue: b, alpha: 1)
+            return themeColor(red: r, green: g, blue: b)
         }
         let r = CGFloat((parsed >> 16) & 0xFF) / 255, g = CGFloat((parsed >> 8) & 0xFF) / 255,
             b = CGFloat(parsed & 0xFF) / 255
-        return NSColor(srgbRed: r, green: g, blue: b, alpha: 1)
+        return themeColor(red: r, green: g, blue: b)
     }
 
     var isDark: Bool {
@@ -138,10 +151,9 @@ struct ChromeTheme {
 
     private func blend(_ base: NSColor, with other: NSColor, fraction t: CGFloat) -> NSColor {
         let b = base.usingColorSpace(.deviceRGB)!, o = other.usingColorSpace(.deviceRGB)!
-        return NSColor(srgbRed: b.redComponent + (o.redComponent - b.redComponent) * t,
-                       green: b.greenComponent + (o.greenComponent - b.greenComponent) * t,
-                       blue: b.blueComponent + (o.blueComponent - b.blueComponent) * t,
-                       alpha: 1)
+        return themeColor(red: b.redComponent + (o.redComponent - b.redComponent) * t,
+                          green: b.greenComponent + (o.greenComponent - b.greenComponent) * t,
+                          blue: b.blueComponent + (o.blueComponent - b.blueComponent) * t)
     }
 
     /// Top strip: one step lighter (dark themes) / darker (light) than the
@@ -180,8 +192,17 @@ struct ChromeTheme {
 
     /// Hover fill: tty7's recipe — the surface lifted toward the foreground
     /// to a 1.18:1 contrast ratio (raise()); alpha washes read as nothing.
+    /// TRANSLUCENT windows: a low-alpha BRIGHTEN OVERLAY instead — a solid
+    /// lift reads as an opaque patch on a translucent surface, and stacking
+    /// another chromeSurface layer makes the row MORE opaque than the base
+    /// (the "controls don't follow opacity" report). The overlay keeps the
+    /// row's translucency and still reads as a hover.
     var hoverFill: NSColor {
-        lift(topBarBackground, toward: foreground, ratio: 1.18)
+        if backgroundOpacity < 0.999 {
+            return isDark ? NSColor.white.withAlphaComponent(0.10)
+                          : NSColor.black.withAlphaComponent(0.07)
+        }
+        return lift(topBarBackground, toward: foreground, ratio: 1.18)
     }
 
     /// Icon glyphs sit brighter than secondary text (tty7 tiles use the
@@ -192,10 +213,12 @@ struct ChromeTheme {
     }
 
     /// Input field surface — a clearly readable step up from hoverFill
-    /// (a 1.18 lift is a hover wash, not a field) plus the hairline
-    /// border ChromeInput draws with it.
     var inputFill: NSColor {
-        blend(background, with: foreground, fraction: isDark ? 0.11 : 0.07)
+        if backgroundOpacity < 0.999 {
+            return isDark ? NSColor.white.withAlphaComponent(0.055)
+                          : NSColor.black.withAlphaComponent(0.04)
+        }
+        return blend(background, with: foreground, fraction: isDark ? 0.11 : 0.07)
     }
 
     private func luminance(_ color: NSColor) -> CGFloat { ChromeTheme.luminance(color) }
@@ -282,21 +305,33 @@ struct ChromeTheme {
     var selectionPill: NSColor {
         // Solid blend, not an alpha wash: the pill must read over the
         // sidebar surface whatever the window composites behind it.
-        blend(background, with: foreground, fraction: isDark ? 0.16 : 0.12)
+        // TRANSLUCENT: overlay form instead (see hoverFill) — a solid
+        // pill reads as an opaque patch, stacking kills the translucency.
+        if backgroundOpacity < 0.999 {
+            return isDark ? NSColor.white.withAlphaComponent(0.16)
+                          : NSColor.black.withAlphaComponent(0.11)
+        }
+        return blend(background, with: foreground, fraction: isDark ? 0.16 : 0.12)
     }
-
-    /// Editor current-line fill: the same quiet lift as the hover, one
-    /// step quieter (tty7/Zed current-line is barely there).
     var lineHighlight: NSColor {
-        blend(background, with: isDark ? NSColor.white : NSColor.black,
+        if backgroundOpacity < 0.999 {
+            return isDark ? NSColor.white.withAlphaComponent(0.04)
+                          : NSColor.black.withAlphaComponent(0.03)
+        }
+        return blend(background, with: isDark ? NSColor.white : NSColor.black,
               fraction: isDark ? 0.045 : 0.035)
     }
 
     /// Markdown block surfaces (fenced code, table header): a step
     /// CLEARLY above the page — topBarBackground's 5% lift reads as
     /// nothing behind text (user report 2026-08-24).
+    /// TRANSLUCENT: overlay form (see hoverFill).
     var markdownBlockBackground: NSColor {
-        blend(background, with: isDark ? NSColor.white : NSColor.black,
+        if backgroundOpacity < 0.999 {
+            return isDark ? NSColor.white.withAlphaComponent(0.05)
+                          : NSColor.black.withAlphaComponent(0.035)
+        }
+        return blend(background, with: isDark ? NSColor.white : NSColor.black,
               fraction: isDark ? 0.075 : 0.055)
     }
 }
@@ -332,6 +367,24 @@ func chromeSurface(_ c: NSColor) -> NSColor {
     c.withAlphaComponent(Chrome.theme.backgroundOpacity)
 }
 
+/// Structural chrome containers (header strips, columns, page hosts,
+/// status bars) — the ONE-LAYER translucency rule:
+///
+/// The ghostty surface composites background@opacity exactly ONCE (the
+/// renderer's pass clear color) over the window's blurred backdrop. A
+/// chrome region matches it only while exactly ONE chromeSurface layer
+/// covers the pixel — stacked CALayer fills MULTIPLY their alphas
+/// (0.75 over 0.75 → 0.94), which is how whole dialogs once read
+/// nearly opaque beside a translucent terminal (the color-mismatch
+/// report). So: the window ROOT carries the single base fill, and
+/// containers paint ONLY in opaque mode, where their lift
+/// (topBarBackground) is a real step — translucent mode's
+/// topBarBackground collapses to background already, so the root shows
+/// the identical color and a second fill would just darken it.
+func chromeContainerFill(_ c: NSColor) -> NSColor? {
+    Chrome.theme.backgroundOpacity > 0.999 ? chromeSurface(c) : nil
+}
+
 /// The live Ghostty app, when the delegate is up (headless tests: nil).
 /// One accessor instead of every consumer reaching through NSApp.delegate.
 var liveGhostty: Ghostty.App? {
@@ -350,7 +403,7 @@ final class ServerStatusView: NSView {
     init(wsName: String, phase: Phase, onReconnect: @escaping () -> Void) {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = Chrome.theme.background.cgColor
+        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
 
         let (symbol, titleText, subText): (String, String, String)
         switch phase {

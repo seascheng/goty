@@ -708,9 +708,25 @@ final class PaneGridView: NSView {
     private var items: [Item] = []
 
     override func draw(_ dirtyRect: NSRect) {
-        // Shows only through the 1px gaps between split panes.
-        Chrome.theme.hairline.setFill()
-        bounds.fill()
+        // Hairline on the SEAMS only. The old full-bounds fill sat BEHIND
+        // the surfaces — invisible at background-opacity 1, but once the
+        // window is translucent the surface's bg@opacity composites over
+        // black@0.35 and the whole terminal area reads darker than the
+        // chrome (pixel-probed 83 vs 119 at opacity 0.6 over white; the
+        // "terminal deeper than the sidebars" report). With ≥2 panes the
+        // hosts are inset 0.5px on every edge, so stroking each visible
+        // host's frame paints exactly the 1px seams (plus the 0.5px ring
+        // at the region edge, the same ring the old fill showed). One
+        // pane = no seams = nothing to paint.
+        guard items.filter(\.visible).count > 1 else { return }
+        Chrome.theme.hairline.setStroke()
+        let seams = NSBezierPath()
+        for item in items where item.visible {
+            seams.append(NSBezierPath(
+                rect: item.host.frame.insetBy(dx: -0.5, dy: -0.5)))
+        }
+        seams.lineWidth = 1
+        seams.stroke()
     }
 
     func setVisiblePanes(_ entries: [(paneKey: HostKey, host: PaneHost, fraction: NSRect)],
