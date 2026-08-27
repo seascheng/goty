@@ -45,6 +45,15 @@ final class PaneHost: NSView {
     /// frame burst (cat, build output) must not enqueue one closure per
     /// frame.
     private var revealScheduled = false
+    /// streamQueue only. OUTPUT frames coalesce here while the stream
+    /// queue is backlogged; the scheduled drain block (which runs after
+    /// every already-queued frame) feeds them to the core as ONE
+    /// process_output + ONE refresh. Upstream ghostty batches the same
+    /// way inside its gather/read pipeline (Exec.zig rotating buffers);
+    /// idle-time single frames still process immediately — the drain
+    /// block is the very next enqueue, adding no latency.
+    private var coalescedOutput: [Data] = []
+    private var coalesceDrainScheduled = false
     /// Grid currently installed in the core; equal-size updates are skipped
     /// so a resize that lands on the live geometry causes no reflow at all.
     private var installedGrid: (columns: UInt16, rows: UInt16)?
@@ -273,6 +282,13 @@ final class PaneHost: NSView {
             return
         }
         flushPendingFrames()
+        if kind != SessionOutputKind.output {
+            // Byte order across stream markers is absolute: any
+            // size/snapshot/attached/exit marker must apply AFTER the
+            // output bytes that preceded it, so pending output flushes
+            // first.
+            flushCoalescedOutput()
+        }
         switch kind {
         case SessionOutputKind.size:
             guard let grid = SessionGrid(wire: data) else { return }
@@ -286,9 +302,10 @@ final class PaneHost: NSView {
             // strip them, or the parser regenerates their replies into
             // the PTY as garbage input (see ReplaySanitizer).
             processOutput(ReplaySanitizer.stripQueries(from: data),
-                          surface: surface, present: attached)
+                          surface: surface, present: false)
         case SessionOutputKind.output:
-            processOutput(data, surface: surface, present: true)
+            coalescedOutput.append(data)
+            scheduleCoalescedDrain()
         case SessionOutputKind.attached:
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -324,6 +341,39 @@ final class PaneHost: NSView {
         default:
             break
         }
+    }
+
+    /// streamQueue only. Schedules the coalescing drain: because this is
+    /// the same serial queue `receive` runs on, the drain block executes
+    /// after every frame already enqueued — a burst becomes exactly one
+    /// core parse + one refresh. One block per burst (the flag collapses
+    /// repeats).
+    private func scheduleCoalescedDrain() {
+        guard !coalesceDrainScheduled else { return }
+        coalesceDrainScheduled = true
+        streamQueue.async { [weak self] in
+            guard let self else { return }
+            self.coalesceDrainScheduled = false
+            self.flushCoalescedOutput()
+        }
+    }
+
+    /// streamQueue only. Feed everything coalesced to the core as one
+    /// block. Called by the drain block and as a barrier before stream
+    /// markers (size/snapshot/attached/exited) so byte order holds.
+    private func flushCoalescedOutput() {
+        guard !coalescedOutput.isEmpty else { return }
+        let frames = coalescedOutput
+        coalescedOutput = []
+        guard !retired, let surface = surfaceView?.surface else { return }
+        let joined: Data
+        if frames.count == 1 {
+            joined = frames[0]
+        } else {
+            let capacity = frames.reduce(0) { $0 + $1.count }
+            joined = frames.reduce(into: Data(capacity: capacity)) { $0.append($1) }
+        }
+        processOutput(joined, surface: surface, present: true)
     }
 
 
