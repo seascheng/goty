@@ -141,7 +141,7 @@ final class TitleBarView: NSView, ThemeRefreshable {
 /// fought the shared engine and the mechanism could not be isolated.
 /// With regions as hard boundaries, a leaf can only ever mis-lay-out
 /// itself, never the window (2026-08-22 postmortem).
-final class AppWindowController: NSObject {
+final class AppWindowController: NSObject, NSWindowDelegate {
     let window: NSWindow
     let titlebar = TitleBarView()
     let sidebar: SidebarView
@@ -220,6 +220,9 @@ final class AppWindowController: NSObject {
             named: Chrome.theme.isDark ? .darkAqua : .aqua)
         self.window = window
         super.init()
+        // Window-level occlusion feeds core surface visibility
+        // (minimized / fully covered windows pause their renderers).
+        window.delegate = self
 
         // --- The region map. Nothing else in the app may constrain ---
         // --- across these boundaries.                                ---
@@ -384,6 +387,17 @@ final class AppWindowController: NSObject {
     }
 
     // MARK: - Expand chrome overlays
+
+    // MARK: - NSWindowDelegate
+
+    /// A minimized or fully covered window must pause every surface's
+    /// core renderer (upstream Ghostty does the same per-window). The
+    /// panes' effective visibility also folds in pane/ancestor hidden
+    /// state on the PaneHost side.
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        terminalArea.paneGrid.setWindowVisible(
+            window.occlusionState.contains(.visible))
+    }
 }
 
 /// The strip's backdrop: ONE self-drawn rounded surface. The fill is
@@ -516,13 +530,20 @@ final class TerminalAreaView: NSView {
             view.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         overlay = view
-        if coversGrid { paneGrid.isHidden = true }
+        if coversGrid {
+            paneGrid.isHidden = true
+            // The whole grid vanishes under the overlay without any
+            // pane-level isHidden change — push the new (in)visibility
+            // to the cores so they stop rendering.
+            paneGrid.syncAllCoreVisibility()
+        }
     }
 
     func dismissOverlay() {
         overlay?.removeFromSuperview()
         overlay = nil
         paneGrid.isHidden = false
+        paneGrid.syncAllCoreVisibility()
     }
 
     /// Dismiss only if the slot holds THIS kind.

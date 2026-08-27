@@ -679,13 +679,34 @@ final class PaneHost: NSView {
     public override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
         createSurfaceIfNeeded()
-        guard let surface = surfaceView?.surface else { return }
-        let visible = superview != nil && window != nil
-        ghostty_surface_set_occlusion(surface, !visible)
-        if visible {
+        // Fixed polarity: this call used to pass `!hosted` — every
+        // mounted surface told the core it was INVISIBLE, disabling the
+        // vsync display link, disarming the render loop, and dropping
+        // the renderer thread to utility QoS. Rendering survived only
+        // through the layer-callback fallback path.
+        syncCoreVisibility()
+        if superview != nil && window != nil {
             surfaceView?.viewDidChangeBackingProperties()
             startSessionIfNeeded()
         }
+    }
+
+    /// Window-level visibility input, driven by PaneGridView's occlusion
+    /// state (which follows the window being covered/minimized). Main
+    /// thread only; defaults to true until the first occlusion event.
+    var windowVisible = true
+    /// Push the surface's effective visibility to the core:
+    /// hosted (in the grid + a window) AND shown (neither the pane nor
+    /// any ancestor hidden — overlays hide the whole grid) AND its
+    /// window not occluded. With correct polarity the core can run its
+    /// vsync display link for the visible focused pane and fully pause
+    /// hidden/occluded ones — the same contract native Ghostty enforces
+    /// via windowDidChangeOcclusionState.
+    func syncCoreVisibility() {
+        guard let surface = surfaceView?.surface else { return }
+        let hosted = superview != nil && window != nil
+        ghostty_surface_set_occlusion(
+            surface, hosted && !isHiddenOrHasHiddenAncestor && windowVisible)
     }
 
     public override func layout() {
@@ -804,8 +825,31 @@ final class PaneGridView: NSView {
             item.host.autoresizingMask = []
             addSubview(item.host)
         }
-        for item in items { item.host.isHidden = !item.visible }
+        for item in items {
+            item.host.isHidden = !item.visible
+            // Pane show/hide must reach the core: a hidden pane's surface
+            // otherwise stays "visible" forever, keeping its renderer
+            // armed (occlusionCallback(false) pauses it; true re-renders).
+            item.host.syncCoreVisibility()
+        }
         needsLayout = true
+    }
+
+    /// Window-level occlusion input (NSWindowDelegate path — macOS has
+    /// no view-level occlusion callback). The window controller calls
+    /// this on windowDidChangeOcclusionState.
+    func setWindowVisible(_ visible: Bool) {
+        for item in items {
+            item.host.windowVisible = visible
+            item.host.syncCoreVisibility()
+        }
+    }
+
+    /// Re-push core visibility for every host after an ancestor's
+    /// isHidden flip (overlay present/dismiss hides the whole grid
+    /// without touching pane isHidden or occlusion state).
+    func syncAllCoreVisibility() {
+        for item in items { item.host.syncCoreVisibility() }
     }
 
     var visibleHosts: [PaneHost] { items.filter(\.visible).map(\.host) }
