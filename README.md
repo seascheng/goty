@@ -14,9 +14,19 @@
 
 <br />
 
-<img src="images/light.png" alt="goty in a light theme — servers sidebar, split panes, right panel" width="900" />
+<img src="images/ai.png" alt="The @ai task card over the terminal grid: fixed title bar, streaming markdown body" width="900" />
+<br />
+<sub>Type <code>@ai</code> in any pane — a card opens over the grid: streaming markdown, executable proposals.</sub>
 
 </div>
+
+## Install
+
+Grab the DMG from [**Releases**](https://github.com/seascheng/goty/releases/latest), drag Goty to Applications.
+
+<sub>macOS 13+ · Apple Silicon (arm64)</sub>
+
+<sub>Ad-hoc signed for now: on first open, right-click the app → **Open** (once). Updates check automatically — or Goty ▸ <b>Check for Updates…</b></sub>
 
 ## Why
 
@@ -54,13 +64,9 @@ swift-app/restart-app.sh    # anchored restart (never pkill — it matches sessi
 | **Settings** | everything Ghostty-configurable, searchable, applies live to open terminals |
 
 <div align="center">
-<img src="images/ai.png" alt="The @ai task card: fixed title bar, streaming markdown body" width="900" />
+<img src="images/themes.png" alt="goty screenshots tiled like partially overlapping books: Ghostty themes, the light theme, translucency" width="900" />
 <br />
-<sub>The <code>@ai</code> card — fixed title bar, inline markdown, executable proposals.</sub>
-<br /><br />
-<img src="images/blur.png" alt="Window translucency: background-opacity from the Ghostty config, chrome included" width="900" />
-<br />
-<sub><code>background-opacity &lt; 1</code> from the user's Ghostty config — chrome and terminal match, seam-free.</sub>
+<sub>Same window, your config — Ghostty themes, light mode, and <code>background-opacity</code> translucency.</sub>
 </div>
 
 ## Architecture
