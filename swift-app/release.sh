@@ -94,10 +94,15 @@ git push origin main
 git tag -f "$TAG" >/dev/null
 git push -f origin "$TAG"
 
+
 echo "==> GitHub release"
+# GitHub turns a bare @ai in the notes into a mention of github.com/ai
+# (it then shows as a release "contributor"); the product feature name
+# must stay literal — inline-code it.
+GH_NOTES=$(printf '%s' "$NOTES" | sed 's/@ai/`@ai`/g')
 gh release create "$TAG" "dist/$DMG_NAME" \
     --title "Goty $VERSION" \
-    --notes "$NOTES
+    --notes "$GH_NOTES
 
 macOS 13+ · Apple Silicon (arm64). Ad-hoc signed: on first open,
 right-click the app → Open (once), or remove the quarantine flag:

@@ -2,7 +2,7 @@ name: checks
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
 
 jobs:
@@ -19,8 +19,11 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      # Type-check the Swift sources only: a full build.sh run needs the
-      # locally built libghostty dylib (patches/build-libghostty.sh).
+      # Type-check the Swift sources only: a full build.sh run needs
+      # the locally built libghostty dylib (patches/build-libghostty.sh).
+      - name: Fetch pinned Sparkle (app sources import it)
+        run: swift-app/tools/fetch-sparkle.sh
+        working-directory: swift-app
       - name: swiftc parse check
         run: |
           cd swift-app
@@ -30,8 +33,8 @@ jobs:
           xcrun swiftc -parse-as-library -enable-bare-slash-regex \
             -typecheck \
             $SWIFT_SOURCES \
-            -Xcc -fmodule-map-file=$MAPFILE \
             -Xcc -ICGhostty/include \
+            -F vendor-sparkle \
             -framework AppKit -framework Metal -framework MetalKit \
             -framework CoreVideo -framework QuartzCore \
             -framework UserNotifications -framework UniformTypeIdentifiers \
