@@ -3,8 +3,8 @@
 // GENERATED FILE — do not edit by hand. Regenerate with:
 //   python3 tools/convert-agent-manifests.py > Sources/Core/AgentManifests.swift
 //
-// Passive agent-state rules ported 1:1 from goty's detection manifests
-// (upstream-manifests). Upstream versions:
+// Passive agent-state rules (detection manifests, ported 1:1).
+// Upstream versions:
 //   claude, claude-code <- claude.toml 2026.08.13.1
 //   codex     <- codex.toml 2026.08.09.1
 //   pi        <- pi.toml 2026.06.10.1
@@ -94,5 +94,5 @@ let agentManifestTable: [String: [AgentManifestRule]] = [
         ]
 ]
 
-/// goty agents that have no passive manifest here (omp, aider, …)
+/// Agents that have no passive manifest here (omp, aider, …)
 /// degrade to the known-agent idle fallback — badge only, no live state.

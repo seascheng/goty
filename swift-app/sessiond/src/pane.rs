@@ -393,7 +393,7 @@ impl Pane {
     }
 
     /// argv0-derived command of the pane's foreground process, unwrapping
-    /// node-family launchers (goty's normalized_process_name, reduced to
+    /// node-family launchers (normalized process name, reduced to
     /// the shapes real agent CLIs use). Native binaries (claude, omp, grok)
     /// surface directly; `#!/usr/bin/env node` scripts (codex, gemini)
     /// surface via the script path argument.

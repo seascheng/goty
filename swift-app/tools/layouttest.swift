@@ -836,7 +836,7 @@ func run() {
     // The PREVIEW path (user-reported crash): open a real markdown file,
     // flip preview on — render + engine + scroll swap — inside the
     // presented overlay, then hide. The fixture is written locally: a
-    // hardcoded repo path died with the goty → goty rename, and
+    // hardcoded repo path died with a project rename, and
     // the open failure surfaced as a REAL modal error dialog that
     // wedged the headless run.
     let mdFixture = NSTemporaryDirectory() + "layouttest-\(UUID().uuidString).md"

@@ -33,7 +33,7 @@ enum FilesTest {
         ])
         // The repo's own tree (needs a real Sources/ directory). Derived
         // from #filePath so the suite follows the project when it moves —
-        // the goty → goty rename broke the hardcoded absolute path.
+        // a project rename once broke the hardcoded absolute path.
         // #filePath is whatever path form swiftc received — relative
         // when run-tests.sh compiles from swift-app/ ("tools/filestest.swift")
         // — which made root "" and every assertion below fail with the

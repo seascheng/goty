@@ -10,9 +10,6 @@ use std::path::PathBuf;
 
 pub const EXTENSION_ASSET: &str = include_str!("extension_asset.ts");
 const INSTALL_NAME: &str = "goty-gui-agent-state.ts";
-/// The pre-rename install left this sibling file behind; agents load
-/// every file in the dir, so a leftover would double-report.
-const LEGACY_INSTALL_NAME: &str = "goty-agent-state.ts";
 
 pub const SOCKET_PATH_ENV: &str = "GOTY_GUI_SOCKET_PATH";
 pub const PANE_ID_ENV: &str = "GOTY_GUI_PANE_ID";
@@ -59,7 +56,6 @@ pub fn install_extension() {
             continue;
         }
         let path = dir.join(INSTALL_NAME);
-        let _ = std::fs::remove_file(dir.join(LEGACY_INSTALL_NAME));
         if std::fs::read(&path).is_ok_and(|current| current == EXTENSION_ASSET.as_bytes()) {
             continue;
         }

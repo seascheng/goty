@@ -12,7 +12,7 @@ struct AgentSpec {
     /// Brand hue for the sidebar avatar disc (tty7 `CLIAgent::accent_rgb`).
     let accent: NSColor
 
-    /// goty status palette (goty ChromeTheme.statusColor, synced):
+    /// Status palette (synced with ChromeTheme.statusColor):
     /// working=amber, blocked=red, done=teal, idle=green — attention
     /// colors that read instantly; blue "info" for active work was
     /// illegible. Light variants are the same hues darkened for light

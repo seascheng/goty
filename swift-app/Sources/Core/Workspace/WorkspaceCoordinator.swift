@@ -33,7 +33,7 @@ final class WorkspaceCoordinator {
     private var runtime: [UUID: Runtime] = [:]
     var onSendText: ((HostKey, String) -> Void)?
 
-    /// Agent status of one pane, with the "done until seen" bit goty uses:
+    /// Agent status of one pane, with the "done until seen" bit:
     /// an agent that finished while its tab was not focused stays green
     /// until the user opens it.
     struct AgentPaneRuntime: Equatable {
@@ -101,7 +101,7 @@ final class WorkspaceCoordinator {
     // MARK: Passive agent status (AgentDetect)
 
     /// A pane published a new agent activity (from its PaneHost detector).
-    /// Applies goty's seen rules: live work is always seen; a finish while
+    /// Applies the seen rules: live work is always seen; a finish while
     /// the tab was not focused stays "done" until the user opens it.
     func agentStateUpdated(wsId: UUID, paneId: String, state: AgentActivity) {
         guard runtime[wsId] != nil else { return }

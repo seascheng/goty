@@ -398,7 +398,7 @@ final class PaneHost: NSView {
 
     /// The pane's live foreground command changed (sessiond report). The
     /// detection identity follows it: an agent typed into the shell gets a
-    /// fresh grace window and a clean OSC slate, exactly like goty's
+    /// fresh grace window and a clean OSC slate, exactly like the
     /// agent-change handling.
     func updateAgentCommand(_ fg: String?) {
         lastForegroundCommand = fg

@@ -1,9 +1,9 @@
 // goty — see CLAUDE.md for the working principles.
 //
-// Passive agent-state detection, ported from goty (upstream-workspace/goty):
-//   src/pane/osc.rs            -> AgentOscTracker (OSC 0/2 title + OSC 9)
-//   src/detect/manifest.rs     -> AgentDetect (rules, regions, arbitration)
-//   src/pane/agent_detection.rs-> AgentStatusTracker (debounce + publish)
+// Passive agent-state detection — three cooperating layers:
+//   AgentOscTracker     (OSC 0/2 title + OSC 9 capture, incremental)
+//   AgentDetect         (rules, regions, arbitration)
+//   AgentStatusTracker  (debounce + publish)
 //
 // Everything here is a pure observer over bytes we already receive and text
 // we already render. Nothing is installed into agents, nothing changes the
@@ -12,7 +12,7 @@ import Foundation
 
 // MARK: - Model
 
-/// goty AgentState: what the pane looks like right now.
+/// Agent state: what the pane looks like right now.
 enum AgentActivity: Equatable {
     case idle
     case working
@@ -39,16 +39,16 @@ enum AgentActivity: Equatable {
     }
 }
 
-// MARK: - OSC capture (goty pane/osc.rs)
+// MARK: - OSC capture
 
 /// Incremental scanner over the pane's output stream. Retains the latest
 /// OSC 0/2 title (an empty payload clears it) and the latest OSC 9 payload
 /// (the part after `9;`, e.g. `"4;0;"`). Sequences may straddle chunk
 /// boundaries; unknown sequences and oversized bodies are skipped safely.
 final class AgentOscTracker {
-    /// Payload cap — title text is untrusted model output (goty: 256).
+    /// Payload cap — title text is untrusted model output (cap 256).
     private static let maxChars = 256
-    /// OSC body cap before the rest of the string is discarded (goty: 1KB).
+    /// OSC body cap before the rest of the string is discarded (cap 1KB).
     private static let maxBody = 1024
 
     private enum State {
@@ -154,7 +154,7 @@ final class AgentOscTracker {
         }
     }
 
-    /// goty sanitize_agent_osc_string: lossy UTF-8, control chars dropped,
+    /// Lossy UTF-8 sanitize: control chars dropped,
     /// capped at `maxChars` characters.
     private func sanitize(_ payload: ArraySlice<UInt8>) -> String {
         var out = String()
@@ -168,7 +168,7 @@ final class AgentOscTracker {
     }
 }
 
-// MARK: - Manifest engine (goty detect/manifest.rs)
+// MARK: - Manifest engine
 
 struct AgentMatchGate {
     var contains: [String] = []
@@ -262,7 +262,7 @@ final class AgentRuleSet {
         if hadPositive && !hasPositive { return nil }
         if !hadPositive && subAll.isEmpty && subAny.isEmpty {
             // No positive matcher anywhere (and any/not alone can't match):
-            // goty rejects this at validation time.
+            // Rejected at validation time.
             return nil
         }
         return CompiledGate(
@@ -281,12 +281,12 @@ final class AgentRuleSet {
                                             title: title, progress: progress)
             guard c.gate.matches(region, region.lowercased()) else { continue }
             // Highest priority wins; on ties the earlier rule in the file
-            // wins (goty keeps the first via `previous.priority >= new`).
+            // wins (the first is kept via `previous.priority >= new`).
             if let previous = matched, previous.rule.priority >= c.rule.priority { continue }
             matched = c
         }
         guard let result = matched else {
-            // Known agent, nothing matched: goty falls back to idle without
+            // Known agent, nothing matched: fall back to idle without
             // visible evidence rather than claiming unknown.
             return AgentScreenDetection(state: .idle)
         }
@@ -323,7 +323,7 @@ enum AgentDetect {
         return set.detect(screen: screen, title: title, progress: progress)
     }
 
-    // MARK: Regions (goty detect/manifest.rs `region()`)
+    // MARK: Regions (`region()`)
 
     static func region(_ spec: String, screen: String, title: String, progress: String) -> String {
         switch spec.trimmingCharacters(in: .whitespaces) {
@@ -440,7 +440,7 @@ enum AgentDetect {
         return all[blockIndex...].joined(separator: "\n")
     }
 
-    // Box-drawing regions (Claude's input box, goty prompt_box_*).
+    // Box-drawing regions (Claude's input box, prompt_box_*).
 
     private static func isHorizontalRule(_ line: Substring) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -487,10 +487,10 @@ enum AgentDetect {
     }
 }
 
-// MARK: - Publish state machine (goty pane/agent_detection.rs)
+// MARK: - Publish state machine
 
 /// Debounces raw screen detections into published state transitions.
-/// goty's constants: 300ms tick, 100ms pending-idle recheck, 3
+/// Constants: 300ms tick, 100ms pending-idle recheck, 3
 /// confirmations / 700ms hold for working→idle, 800ms stable-blocker
 /// refresh, 3s startup grace.
 final class AgentStatusTracker {
@@ -514,7 +514,7 @@ final class AgentStatusTracker {
     private var graceUntil: Date?
 
     /// Restart after (re)attach: unknown until the first evidence, then a
-    /// fresh 3s grace like goty's agent-startup window.
+    /// fresh 3s grace like the agent-startup window.
     func restartGrace(now: Date = Date()) {
         state = .unknown
         visibleIdle = false
@@ -527,7 +527,7 @@ final class AgentStatusTracker {
         graceUntil = now.addingTimeInterval(Self.startupGrace)
     }
 
-    /// goty `decide_detection_screen_read`: an idle pane whose content has
+    /// An idle pane whose content has
     /// not changed since the last scan needs no screen read at all.
     func shouldReadScreen(contentSeq: UInt64) -> Bool {
         guard state == .idle, pendingIdleStarted == nil,
@@ -570,7 +570,7 @@ final class AgentStatusTracker {
         let nextVisibleBlocker = detection.visibleBlocker && newState == .blocked
         let nextVisibleWorking = detection.visibleWorking && newState == .working
 
-        // goty PendingIdleConfirmation: a working pane that momentarily
+        // PendingIdleConfirmation: a working pane that momentarily
         // reads idle (mid-redraw) stays working for up to 700ms / 3 passes.
         let workingToPlainIdle = state == .working && newState == .idle
             && !nextVisibleIdle && !nextVisibleBlocker && !processExited

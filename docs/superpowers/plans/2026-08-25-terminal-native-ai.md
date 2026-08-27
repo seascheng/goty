@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Core code (`Sources/Core/**`) imports Foundation/Security only — zero AppKit view imports (AGENTS.md binding invariant).
-- No sessiond/goty backend changes; PTYs remain owned by sessiond. AI execution spawns its own short-lived processes, like `RepoWatcher`/`FileSources` already do.
+- No sessiond backend changes; PTYs remain owned by sessiond. AI execution spawns its own short-lived processes, like `RepoWatcher`/`FileSources` already do.
 - No new third-party dependencies. ssh via `/usr/bin/ssh` + `SshTransport.options(host:command:)`.
 - Every task ends with `swift-app/build.sh` succeeding (treat new Swift warnings as errors) — except Tasks 1–7 which may run `swift-app/run-tests.sh` alone if GUI wiring is untouched.
 - Tests follow the repo's headless harness pattern: `@main enum` + `check(_:_:)` in `swift-app/tools/`, compiled by `run-tests.sh` — no XCTest.
@@ -84,7 +84,7 @@ import Foundation
 }
 ```
 
-- [x] **Step 2: Wire the harness** — in `run-tests.sh`, copy the filestest `swiftc` + `run_guarded` block, changing `tools/filestest.swift` → `tools/aitest.swift` and the output name to `goty-ai-test`; add `-framework Security` to that block's link flags.
+- [x] **Step 2** — wire the harness — in `run-tests.sh`, copy the filestest `swiftc` + `run_guarded` block, changing `tools/filestest.swift` → `tools/aitest.swift` and the output name to `goty-ai-test`; add `-framework Security` to that block's link flags.
 
 - [x] **Step 3: Run to verify it fails**
 

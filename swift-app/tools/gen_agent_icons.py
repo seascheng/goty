@@ -9,7 +9,7 @@ bundle, so the PNGs are embedded as base64 and assembled into an
 maps 1:1, no resampling.
 
 Sources for the glyphs: tty7's curated agent icons
-(tty7/assets/icons/agents — official marks, normalized to
+(tty7's assets/icons/agents — official marks, normalized to
 a 24x24 box with a #FF0000 placeholder fill that is re-blacked before
 rasterizing), plus qwen/kimi/cline from Simple Icons. To refresh a
 glyph, drop new PNGs into the assets dir and rebuild.

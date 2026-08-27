@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Convert goty's agent-detection manifests (TOML) into a Swift source file.
+"""Convert agent-detection manifests (TOML) into a Swift source file.
 
-Source of truth: upstream-manifests/*.toml — goty's
-passive screen/OSC rule engine (see goty src/detect/manifest.rs). We port
+Source of truth: the upstream manifests workspace's *.toml — the passive
+screen/OSC rule engine (same semantics as src/detect/manifest.rs). We port
 the rule semantics 1:1 and re-emit them as a compiled-in Swift table so the
 engine needs no TOML parser and no bundle resources.
 
 Usage:
-    python3 tools/convert-agent-manifests.py [goty-manifests-dir] > Sources/Core/AgentManifests.swift
+    python3 tools/convert-agent-manifests.py <manifests-dir> > Sources/Core/AgentManifests.swift
 
 Only agents present in our AgentCatalog are converted; AGENTS below maps a
 manifest file stem to the AgentCatalog command key.
@@ -16,6 +16,7 @@ manifest file stem to the AgentCatalog command key.
 import sys
 import tomllib
 from pathlib import Path
+
 AGENTS = {
     "claude": ["claude", "claude-code"],
     "codex": ["codex"],
@@ -89,8 +90,9 @@ def emit_rule(rule: dict, indent: str) -> str:
 
 
 def main() -> None:
-    src = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
-        __file__).resolve().parents[3] / "upstream-manifests"
+    if len(sys.argv) != 2:
+        sys.exit("usage: convert-agent-manifests.py <manifests-dir>")
+    src = Path(sys.argv[1])
     entries = []
     versions = []
     for stem, keys in AGENTS.items():
@@ -105,10 +107,10 @@ def main() -> None:
     print("// goty — see CLAUDE.md for the working principles.")
     print("//")
     print("// GENERATED FILE — do not edit by hand. Regenerate with:")
-    print("//   python3 tools/convert-agent-manifests.py > Sources/Core/AgentManifests.swift")
+    print("//   python3 tools/convert-agent-manifests.py <manifests-dir> > Sources/Core/AgentManifests.swift")
     print("//")
-    print("// Passive agent-state rules ported 1:1 from goty's detection manifests")
-    print(f"// (upstream-manifests). Upstream versions:")
+    print("// Passive agent-state rules (detection manifests, ported 1:1).")
+    print("// Upstream versions:")
     for key, stem, version in versions:
         print(f"//   {key:9s} <- {stem}.toml {version}")
     print()
@@ -117,7 +119,7 @@ def main() -> None:
     print(",\n".join(entries))
     print("]")
     print()
-    print("/// goty agents that have no passive manifest here (omp, aider, …)")
+    print("/// Agents that have no passive manifest here (omp, aider, …)")
     print("/// degrade to the known-agent idle fallback — badge only, no live state.")
 
 

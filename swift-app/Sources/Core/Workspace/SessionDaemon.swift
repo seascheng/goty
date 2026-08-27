@@ -84,10 +84,7 @@ final class SessionDaemon {
     static func terminateSharedForUpgrade() {
         let pkill = Process()
         pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        // Both generations: an old goty-sessiond still holds the shared
-        // socket after this rename — killing only goty-sessiond would
-        // leave it alive and the respawn can't bind.
-        pkill.arguments = ["-f", "(goty|goty)-sessiond.*" + sharedSocketPath]
+        pkill.arguments = ["-f", "goty-sessiond.*" + sharedSocketPath]
         pkill.standardOutput = FileHandle.nullDevice
         pkill.standardError = FileHandle.nullDevice
         try? pkill.run()

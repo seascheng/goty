@@ -26,10 +26,11 @@ errors to fix, not to commit.
 
 ## Scope
 
-- This product has no relation to goty: PTYs, sessions, replay, and remote
-  distribution are owned by our own `goty-sessiond`. Do not reintroduce a
-  goty backend, the old GPUI crate, or any crepuscularity dependency.
-- tty7 (`../tty7`) is the design reference for sidebar, tabs,
+- The session stack is owned end-to-end by this repo: PTYs, sessions,
+  replay, and remote distribution all live in `goty-sessiond`. Do not
+  reintroduce the previous backend, the old GPUI crate, or any
+  crepuscularity dependency.
+- tty7 (the sibling workspace) is the design reference for sidebar, tabs,
   grouping, and interaction models; cmux/Warp/Arc are visual references only.
 - Long-lived architecture invariants (threading, pane identity, icon rules,
   cache invalidation) live in `CLAUDE.md` and are binding.

@@ -114,8 +114,6 @@ final class RemoteDaemonLink {
         _ = ssh("cd \(Shell.forceQuoted(home)) && setsid --fork \(Shell.forceQuoted(binPath)) "
             + "\(Shell.forceQuoted(sockPath)) </dev/null >\(Shell.forceQuoted(dir + "/sessiond.log")) 2>&1; true")
 
-        migrateLegacyTmuxSessions()
-
         guard openForward(remoteSocket: sockPath) else {
             scheduleRetry(reason: "forward failed")
             return
@@ -254,11 +252,6 @@ final class RemoteDaemonLink {
             + "[ \"$f\" = \"$(basename \(Shell.forceQuoted(binPath)))\" ] || rm -f -- \"$f\"; done")
     }
 
-    /// Panes created by the abandoned tmux backend keep running pointlessly.
-    private func migrateLegacyTmuxSessions() {
-        _ = ssh("tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^goty_' "
-            + "| while read -r s; do tmux kill-session -t \"$s\" 2>/dev/null; done; true")
-    }
 
     // MARK: - Forward lifecycle
 
