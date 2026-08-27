@@ -83,6 +83,54 @@ struct GhosttyConfigDocument {
     }
 }
 
+// MARK: - goty's shipped appearance defaults
+
+/// The Appearance configuration goty ships with — the project's
+/// current Settings ▸ Appearance values. AppDelegate seeds these into
+/// a config that doesn't exist yet (filling only keys the source
+/// doesn't set, so explicit user choices always win), Settings paints
+/// them wherever nothing resolves, and Chrome's fallback theme carries
+/// the palette. One source for "what goty looks like out of the box".
+enum GhosttyConfigDefaults {
+    static let theme = "Arthur"
+    static let fontFamily = "Maple Mono NF CN"
+    static let fontSize = 14.5
+    static let backgroundOpacity = 0.80
+    static let backgroundBlur = 25.0
+
+    /// `key = value` pairs in Settings ▸ Appearance order.
+    static let appearance: [(key: String, value: String)] = [
+        ("theme", theme),
+        ("font-family", fontFamily),
+        ("font-size", String(fontSize)),
+        ("background-opacity", String(format: "%.2f", backgroundOpacity)),
+        ("background-blur", String(Int(backgroundBlur))),
+    ]
+
+    static func value(_ key: String) -> String? {
+        appearance.first(where: { $0.key == key })?.value
+    }
+
+    static func double(_ key: String) -> Double? {
+        value(key).flatMap(Double.init)
+    }
+}
+
+extension GhosttyConfigDocument {
+    /// Upsert every appearance default the document doesn't set yet.
+    /// True when anything was written (the caller decides to save).
+    @discardableResult
+    mutating func fillAppearanceDefaults() -> Bool {
+        var touched = false
+        for (key, value) in GhosttyConfigDefaults.appearance
+        where self.value(key) == nil {
+            set(key, value)
+            touched = true
+        }
+        return touched
+    }
+}
+
 /// Thin load/save for the one config file. Atomic writes only — a
 /// half-written config is a broken terminal on next launch.
 struct GhosttyConfigStore {

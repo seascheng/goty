@@ -29,10 +29,16 @@ struct ChromeTheme: Equatable {
     /// so our GUI composites like the terminal (1 when opaque).
     var backgroundOpacity: CGFloat = 1
 
+    /// Arthur's palette — the theme the shipped default config seeds
+    /// (`theme = Arthur`, GhosttyConfigDefaults), so the pre-config
+    /// first frame and any no-config path already paint the default
+    /// look. Opacity stays 1 here: translucency is a window property,
+    /// applied once the live config resolves — never a one-frame
+    /// translucent flash.
     static let fallback = ChromeTheme(
-        background: themeColor(red: 0.11, green: 0.11, blue: 0.11),
-        foreground: themeColor(red: 0.87, green: 0.87, blue: 0.87),
-        accent: themeColor(red: 0.30, green: 0.30, blue: 0.30))
+        background: themeColor(red: 28.0 / 255.0, green: 28.0 / 255.0, blue: 28.0 / 255.0),
+        foreground: themeColor(red: 221.0 / 255.0, green: 238.0 / 255.0, blue: 221.0 / 255.0),
+        accent: themeColor(red: 77.0 / 255.0, green: 77.0 / 255.0, blue: 77.0 / 255.0))
 
     static func from(_ cfg: Ghostty.Config?) -> ChromeTheme {
         guard let handle = cfg?.config else { return .fallback }

@@ -639,14 +639,16 @@ final class SettingsRootView: NSView, ThemeRefreshable {
             },
             SettingSpec(label: "Font Size", detail: nil, key: "font-size") { root, page in
                 root.slider("font-size", min: 8, max: 28, step: 0.5,
-                            current: root.resolvedDouble("font-size") ?? 13,
+                            current: root.resolvedDouble("font-size")
+                                ?? GhosttyConfigDefaults.fontSize,
                             format: { String(format: "%.1f pt", $0) },
                             write: { String(format: "%.1f", $0) }, page: page)
             },
             SettingSpec(label: "Background Opacity", detail: nil,
                         key: "background-opacity") { root, page in
                 root.slider("background-opacity", min: 0.15, max: 1, step: 0.05,
-                            current: root.resolvedDouble("background-opacity") ?? 1,
+                            current: root.resolvedDouble("background-opacity")
+                                ?? GhosttyConfigDefaults.backgroundOpacity,
                             format: { String(format: "%.2f", $0) },
                             write: { $0 > 0.995 ? nil : String(format: "%.2f", $0) },
                             page: page)
@@ -654,7 +656,8 @@ final class SettingsRootView: NSView, ThemeRefreshable {
             SettingSpec(label: "Background Blur", detail: nil,
                         key: "background-blur") { root, page in
                 root.slider("background-blur", min: 0, max: 40, step: 1,
-                            current: root.resolvedDouble("background-blur") ?? 0,
+                            current: root.resolvedDouble("background-blur")
+                                ?? GhosttyConfigDefaults.backgroundBlur,
                             format: { $0 < 0.5 ? "Off" : String(Int($0)) },
                             write: { $0 < 0.5 ? nil : String(Int($0)) }, page: page)
             },
