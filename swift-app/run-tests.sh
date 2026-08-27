@@ -16,6 +16,10 @@
 set -e
 cd "$(dirname "$0")"
 
+# Sparkle: the app sources import it — fetch the pinned tree if absent.
+[ -d vendor-sparkle/Sparkle.framework ] || tools/fetch-sparkle.sh
+
+
 B="/tmp/goty-build-$$"          # per-run binaries (rpath CGhostty copy)
 mkdir -p "$B"
 CACHE=/tmp/goty-test-cache-$(id -u)
@@ -81,6 +85,7 @@ if needs_build; then
         -enable-bare-slash-regex \
         -enable-testing \
         -module-name goty \
+        -F vendor-sparkle \
         -emit-library -static \
         -emit-module-path "$STAGE"/goty.swiftmodule \
         $VENDORED \
@@ -124,6 +129,8 @@ LINK_FLAGS=(
     "$CACHE"/libtreesitter.a
     -L CGhostty/lib -lghostty
     -Xlinker -rpath -Xlinker @executable_path/CGhostty/lib
+    -F vendor-sparkle -framework Sparkle
+    -Xlinker -rpath -Xlinker @executable_path
     -framework AppKit -framework Metal -framework MetalKit -framework CoreVideo
     -framework QuartzCore -framework UserNotifications -framework UniformTypeIdentifiers
     -framework ServiceManagement -framework Security
@@ -131,6 +138,7 @@ LINK_FLAGS=(
 
 # The binaries link libghostty at @executable_path; give them the real tree.
 cp -R CGhostty "$B"/CGhostty 2>/dev/null || true
+cp -R vendor-sparkle/Sparkle.framework "$B"/
 
 # Watchdog: a wedged test binary holds REAL windows on the user's
 # screen (2026-08-24: a SIGPIPE-muted goty-files-test left one up).

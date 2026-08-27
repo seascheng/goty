@@ -60,6 +60,34 @@ enum SettingsTest {
         check(edited.value("theme") == "Arthur", "siblings survive remove")
         check(!edited.rendered.contains("font-size"), "no font-size line remains")
 
+        print("— Appearance defaults —")
+        check(GhosttyConfigDefaults.appearance.map(\.key)
+              == ["theme", "font-family", "font-size", "background-opacity", "background-blur"],
+              "defaults cover the Settings ▸ Appearance keys")
+        check(GhosttyConfigDefaults.value("theme") == "Arthur"
+              && GhosttyConfigDefaults.value("font-family") == "Maple Mono NF CN",
+              "default theme and font are the shipped configuration")
+        check(GhosttyConfigDefaults.double("font-size") == 14.5
+              && GhosttyConfigDefaults.double("background-opacity") == 0.80
+              && GhosttyConfigDefaults.double("background-blur") == 25,
+              "default size, opacity, and blur are the shipped configuration")
+
+        var blank = GhosttyConfigDocument(text: "")
+        check(blank.fillAppearanceDefaults() && blank.value("theme") == "Arthur"
+              && blank.value("font-size") == "14.5"
+              && blank.value("background-opacity") == "0.80",
+              "empty document fills the whole default block")
+
+        var live = GhosttyConfigDocument(text: "theme = Dracula\nfont-size = 15\n")
+        check(live.fillAppearanceDefaults() && live.value("theme") == "Dracula"
+              && live.value("font-size") == "15"
+              && live.value("font-family") == "Maple Mono NF CN"
+              && live.value("background-blur") == "25",
+              "explicit user keys survive the fill; gaps close")
+        let filled = live.rendered
+        _ = live.fillAppearanceDefaults()
+        check(live.rendered == filled, "second fill is a no-op (byte-identical)")
+
         print("— GhosttyConfigStore —")
         let tmp = NSTemporaryDirectory() + "goty-settings-\(getpid()).ghostty"
         let store = GhosttyConfigStore(url: URL(fileURLWithPath: tmp))
@@ -132,6 +160,33 @@ enum SettingsTest {
         } else {
             check(false, "font-size control carries a ChromeSlider")
         }
+
+        // Empty config (fresh-install store): headless controls paint
+        // the shipped defaults — resolvedDouble is nil with no app.
+        let emptyPath = NSTemporaryDirectory() + "goty-settings-empty-\(getpid()).ghostty"
+        try? FileManager.default.removeItem(atPath: emptyPath)
+        let emptyRoot = SettingsRootView(
+            store: GhosttyConfigStore(url: URL(fileURLWithPath: emptyPath)), app: nil)
+        let defaultsWin = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered, defer: false)
+        defaultsWin.setFrameOrigin(NSPoint(x: 30000, y: 30000))
+        emptyRoot.translatesAutoresizingMaskIntoConstraints = false
+        defaultsWin.contentView = emptyRoot
+        emptyRoot.layoutSubtreeIfNeeded()
+        for (key, want) in [("font-size", GhosttyConfigDefaults.fontSize),
+                            ("background-opacity", GhosttyConfigDefaults.backgroundOpacity),
+                            ("background-blur", GhosttyConfigDefaults.backgroundBlur)] {
+            if let wrap = emptyRoot.currentPageForTest?.controlsByKey[key] as? NSView,
+               let s = wrap.subviews.first(where: { $0 is ChromeSlider }) as? ChromeSlider {
+                check(abs(s.valueForTest - want) < 0.01,
+                      "empty config: \(key) slider shows the default (got \(s.valueForTest))")
+            } else {
+                check(false, "empty config: \(key) slider present")
+            }
+        }
+        try? FileManager.default.removeItem(atPath: emptyPath)
 
         // Layout lock: every FORM page's rows are EXACTLY 56pt (the
         // oversized-first-row report — native intrinsic sizes must
@@ -262,6 +317,24 @@ enum SettingsTest {
             _ = SettingsRootView.swatchImage(bg: bg, fg: fg)
         } else {
             check(true, "Arthur theme file absent here — swatch parse skipped")
+        }
+
+        print("— Updater —")
+        // The real app menu, headless: Sparkle's "Check for Updates…"
+        // sits in the Goty ▸ menu, disabled until the updater starts.
+        let menuDelegate = AppDelegate()
+        menuDelegate.buildMainMenu()
+        let gotyMenu = NSApp.mainMenu?.items.first?.submenu
+        if let updateItem = gotyMenu?.items.first(where: {
+            $0.title == "Check for Updates…"
+        }) {
+            check(updateItem.target is UpdaterManager,
+                  "update item targets UpdaterManager")
+            check((updateItem.target as? UpdaterManager)?
+                    .validateMenuItem(updateItem) == false,
+                  "update item disabled before the updater starts")
+        } else {
+            check(false, "Goty ▸ menu offers Check for Updates…")
         }
 
         print("— AI settings —")

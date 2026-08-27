@@ -4,6 +4,8 @@ swift-app/goty
 swift-app/Goty.app/
 swift-app/sessiond/target/
 swift-app/CGhostty/lib/
+swift-app/vendor-sparkle/
+dist/
 swift-app/*.o
 .DS_Store
 *.log

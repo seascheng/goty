@@ -13,6 +13,11 @@ extension AppDelegate {
                                       keyEquivalent: ",")
         settingsItem.target = self
         appMenu.addItem(settingsItem)
+        let updateItem = NSMenuItem(title: "Check for Updates…",
+                                    action: #selector(UpdaterManager.checkForUpdates(_:)),
+                                    keyEquivalent: "")
+        updateItem.target = UpdaterManager.shared
+        appMenu.addItem(updateItem)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu

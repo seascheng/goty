@@ -25,6 +25,12 @@ cargo build --release --manifest-path sessiond/Cargo.toml
 if command -v python3 >/dev/null 2>&1; then
     python3 tools/gen_agent_icons.py
 fi
+
+# Sparkle (auto-update): pinned release fetched on demand (gitignored,
+# sha256-verified) — module import, link, and the release's EdDSA
+# tools (sign_update/generate_keys) all come from this tree.
+[ -d vendor-sparkle/Sparkle.framework ] || tools/fetch-sparkle.sh
+
 MAPFILE=CGhostty/include/module.modulemap
 
 # cmark-gfm (vendored CommonMark+GFM engine) → static lib, one file
@@ -50,7 +56,8 @@ swiftc \
     "$B"/libcmark_gfm.a \
     -L CGhostty/lib -lghostty \
     -Xlinker -rpath -Xlinker @executable_path/CGhostty/lib \
-    -framework AppKit \
+    -F vendor-sparkle -framework Sparkle \
+    -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
     -framework Metal -framework MetalKit -framework CoreVideo \
     -framework QuartzCore -framework UserNotifications \
     -framework UniformTypeIdentifiers -framework ServiceManagement \
@@ -75,6 +82,8 @@ cp sessiond/target/x86_64-unknown-linux-musl/release/goty-sessiond \
 mkdir -p "$APP/Contents/MacOS/CGhostty/lib"
 cp CGhostty/lib/libghostty.dylib \
     "$APP/Contents/MacOS/CGhostty/lib/libghostty-internal.dylib"
+# Sparkle embedded at Contents/Frameworks (rpath above points here).
+cp -R vendor-sparkle/Sparkle.framework "$APP/Contents/Frameworks/"
 # App icon (Ghostty-theme ghost, source: Assets/app-logo.png).
 cp Assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -90,6 +99,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key><string>goty</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>SUFeedURL</key><string>https://raw.githubusercontent.com/seascheng/goty/main/appcast.xml</string>
+    <key>SUPublicEDKey</key><string>BVEKBLzlYYm5/fdE1kQh1JwSfpzsX414EvnXxGQy6hA=</string>
+    <!-- Launcher XPC needs the app and XPC signed by one team — false
+         for ad-hoc builds (embedded Autoupdate installs instead);
+         release.sh flips it true on the Developer-ID path. -->
+    <key>SUEnableInstallerLauncherService</key><false/>
     <key>NSHighResolutionCapable</key><true/>
     <key>CFBundleIconFile</key><string>AppIcon</string>
 </dict>

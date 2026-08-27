@@ -26,6 +26,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var editorPanelBacking: EditorPanelView?
     private var sshWindowBacking: SSHConfigWindowController?
     var settingsWindowBacking: SettingsWindowController?
+    /// Sparkle auto-updates — created here (before launch finishes,
+    /// its contract), started once the window is up.
+    private let updaterManager = UpdaterManager.shared
 
     // AI tasks (@ai): the coordinator is rebuilt when the provider
     // config changes (token compare per start — no notification
@@ -76,9 +79,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fm = FileManager.default
         try? fm.createDirectory(atPath: ownHome, withIntermediateDirectories: true)
         let liveConfig = support + "/../com.mitchellh.ghostty/config.ghostty"
-        if !fm.fileExists(atPath: ownHome + "/config"),
-           fm.fileExists(atPath: liveConfig) {
-            try? fm.copyItem(atPath: liveConfig, toPath: ownHome + "/config")
+        if !fm.fileExists(atPath: ownHome + "/config") {
+            if fm.fileExists(atPath: liveConfig) {
+                try? fm.copyItem(atPath: liveConfig, toPath: ownHome + "/config")
+            }
+            // First run only: back every appearance key the (copied or
+            // absent) config doesn't set with goty's shipped defaults —
+            // an empty home gets the whole block, a copied live config
+            // keeps its explicit choices (GhosttyConfigDefaults).
+            let store = GhosttyConfigStore(url: URL(fileURLWithPath: ownHome + "/config"))
+            var doc = store.load()
+            if doc.fillAppearanceDefaults() {
+                try? store.save(doc)
+            }
         }
         if !fm.fileExists(atPath: ownHome + "/themes/Arthur") {
             let seed = "/Applications/Ghostty.app/Contents/Resources/ghostty/themes"
@@ -138,9 +151,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Launch config may already ask for translucency/blur — apply the
         // window-level treatment once before any surface shows.
         wc.applyChromeTheme()
-        let sidebar = wc.sidebar
         let rightPanel = wc.rightPanel
         wc.window.makeKeyAndOrderFront(nil)
+        // Sparkle: automatic version checks from here on; the Goty ▸
+        // "Check for Updates…" item enables once the updater is up.
+        updaterManager.start()
 
         // Stale LOCAL daemon (same landmine the remote link hits): the
         // daemon outlives the app by design, so an upgraded bundle can
