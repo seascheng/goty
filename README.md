@@ -1,42 +1,89 @@
-# Goty
+<div align="center">
 
-Native macOS terminal app (Swift + AppKit + libghostty VT engine), built on
-tty7's architecture: the GUI owns no PTYs — a small Rust daemon does.
+<img src="swift-app/Assets/app-logo.png" alt="goty" width="88" height="88" />
 
-- **Servers** — local Mac plus ssh hosts, each an independent session owner
-- **Spaces** — session tabs, grouped by working directory (tty7 sidebar model)
-- **File manager** — browse/copy on either side of the connection
+### goty
 
-## Architecture
+**A native macOS terminal workbench: Ghostty's core, your sessions, your servers, your agents.**
 
-- `swift-app/Sources/Core` — session daemon client, store, coordinators
-- `swift-app/Sources/UI` — AppKit chrome (sidebar, terminal views, panels)
-- `swift-app/sessiond` — standalone Rust PTY daemon (`goty-sessiond`);
-  owns every local pane and its replay ring
-- Remote servers run the same sessiond (musl static build) installed over
-  ssh into `~/.local/share/goty/bin/`; one `ssh -N -L` socket forward
-  bridges it locally. Sessions survive GUI exit and reconnect with scrollback.
-- `swift-app/vendor-swift` — Ghostty surface view vendored from Ghostty.app
-- `patches/` — libghostty build patches and script (`swift-app/CGhostty`)
+<sub>Swift · AppKit · libghostty · Rust session daemon</sub>
 
-Working principles and architecture invariants: see `CLAUDE.md`.
+<br />
+
+<sub>v0.1.0 · macOS 13+ · themed by your own Ghostty config · MPL-2.0</sub>
+
+<br />
+
+<img src="images/light.png" alt="goty in a light theme — servers sidebar, split panes, right panel" width="900" />
+
+</div>
+
+## Why
+
+- **Native Mac app, terminal from Ghostty** — the window chrome is real AppKit; the terminal grid is libghostty. No Electron, no web view.
+- **Sessions that outlive the app** — panes run in `goty-sessiond`, a small Rust daemon. Quit, crash, or reboot the GUI: the shells keep running and reattach on next launch.
+- **Your config is the theme** — goty reads your Ghostty config (colors, opacity, blur, font) and the whole chrome follows it, live.
+- **Servers, not tabs-in-tabs** — every SSH host from `~/.ssh/config` becomes a server with its own remote daemon; reconnect and the panes are still there.
+- **Agent-aware** — Claude Code, Codex & co. are detected per pane: brand icons, live status, git branch context.
+- **`@ai` in the terminal** — type `@ai <request>` in any pane; a card opens over the grid with streaming answers, markdown, and executable proposals.
 
 ## Build
 
-```sh
-swift-app/build.sh
-```
-
-Builds sessiond (native + linux-musl), compiles the Swift app against the
-locally built `libghostty` dylib, and packages `swift-app/Goty.app`.
-
-Prerequisite for the GUI link step: `patches/build-libghostty.sh` once per
-Ghostty source tree (zig + Metal toolchain required).
-
-## Checks
+Everything builds from one script (Xcode command-line tools + Rust stable):
 
 ```sh
-cargo fmt --manifest-path swift-app/sessiond/Cargo.toml -- --check
-cargo clippy --manifest-path swift-app/sessiond/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path swift-app/sessiond/Cargo.toml
+# once per Ghostty tree: build the locally patched libghostty
+patches/build-libghostty.sh
+
+swift-app/build.sh          # builds goty + Goty.app + goty-sessiond
+swift-app/run-tests.sh      # four headless suites: layout, files, settings, ai
+swift-app/restart-app.sh    # anchored restart (never pkill — it matches sessiond too)
 ```
+
+## What's inside
+
+| | |
+|---|---|
+| **Window** | sidebar (SERVERS / SPACES, both foldable per section) · split panes · <kbd>⌘T</kbd> <kbd>⌘W</kbd> <kbd>⌘D</kbd> · tab strip when the sidebar collapses to a rail |
+| **Sessions** | every pane owned by `goty-sessiond` · restore on launch · remote panes keep running on their server while you're away |
+| **Servers** | SSH hosts from `~/.ssh/config` · themed host manager · forwarded daemon sockets · parked state survives remove/re-add |
+| **Spaces** | one section per repo (subdirs and worktrees resolve to the repo root) · per-space "+" opens terminals or a new worktree right there |
+| **Right panel** | Files (local + remote over ssh) · Info · Git: branch, staged/unstaged, inline commit box, worktrees |
+| **Editor** | built-in overlay editor with syntax highlighting, markdown preview, gutter |
+| **AI** | `@ai` inline trigger · streaming markdown card · bash / write / edit proposals with confirm · OpenAI-compatible endpoints |
+| **Settings** | everything Ghostty-configurable, searchable, applies live to open terminals |
+
+<div align="center">
+<img src="images/ai.png" alt="The @ai task card: fixed title bar, streaming markdown body" width="900" />
+<br />
+<sub>The <code>@ai</code> card — fixed title bar, inline markdown, executable proposals.</sub>
+<br /><br />
+<img src="images/blur.png" alt="Window translucency: background-opacity from the Ghostty config, chrome included" width="900" />
+<br />
+<sub><code>background-opacity &lt; 1</code> from the user's Ghostty config — chrome and terminal match, seam-free.</sub>
+</div>
+
+## Architecture
+
+```
+swift-app/
+  Sources/App        AppKit shell: window, sidebar, panels, menu
+  Sources/UI         All chrome components (one themed component per type)
+  Sources/Core       Logic: workspace state, AI, git, SSH config — zero AppKit views
+  sessiond/          Rust workspace: PTYs, sessions, replay (MPL-2.0)
+  vendor-swift/      Vendored Ghostty Swift sources (libghostty embed)
+  vendor-c/          cmark-gfm + tree-sitter for markdown/code highlight
+```
+
+Long-lived invariants (threading, pane identity, icon rules, cache
+invalidation) live in `CLAUDE.md` and are binding.
+
+---
+
+<div align="center">
+<sub>
+
+Terminal core from [Ghostty](https://github.com/ghostty-org/ghostty) · [MPL-2.0](LICENSE) · v0.1.0
+
+</sub>
+</div>
