@@ -151,7 +151,10 @@ enum AgentSessionEvent {
     /// Agent slash-command directory (available_commands_update).
     case commandsChanged([ACPSlashCommand])
     /// Token/cost meter (usage_update; omp carries size/used/cost).
-    case usageUpdate(used: Int?, size: Int?, costAmount: Double?, costCurrency: String?)
+    /// input/output token splits are part of the display contract for
+    /// future agents — nil segments hide in the composer statusbar.
+    case usageUpdate(used: Int?, size: Int?, input: Int?, output: Int?,
+                     costAmount: Double?, costCurrency: String?)
 }
 
 protocol AgentSessionDelegate: AnyObject {

@@ -129,10 +129,20 @@ enum AgentTest {
         events += session.interpret(["method": "session/update", "params": [
             "sessionId": "s1",
             "update": ["sessionUpdate": "usage_update", "used": 19754, "size": 1000000,
+                       "input": 18000, "output": 1754,
                        "cost": ["amount": 0.0171, "currency": "USD"]],
         ]])
-        if case .usageUpdate(let used, let size, let costAmount, let costCurrency)? = events.last,
-           used == 19754, size == 1000000, costAmount == 0.0171, costCurrency == "USD" {} else { failures += 1; print("FAIL  usage payload") }
+        if case .usageUpdate(let used, let size, let input, let output,
+                              let costAmount, let costCurrency)? = events.last,
+           used == 19754, size == 1000000, input == 18000, output == 1754,
+           costAmount == 0.0171, costCurrency == "USD" {} else { failures += 1; print("FAIL  usage payload") }
+        events += session.interpret(["method": "session/update", "params": [
+            "sessionId": "s1",
+            "update": ["sessionUpdate": "usage_update", "used": 19754, "size": 1000000,
+                       "cost": ["amount": 0.0171, "currency": "USD"]],
+        ]])
+        if case .usageUpdate(_, _, let noIn, let noOut, _, _)? = events.last,
+           noIn == nil && noOut == nil {} else { failures += 1; print("FAIL  usage without token split stays nil") }
 
         print("— manifest —")
         let launch = AgentManifests.acpLaunch(for: "omp")

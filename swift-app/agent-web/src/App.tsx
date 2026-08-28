@@ -207,7 +207,10 @@ function PlanCard({ entries }: { entries: PlanEntry[] }) {
 
 function fmtTokens(n?: number | null): string {
   if (n == null) return "";
-  return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+  if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "G";
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+  return String(n);
 }
 
 /// One clickable config knob (mode / model / thinking …) with its option
@@ -499,13 +502,25 @@ function Composer({ working }: { working: boolean }) {
             )}
           </div>
         <div className="toolbar-right">
-          {store.usage && (store.usage.used != null || store.usage.costAmount != null) && (
-            <span className="usage">
-              {store.usage.used != null && <>↑{fmtTokens(store.usage.used)}</>}
-              {store.usage.size != null && <> / {fmtTokens(store.usage.size)}</>}
-              {store.usage.costAmount != null && <> · ${store.usage.costAmount.toFixed(4)}</>}
-            </span>
-          )}
+          {(() => {
+            const u = store.usage;
+            if (!u) return null;
+            // Full-set statusbar segments; an agent that can't supply a
+            // piece simply hides that segment.
+            const parts: string[] = [];
+            if (u.input != null) parts.push(`↑${fmtTokens(u.input)}`);
+            if (u.output != null) parts.push(`↓${fmtTokens(u.output)}`);
+            if (u.used != null && u.size != null && u.size > 0) {
+              parts.push(`${((u.used / u.size) * 100).toFixed(1)}%/${fmtTokens(u.size)}`);
+            } else if (u.used != null) {
+              parts.push(`↑${fmtTokens(u.used)}`);
+            }
+            if (u.costAmount != null) {
+              parts.push(`$${u.costAmount < 1 ? u.costAmount.toFixed(4) : u.costAmount.toFixed(2)}`);
+            }
+            if (parts.length === 0) return null;
+            return <span className="usage">{parts.join(" · ")}</span>;
+          })()}
           <button
             className={"action-btn " + (working ? "stop" : "send")}
             disabled={!working && !text.trim()}

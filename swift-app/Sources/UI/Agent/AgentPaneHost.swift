@@ -243,8 +243,10 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                  "inputHint": command.inputHint ?? NSNull()]
             }
             return ["type": "commands", "commands": commandList]
-        case .usageUpdate(let used, let size, let costAmount, let costCurrency):
+        case .usageUpdate(let used, let size, let input, let output,
+                          let costAmount, let costCurrency):
             return ["type": "usage", "used": used ?? NSNull(), "size": size ?? NSNull(),
+                    "input": input ?? NSNull(), "output": output ?? NSNull(),
                     "costAmount": costAmount ?? NSNull(),
                     "costCurrency": costCurrency ?? NSNull()]
         case .turnEnded:

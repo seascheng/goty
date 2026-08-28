@@ -291,6 +291,10 @@ final class AgentSession: AgentSessioning {
             let cost = update["cost"] as? [String: Any]
             events.append(.usageUpdate(used: update["used"] as? Int,
                                        size: update["size"] as? Int,
+                                       input: (update["input"] as? Int)
+                                           ?? (update["tokensIn"] as? Int),
+                                       output: (update["output"] as? Int)
+                                           ?? (update["tokensOut"] as? Int),
                                        costAmount: cost?["amount"] as? Double,
                                        costCurrency: cost?["currency"] as? String))
         default:

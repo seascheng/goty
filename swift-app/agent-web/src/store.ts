@@ -100,6 +100,8 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
     type: z.literal("usage"),
     used: z.number().nullish(),
     size: z.number().nullish(),
+    input: z.number().nullish(),
+    output: z.number().nullish(),
     costAmount: z.number().nullish(),
     costCurrency: z.string().nullish(),
   }),
@@ -146,6 +148,7 @@ class Store {
   configOptions: ConfigOption[] = [];
   commands: AgentCommand[] = [];
   usage: { used?: number | null; size?: number | null;
+           input?: number | null; output?: number | null;
            costAmount?: number | null; costCurrency?: string | null } | null = null;
   status = "连接中…";
   /// Composer statusbar: workspace/folder · branch (pushed by Swift).
