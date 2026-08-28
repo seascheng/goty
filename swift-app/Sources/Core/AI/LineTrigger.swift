@@ -152,10 +152,12 @@ final class LineTrigger {
     }
 
     /// Classify a line: the LAST line-leading trigger wins (IME "@@"
-    /// tolerance), only when something non-space follows.
+    /// tolerance). `.ai` needs a request after the prefix (a bare @ai
+    /// is meaningless); `.agent` accepts a bare `@omp` — that means
+    /// "open the space, no initial prompt".
     static func classify(_ line: [UInt8]) -> Match? {
         for (bytes, kind) in prefixes {
-            if hasPrefix(line, prefix: bytes) {
+            if hasPrefix(line, prefix: bytes, requirePayload: kind == .ai) {
                 return Match(kind: kind, text: requestText(from: line, prefix: bytes))
             }
         }
@@ -178,13 +180,16 @@ final class LineTrigger {
         return i + stem.count
     }
 
-    /// True when the last "@ai" carries at least one non-space byte
-    /// after it (a bare '@ai' with nothing typed does not trigger).
+    /// True when the trigger prefix is line-leading and, for `.ai`,
+    /// carries at least one non-space byte after it (a bare '@ai' with
+    /// nothing typed does not trigger).
     static func hasPrefix(_ line: [UInt8]) -> Bool {
         hasPrefix(line, prefix: Array("@ai".utf8))
     }
-    static func hasPrefix(_ line: [UInt8], prefix: [UInt8]) -> Bool {
+    static func hasPrefix(_ line: [UInt8], prefix: [UInt8],
+                          requirePayload: Bool = true) -> Bool {
         guard let end = lastPrefixEnd(line, prefix: prefix) else { return false }
+        if !requirePayload { return true }
         return line[end...].contains { $0 != 0x20 && $0 != 0x09 }
     }
 
@@ -214,9 +219,10 @@ final class LineTrigger {
     static func requestFromScreenRow(_ row: String) -> String? {
         matchFromScreenRow(row, needle: "@ai", kind: .ai)?.text
     }
-
     /// One needle's screen-row scan; the LAST hit on the row wins
-    /// (same prompt-tolerance rules as the @ai scan).
+    /// (same prompt-tolerance rules as the @ai scan). A bare agent
+    /// prefix at end-of-row matches with empty text; @ai still needs a
+    /// request.
     static func matchFromScreenRow(_ row: String, needle: String,
                                    kind: TriggerKind) -> Match? {
         let banned: Set<Character> = ["\"", "'", "`", "|", "&", ";", "<", ">", "=", "\\"]
@@ -230,7 +236,9 @@ final class LineTrigger {
             guard !before.contains(where: { banned.contains($0) }) else { continue }
             let after = row[r.upperBound..<row.endIndex]
                 .trimmingCharacters(in: .whitespaces)
-            if !after.isEmpty { return Match(kind: kind, text: after) }
+            if !after.isEmpty || kind != .ai {
+                return Match(kind: kind, text: after)
+            }
         }
         return nil
     }

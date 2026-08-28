@@ -148,14 +148,14 @@ import Foundation
         type("@omp fix the build\r")
         check(agentFired.last?.key == "omp" && agentFired.last?.text == "fix the build",
               "line-leading @omp routes key + prompt")
-        type("@pi\r")
-        check(agentFired.count == 1, "bare @pi does not trigger")
+        type("@pi\r")   // pi is not an ACP manifest yet
+        check(agentFired.count == 1, "non-manifest @pi passes through")
         lt.armed = true
         type("@ai plan the work\r")
         check(fired.last == "plan the work" && agentFired.count == 1,
               "@ai still routes to onTrigger")
         type("@omp\r")
-        check(agentFired.count == 1, "agent trigger requires non-space payload")
+        check(agentFired.last?.text == "", "bare @omp opens without prompt")
         _ = lt.filter([0x03])
         type("@claude write tests\r")   // claude is not an ACP manifest yet
         check(agentFired.last?.key == "omp",
