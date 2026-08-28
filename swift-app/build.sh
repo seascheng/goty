@@ -105,8 +105,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>Goty AI</string>
     <key>CFBundleDisplayName</key><string>Goty AI</string>
     <key>CFBundleIdentifier</key><string>com.goty.ai</string>
-    <key>CFBundleVersion</key><string>1</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>2</string>
+    <key>CFBundleShortVersionString</key><string>0.1.1</string>
     <key>CFBundleExecutable</key><string>goty</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
