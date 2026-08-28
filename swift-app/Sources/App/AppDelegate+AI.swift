@@ -117,6 +117,9 @@ extension AppDelegate {
 
     func startRemoteLink(_ workspace: WorkspaceState) {
         guard let host = workspace.sshHost else { return }
+        // Replacing an existing link (defensive: today's callers never
+        // double-start) must not orphan the old forward ssh.
+        remoteLinks[workspace.id]?.stop()
         let link = RemoteDaemonLink(host: host)
         link.onStateChange = { [weak self] state in
             DispatchQueue.main.async {

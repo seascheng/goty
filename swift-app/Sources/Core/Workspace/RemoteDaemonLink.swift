@@ -37,6 +37,9 @@ final class RemoteDaemonLink {
 
     private var forward: Process?
     private var forwardPath: String?
+    /// Bumped on every teardown/open so a stale forward's termination
+    /// handler can tell itself apart from the live generation.
+    private var forwardEpoch = 0
     private var stopping = false
     private var booting = false
     private let queue = DispatchQueue(label: "goty.remote-link", qos: .userInitiated)
@@ -57,13 +60,28 @@ final class RemoteDaemonLink {
 
     /// Drops the forward only. The remote daemon and its panes keep running.
     func stop() {
+        queue.async { [weak self] in self?.stopInner() }
+    }
+
+    /// Synchronous stop for quit: applicationWillTerminate returns and the
+    /// process exits before an async queue drain, orphaning the forward ssh
+    /// (12 accumulated across one crashy evening — each holding its
+    /// unlinked socket). Bounded wait: a quit during a blocking boot ssh
+    /// still exits, worst case one orphan.
+    func stopAndWait(timeout: TimeInterval = 2) {
+        let sem = DispatchSemaphore(value: 0)
         queue.async { [weak self] in
-            guard let self else { return }
-            self.stopping = true
-            self.teardownForward()
-            self.daemon = nil
-            self.booting = false
+            self?.stopInner()
+            sem.signal()
         }
+        _ = sem.wait(timeout: .now() + timeout)
+    }
+
+    private func stopInner() {
+        stopping = true
+        teardownForward()
+        daemon = nil
+        booting = false
     }
 
     // MARK: - Bootstrap pipeline (serial queue, blocking ssh calls)
@@ -272,6 +290,16 @@ final class RemoteDaemonLink {
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
+        // A forward ssh dying under a live link is a transport drop
+        // (proxy flow reset, sleep/wake, node switch): auto-reboot. The
+        // remote daemon keeps every session, so panes re-attach with
+        // replay once the new forward is up — no manual reconnect.
+        forwardEpoch += 1
+        let epoch = forwardEpoch
+        process.terminationHandler = { [weak self] _ in
+            guard let self else { return }
+            self.queue.async { self.rebootIfOrphaned(epoch: epoch) }
+        }
         do { try process.run() } catch { return false }
 
         forward = process
@@ -284,8 +312,11 @@ final class RemoteDaemonLink {
         }
         return false
     }
-
     private func teardownForward() {
+        // Invalidate the dying generation's handler BEFORE terminate: the
+        // handler's queue block runs after this block, so the epoch check
+        // in rebootIfOrphaned always sees the bump.
+        forwardEpoch += 1
         if let process = forward, process.isRunning {
             process.terminate()
         }
@@ -294,6 +325,21 @@ final class RemoteDaemonLink {
             try? FileManager.default.removeItem(atPath: path)
         }
         forwardPath = nil
+    }
+
+    /// Queue-confined. Only the generation live when the process died
+    /// reboots: every deliberate teardown bumps the epoch first. The
+    /// coordinator state is deliberately untouched — the workspace stays
+    /// green while panes retry their attach chain against the rebooted
+    /// link; only a boot failure (scheduleRetry) flips it offline.
+    private func rebootIfOrphaned(epoch: Int) {
+        guard epoch == forwardEpoch, !stopping, daemon != nil else { return }
+        NSLog("remote-link %@: forward exited — rebooting link", host)
+        daemon = nil
+        teardownForward()
+        retryDelay = 1
+        booting = true
+        boot()
     }
 
     private static func probeSocket(_ path: String) -> Bool {

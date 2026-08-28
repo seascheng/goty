@@ -47,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The forwards are OURS though: quit without this leaked one
         // ssh -N per app launch (12 orphans accumulated across a
         // crashy evening — each still holding its unlinked socket).
-        remoteLinks.values.forEach { $0.stop() }
+        remoteLinks.values.forEach { $0.stopAndWait() }
     }
     func applicationShouldHandleReopen(_ application: NSApplication,
                                        hasVisibleWindows flag: Bool) -> Bool {
