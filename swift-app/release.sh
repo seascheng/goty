@@ -54,14 +54,42 @@ mkdir -p dist
 rm -rf dist/stage && mkdir dist/stage
 cp -R "$APP" dist/stage/
 rm -f "dist/$DMG_NAME"
-create-dmg \
+
+# create-dmg drives Finder through AppleScript and flakes now and then;
+# a flaked run exits 2 AND leaves its interstitial rw.* image mounted,
+# which then breaks the next attempt too (2026-08-28: two consecutive
+# v0.1.1 failures, each stranding a volume). Detach any leftover first
+# and retry once.
+cleanup_interstitial() {
+    hdiutil info | awk '
+        /^image-path/ { img = $3 }
+        /^\/dev\/disk/ && img ~ /\/rw\./ { print $1 }' \
+    | while IFS= read -r dev; do
+        hdiutil detach "$dev" >/dev/null 2>&1 || true
+    done
+    rm -f dist/rw.*.dmg 2>/dev/null || true
+}
+
+cleanup_interstitial
+if ! create-dmg \
     --volname "Goty" \
     --window-pos 200 120 --window-size 660 400 \
     --icon-size 160 \
     --icon "$APP_BUNDLE" 180 170 \
     --app-drop-link 480 170 \
     --hide-extension "$APP_BUNDLE" \
-    "dist/$DMG_NAME" dist/stage >/dev/null
+    "dist/$DMG_NAME" dist/stage >/dev/null; then
+    echo "  create-dmg flaked — cleaning stale mounts, retrying" >&2
+    cleanup_interstitial
+    create-dmg \
+        --volname "Goty" \
+        --window-pos 200 120 --window-size 660 400 \
+        --icon-size 160 \
+        --icon "$APP_BUNDLE" 180 170 \
+        --app-drop-link 480 170 \
+        --hide-extension "$APP_BUNDLE" \
+        "dist/$DMG_NAME" dist/stage >/dev/null
+fi
 
 if [ -n "$IDENTITY" ]; then
     echo "==> notarize + staple"
