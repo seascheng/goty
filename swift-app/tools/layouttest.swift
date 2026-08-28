@@ -1409,7 +1409,39 @@ func run() {
     settle(90)   // FSEvents latency 0.4s + delivery (heavy-load headroom)
     check(watchedRoots.contains(repoDir),
           "RepoWatcher fires for a local repo change (roots=\(watchedRoots))")
+    // Closing a pane must REMOVE its view from the grid, not just
+    // retire the host: a retired-but-attached view kept painting (the
+    // ghost agent pane after closing its tab).
+    print("— pane grid: closed pane's view leaves the hierarchy —")
+    final class StubPaneHost: NSView, PaneHosting {
+        let hostKey: HostKey
+        var retired = false
+        init(_ key: HostKey) { self.hostKey = key; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
+        var windowVisible = true
+        func setVisible(_ visible: Bool) { isHidden = !visible }
+        func syncCoreVisibility() {}
+        func createSurfaceIfNeeded() {}
+        func retire() { retired = true }   // deliberately does NOT detach
+    }
+    do {
+        let grid = PaneGridView()
+        grid.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let k1 = HostKey(workspace: UUID(), pane: "p1")
+        let k2 = HostKey(workspace: UUID(), pane: "p2")
+        let h1 = StubPaneHost(k1)
+        let h2 = StubPaneHost(k2)
+        grid.setVisiblePanes([(k1, h1, NSRect(x: 0, y: 0, width: 1, height: 1))],
+                             keepAlive: [])
+        check(h1.superview === grid, "pane 1 attached to the grid")
+        grid.setVisiblePanes([(k2, h2, NSRect(x: 0, y: 0, width: 1, height: 1))],
+                             keepAlive: [])
+        check(h1.retired, "closed pane's host retired")
+        check(h1.superview == nil, "closed pane's view removed from the hierarchy")
+    }
+
     RepoWatcher.shared.onRootChanged = nil
+
 
     // The sidebar's fetch carries the root beside the summary — it is
     // the watcher's key and the invalidation mapping — and the space

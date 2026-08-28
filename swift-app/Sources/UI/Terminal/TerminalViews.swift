@@ -900,6 +900,7 @@ final class PaneGridView: NSView {
         }
         for item in items where !present.contains(item.host.hostKey) {
             item.host.retire()
+            item.host.removeFromSuperview()   // ghost-view guard: the host's own retire may not detach
         }
         items = newItems
         for item in items where item.host.superview !== self {

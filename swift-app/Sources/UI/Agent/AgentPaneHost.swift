@@ -141,6 +141,10 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     func retire() {
         session.shutdown()
         webView.stopLoading()
+        // Contract parity with PaneHost.retire: a retired host leaves
+        // the view tree — the grid drops it from its item list, and a
+        // view left behind kept painting (the ghost agent pane).
+        removeFromSuperview()
     }
 
     // MARK: AgentSessionDelegate（Core 回调，切主线程再碰 UI）
