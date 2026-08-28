@@ -180,6 +180,8 @@ final class SidebarView: NSView {
     var onWidthChange: ((CGFloat) -> Void)?
     /// Per-space "+" — opens a new space in the given directory.
     var onNewTabInDir: ((String?) -> Void)?
+    /// Per-space "+" → Agent GUI entry (flat: one item per manifest).
+    var onNewAgentSessionInDir: ((String, String?) -> Void)?
     /// Per-space "+" → "New Worktree…" — the git-repo-only entry of the
     /// space menu. Fires with the section's directory.
     var onNewWorktreeInDir: ((String?) -> Void)?
@@ -310,7 +312,21 @@ final class SidebarView: NSView {
         worktree.image = menuItemIcon("arrow.triangle.branch", pointSize: 10)
         menu.addItem(term)
         menu.addItem(worktree)
+        menu.addItem(.separator())
+        for (key, label) in AgentManifests.acpPickerOrder {
+            let item = NSMenuItem(title: label, action: #selector(spacePlusAgentAction(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = [key, dir]
+            item.image = AgentBrandIcons.image(for: key)
+            menu.addItem(item)
+        }
         return menu
+    }
+
+    @objc fileprivate func spacePlusAgentAction(_ sender: NSMenuItem) {
+        guard let pair = sender.representedObject as? [String], pair.count == 2 else { return }
+        onNewAgentSessionInDir?(pair[0], pair[1] == "" ? nil : pair[1])
     }
 
     @objc fileprivate func spacePlusTerminalAction(_ sender: NSMenuItem) {

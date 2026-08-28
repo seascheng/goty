@@ -10,6 +10,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     let hostKey: HostKey
 
     /// Sidebar 状态接线（由 AppDelegate 桥到 coordinator）
+    /// `@gui omp <prompt>` queued prompt: sent once the session is up.
+    var initialPrompt: String?
     var onWorkingChange: ((Bool) -> Void)?
     var onPermissionPending: ((Bool) -> Void)?
 
@@ -94,7 +96,13 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         webView.load(URLRequest(url: URL(string: "goty://app/index.html")!))
         session.connect { [weak self] ok in
             DispatchQueue.main.async {
-                self?.bridge.push(["type": "status", "text": ok ? "就绪" : "连接失败"])
+                guard let self else { return }
+                self.bridge.push(["type": "status", "text": ok ? "就绪" : "连接失败"])
+                if ok, let prompt = self.initialPrompt {
+                    self.initialPrompt = nil
+                    self.bridge.push(["type": "working", "value": true])
+                    self.session.send(prompt)
+                }
             }
         }
     }

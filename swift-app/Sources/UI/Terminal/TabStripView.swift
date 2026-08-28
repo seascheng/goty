@@ -15,6 +15,8 @@ final class TabStripView: NSView {
     var onTabSelected: ((Int) -> Void)?
     var onCloseTab: ((Int) -> Void)?
     var onNewTab: (() -> Void)?
+    /// Flat + menu's agent items (AgentManifests.acpPickerOrder).
+    var onNewAgentSession: ((String) -> Void)?
     /// "Rename…" — the strip has no inline field; the owner prompts.
     var onRenameTab: ((Int) -> Void)?
     var onTabColor: ((Int, String?) -> Void)?
@@ -30,6 +32,7 @@ final class TabStripView: NSView {
     /// bar scrolls instead of shrinking chips further.
     static let minTabWidth: CGFloat = 96
 
+    private weak var plusButton: NSView?
     private let scroll = NSScrollView()
     private let chipRow = NSStackView()
     private var chipWidths: [NSLayoutConstraint] = []
@@ -66,9 +69,11 @@ final class TabStripView: NSView {
         addSubview(scroll)
 
         let plus = IconButton.make("plus", pointSize: 11) { [weak self] in
-            self?.onNewTab?()
+            guard let self, let anchor = self.plusButton else { return }
+            self.popPlusMenu(from: anchor)
         }
         plus.translatesAutoresizingMaskIntoConstraints = false
+        self.plusButton = plus
         addSubview(plus)
 
         NSLayoutConstraint.activate([
@@ -97,6 +102,36 @@ final class TabStripView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
+
+    /// The +'s flat menu: new terminal, then every supported agent —
+    /// one click from menu to space, no submenus.
+    private func popPlusMenu(from anchor: NSView) {
+        let menu = NSMenu()
+        let term = NSMenuItem(title: "新建终端", action: #selector(plusTerminalAction(_:)),
+                              keyEquivalent: "")
+        term.target = self
+        term.image = NSImage(systemSymbolName: "terminal",
+                             accessibilityDescription: nil)
+        menu.addItem(term)
+        menu.addItem(.separator())
+        for (key, label) in AgentManifests.acpPickerOrder {
+            let item = NSMenuItem(title: label, action: #selector(plusAgentAction(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = key
+            item.image = AgentBrandIcons.image(for: key)
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.maxY + 4),
+                   in: anchor)
+    }
+
+    @objc private func plusTerminalAction(_ sender: NSMenuItem) { onNewTab?() }
+
+    @objc private func plusAgentAction(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        onNewAgentSession?(key)
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         // The sidebar surface, continued across the terminal's top

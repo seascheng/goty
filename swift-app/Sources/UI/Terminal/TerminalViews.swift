@@ -107,7 +107,9 @@ final class PaneHost: NSView {
     private var lastLayoutGrid: SessionGrid?
     private let sharedStateLock = NSLock()
     private let gapp: ghostty_app_t
-    private let initialCwd: String?
+    /// Spawn directory; the @omp-style trigger falls back to it when
+    /// no live cwd is tracked for the pane yet.
+    let initialCwd: String?
     private let launchCommand: String?
     private let daemonTarget: () -> PaneDaemonTarget?
 
@@ -136,6 +138,9 @@ final class PaneHost: NSView {
     // onWrite; the tail keeps the last output as task context. Both are
     // Core types owned here, fed from the byte paths below.
     let aiTrigger = LineTrigger()
+    /// `@omp [prompt]` → AppDelegate opens an Agent GUI space in this
+    /// pane's cwd (capability-checked there).
+    var onAgentSessionTrigger: ((PaneHost, String, String?) -> Void)?
     let aiTail = OutputTail()
     /// A trigger fires this with the request text (after the host has
     /// cleared the shell's readline copy of the line).
@@ -159,6 +164,9 @@ final class PaneHost: NSView {
         agentCommand = AgentDetect.hasRules(for: command) ? command : nil
         super.init(frame: .zero)
         aiTrigger.onTrigger = { [weak self] text in self?.handleAITrigger(text) }
+        aiTrigger.onAgentTrigger = { [weak self] key, text in
+            self?.handleAgentTrigger(key, text)
+        }
         aiTrigger.onPendingEnter = { [weak self] in
             DispatchQueue.main.async { self?.handleAIHistoryEnter() }
         }
@@ -574,6 +582,19 @@ final class PaneHost: NSView {
         }
     }
 
+    /// `@omp [prompt]` fired: the agent key IS the prefix, so the rest
+    /// is the optional initial prompt. Clear the shell's readline copy
+    /// of the line (the swallowed enter left the typed bytes there),
+    /// then hand it up.
+    private func handleAgentTrigger(_ agent: String, _ text: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.sendText("\u{15}")
+            let prompt = text.isEmpty ? nil : text
+            self.onAgentSessionTrigger?(self, agent, prompt)
+        }
+    }
+
     /// History-recalled enter (↑/ctrl-r): the line's bytes never
     /// passed the input filter — zsh redrew it as PTY output — so read
     /// what the shell actually holds: the rendered cursor row. An @ai
@@ -582,17 +603,22 @@ final class PaneHost: NSView {
     /// Runs on main, outside the onWrite callback (surface reads must
     /// not re-enter the io path).
     private func handleAIHistoryEnter() {
-        guard let request = aiHistoryRowRequest() else {
+        guard let match = aiHistoryRowMatch() else {
             sendText("\r")
             return
         }
         sendText("\u{15}")
-        onAITask?(self, request)
+        switch match.kind {
+        case .ai:
+            onAITask?(self, match.text)
+        case .agent(let key):
+            onAgentSessionTrigger?(self, key, match.text.isEmpty ? nil : match.text)
+        }
     }
 
-    /// The @ai request on the cursor row, or nil. Failures return nil
-    /// → the enter is forwarded (fail-open).
-    private func aiHistoryRowRequest() -> String? {
+    /// The trigger match on the cursor row, or nil. Failures return
+    /// nil → the enter is forwarded (fail-open).
+    private func aiHistoryRowMatch() -> LineTrigger.Match? {
         guard let view = surfaceView, let surface = view.surface else { return nil }
         var m = ghostty_surface_grid_metrics_s()
         guard ghostty_surface_grid_metrics(surface, &m) else { return nil }
@@ -611,7 +637,7 @@ final class PaneHost: NSView {
         if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
             FileHandle.standardError.write("AIHISTORY cursor=\(m.cursor_row):\(m.cursor_column) row=\(row.prefix(60))\n".data(using: .utf8)!)
         }
-        return LineTrigger.requestFromScreenRow(row)
+        return LineTrigger.matchFromScreenRow(row)
     }
 
     /// @ai arms only at a shell prompt with the model provider
@@ -627,6 +653,7 @@ final class PaneHost: NSView {
             FileHandle.standardError.write("AITRIGGER pane=\(paneId) \(why)\n".data(using: .utf8)!)
         }
         aiTrigger.armed = next
+        aiTrigger.agentArmed = prompt
     }
 
     /// True for nil (spawned shell) and the shell basenames — matches

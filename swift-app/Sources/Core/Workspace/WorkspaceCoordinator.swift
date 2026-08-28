@@ -426,10 +426,34 @@ final class WorkspaceCoordinator {
         appendTab(name: "agent", command: command, cwd: activeCwd())
     }
 
+    /// Initial prompts queued for agent panes not yet built (the host
+    /// factory drains them when the pane's AgentPaneHost is created).
+    private var pendingAgentPrompts: [String: String] = [:]
+
     /// New GUI agent session (M1: omp, local daemon only). The caller
     /// gates on SessionDaemon.supportsAgentSessions().
-    func newAgentSessionTab(agent: String = "omp") {
-        appendTab(name: agent, command: agent, cwd: activeCwd(), kind: .agent(agent))
+    func newAgentSessionTab(agent: String = "omp", cwd: String? = nil,
+                            initialPrompt: String? = nil) {
+        if let paneId = appendTab(name: agent, command: agent,
+                                  cwd: cwd ?? activeCwd(), kind: .agent(agent)),
+           let prompt = initialPrompt, !prompt.isEmpty {
+            pendingAgentPrompts[paneId] = prompt
+        }
+    }
+
+    /// The tracked cwd of one pane, or nil — the `@omp`-style trigger
+    /// resolves the new space's directory from the pane that fired it.
+    func cwd(ofPane paneId: String, in workspaceId: UUID) -> String? {
+        guard let ws = store?.workspaces.first(where: { $0.id == workspaceId }) else { return nil }
+        for tab in ws.tabs {
+            if let pane = tab.panes.first(where: { $0.id == paneId }) { return pane.cwd }
+        }
+        return nil
+    }
+
+    /// The host factory takes (and clears) a queued initial prompt.
+    func takeInitialPrompt(paneId: String) -> String? {
+        pendingAgentPrompts.removeValue(forKey: paneId)
     }
 
     func newTab() {
@@ -443,10 +467,6 @@ final class WorkspaceCoordinator {
     }
 
     /// Space "+" → New Worktree (design: docs/specs/2026-08-23): create
-    /// `<repo>-<name>` BESIDE the repo root with branch `<name>` from
-    /// HEAD, then jump — the new space opens straight into the worktree
-    /// directory. Root resolution rides `ScmStore` (cached, one round
-    /// trip when cold); argv is pure in `WorktreeOp`.
     func createWorktree(name: String, cwd: String, host: String?,
                         completion: ((Result<String, ScmOpFailure>) -> Void)? = nil) {
         func create(root: String) {
@@ -476,9 +496,10 @@ final class WorkspaceCoordinator {
         return activePane(of: workspace)?.cwd
     }
 
+    @discardableResult
     private func appendTab(name: String?, command: String?, cwd: String?,
-                           kind: PaneKind = .terminal) {
-        guard let store, store.workspaces.indices.contains(store.focusedIndex) else { return }
+                           kind: PaneKind = .terminal) -> String? {
+        guard let store, store.workspaces.indices.contains(store.focusedIndex) else { return nil }
         let wi = store.focusedIndex
         let pane = PaneState(id: UUID().uuidString, cwd: cwd, kind: kind)
         let number = store.workspaces[wi].tabs.count + 1
@@ -489,6 +510,7 @@ final class WorkspaceCoordinator {
         runtime[store.workspaces[wi].id, default: Runtime()].activePaneId = pane.id
         store.save()
         delegate?.coordinatorDidChange(.structure)
+        return pane.id
     }
 
 

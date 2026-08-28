@@ -376,6 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let existing = hostPool[key] { return existing }
         if case .agent(let agentKey) = pane.kind,
            let agentHost = makeAgentPaneHost(pane: pane, ws: ws, key: key, agentKey: agentKey) {
+            agentHost.initialPrompt = coordinator.takeInitialPrompt(paneId: pane.id)
             hostPool[key] = agentHost
             return agentHost
         }
@@ -410,6 +411,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         host.onAITask = { [weak self] host, text in
             self?.startAITask(host: host, text: text)
+        }
+        host.onAgentSessionTrigger = { [weak self] host, agent, prompt in
+            guard let self else { return }
+            let cwd = self.coordinator.cwd(ofPane: host.hostKey.pane,
+                                           in: host.hostKey.workspace)
+                ?? host.initialCwd
+            self.openAgentSession(agent: agent, cwd: cwd, initialPrompt: prompt)
         }
         host.refreshAITrigger()
         hostPool[key] = host
@@ -504,6 +512,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sidebar.onNewTabInDir = { [weak self] cwd in
             self?.coordinator.newTab(cwd: cwd)
         }
+        sidebar.onNewAgentSessionInDir = { [weak self] key, cwd in
+            self?.openAgentSession(agent: key, cwd: cwd)
+        }
         sidebar.onNewWorktreeInDir = { [weak self] cwd in
             self?.startWorktreeFlow(cwd: cwd)
         }
@@ -583,6 +594,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.coordinator.selectTab(index: idx)
         }
         strip.onNewTab = { [weak self] in self?.coordinator.newTab() }
+        strip.onNewAgentSession = { [weak self] key in
+            self?.openAgentSession(agent: key)
+        }
         strip.onCloseTab = { [weak self] idx in
             self?.coordinator.closeTab(index: idx)
         }
