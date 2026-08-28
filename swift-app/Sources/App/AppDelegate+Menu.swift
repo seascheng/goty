@@ -46,6 +46,18 @@ extension AppDelegate {
         let agentItem = NSMenuItem(title: "New Agent Space", action: nil, keyEquivalent: "")
         agentItem.submenu = agentMenu
         shellMenu.addItem(agentItem)
+        let sessionMenu = NSMenu()
+        for (key, label) in AgentManifests.acpPickerOrder {
+            let item = NSMenuItem(title: label,
+                                  action: #selector(menuNewAgentSessionFrom(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = key
+            sessionMenu.addItem(item)
+        }
+        let sessionItem = NSMenuItem(title: "New Agent Session", action: nil, keyEquivalent: "")
+        sessionItem.submenu = sessionMenu
+        shellMenu.addItem(sessionItem)
         shellMenu.addItem(withTitle: "Close Space", action: #selector(menuCloseTab), keyEquivalent: "w")
         shellMenu.addItem(.separator())
         shellMenu.addItem(withTitle: "Split Right", action: #selector(menuSplitRight), keyEquivalent: "d")
@@ -81,6 +93,19 @@ extension AppDelegate {
             coordinator.newAgentTab(command: command)
         }
     }
+
+    @objc private func menuNewAgentSessionFrom(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        guard SessionDaemon.supportsAgentSessions() else {
+            let alert = NSAlert()
+            alert.messageText = "Agent GUI Session 需要 newer sessiond"
+            alert.informativeText = "本机 sessiond 版本过旧（CAPABILITY < 4）。重启 Goty 会自动换用随包 sessiond；SSH 远程主机需更新其 goty-sessiond。"
+            alert.runModal()
+            return
+        }
+        coordinator.newAgentSessionTab(agent: key)
+    }
+
     @objc func menuCloseTab() { coordinator.closeTab() }
     @objc func menuSplitRight() { coordinator.splitPane(vertical: false) }
     @objc func menuSplitDown() { coordinator.splitPane(vertical: true) }
@@ -91,8 +116,8 @@ extension AppDelegate {
         guard let store = coordinator.store, let ws = store.focused,
               let pane = coordinator.activePane(of: ws) else { return }
         // The ask is app-global: clear any other pane's ask card first.
-        for host in hostPool.values { host.hideAITaskIfInputMode() }
-        hostPool[HostKey(workspace: ws.id, pane: pane.id)]?.openAIInputMode()
+        for case let host as PaneHost in hostPool.values { host.hideAITaskIfInputMode() }
+        (hostPool[HostKey(workspace: ws.id, pane: pane.id)] as? PaneHost)?.openAIInputMode()
     }
 
     /// App-level config change (Settings writes, or a reload from the
@@ -148,7 +173,7 @@ extension AppDelegate {
     /// target (the click monitor focused it on right-mouse-down).
     @objc func ghosttySplitRequested(_ note: Notification) {
         guard let view = note.object as? Ghostty.SurfaceView,
-              let host = hostPool.values.first(where: { $0.surfaceView === view })
+              let host = hostPool.values.compactMap({ $0 as? PaneHost }).first(where: { $0.surfaceView === view })
         else { return }
         coordinator.focusPane(wsId: host.hostKey.workspace, paneId: host.paneId)
         let vertical: Bool, after: Bool

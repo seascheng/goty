@@ -14,6 +14,23 @@ struct PaneDaemonTarget {
     let environment: [String: String]
 }
 
+/// One grid-hostable pane view: the terminal surface (PaneHost) or a GUI
+/// agent session (AgentPaneHost). PaneGridView and the AppDelegate host
+/// pool hold these indifferently.
+protocol PaneHosting: NSView {
+    var hostKey: HostKey { get }
+    func setVisible(_ visible: Bool)
+    func syncCoreVisibility()
+    func retire()
+    /// Terminal panes arm their ghostty surface lazily; agent panes are
+    /// always live. Called from the grid's layout pass.
+    func createSurfaceIfNeeded()
+    var windowVisible: Bool { get set }
+}
+extension PaneHost: PaneHosting {
+    func setVisible(_ visible: Bool) { isHidden = !visible }
+}
+
 /// One terminal pane: a libghostty EXEC surface fed by a sessiond stream.
 final class PaneHost: NSView {
     let paneId: String
@@ -810,7 +827,7 @@ final class PaneHost: NSView {
 final class PaneGridView: NSView {
 
     private struct Item {
-        let host: PaneHost
+        let host: any PaneHosting
         let fraction: NSRect
         let visible: Bool
     }
@@ -838,8 +855,8 @@ final class PaneGridView: NSView {
         seams.stroke()
     }
 
-    func setVisiblePanes(_ entries: [(paneKey: HostKey, host: PaneHost, fraction: NSRect)],
-                         keepAlive: [PaneHost]) {
+    func setVisiblePanes(_ entries: [(paneKey: HostKey, host: any PaneHosting, fraction: NSRect)],
+                         keepAlive: [any PaneHosting]) {
         var present = Set<HostKey>()
         var newItems: [Item] = []
         for e in entries {
@@ -864,8 +881,7 @@ final class PaneGridView: NSView {
             addSubview(item.host)
         }
         for item in items {
-            item.host.isHidden = !item.visible
-            // Pane show/hide must reach the core: a hidden pane's surface
+            item.host.setVisible(item.visible)
             // otherwise stays "visible" forever, keeping its renderer
             // armed (occlusionCallback(false) pauses it; true re-renders).
             item.host.syncCoreVisibility()
@@ -890,7 +906,7 @@ final class PaneGridView: NSView {
         for item in items { item.host.syncCoreVisibility() }
     }
 
-    var visibleHosts: [PaneHost] { items.filter(\.visible).map(\.host) }
+    var visibleHosts: [any PaneHosting] { items.filter(\.visible).map(\.host) }
 
     override func layout() {
         super.layout()

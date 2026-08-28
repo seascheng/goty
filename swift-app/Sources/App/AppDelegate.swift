@@ -15,7 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var wc: AppWindowController!
     var window: NSWindow? { wc?.window }
     let prefs = AppPreferences.shared
-    var hostPool: [HostKey: PaneHost] = [:]
+    var hostPool: [HostKey: any PaneHosting] = [:]
     /// One ssh-installed daemon per remote workspace; survives GUI restart
     /// by design (the remote side keeps running when a link goes away).
     var remoteLinks: [UUID: RemoteDaemonLink] = [:]
@@ -217,9 +217,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self, let window = self.window, event.window === window else { return event }
             let location = event.locationInWindow
-            if let host = self.wc?.terminalArea.paneGrid.visibleHosts.first(where: {
-                $0.frame.contains($0.superview?.convert(location, from: nil) ?? .zero)
-            }) {
+            if let host = self.wc?.terminalArea.paneGrid.visibleHosts
+                .compactMap({ $0 as? PaneHost })
+                .first(where: {
+                    $0.frame.contains($0.superview?.convert(location, from: nil) ?? .zero)
+                }) {
                 window.makeFirstResponder(host.surfaceView)
                 self.coordinator.focusPane(wsId: host.hostKey.workspace,
                                            paneId: host.paneId)
@@ -256,6 +258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         coordinator.onSendText = { [weak self] key, text in
             guard let self else { return }
             self.wc.terminalArea.paneGrid.visibleHosts
+                .compactMap({ $0 as? PaneHost })
                 .first(where: { $0.hostKey == key })?
                 .sendText(text)
         }
@@ -282,7 +285,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 area.dismissOverlay(kind: .editor)
                 // Back to the terminal — the user just left the editor.
-                if let first = area.paneGrid.visibleHosts.first, let window {
+                if let first = area.paneGrid.visibleHosts.compactMap({ $0 as? PaneHost }).first,
+                   let window {
                     window.makeFirstResponder(first.surfaceView)
                 }
             }
@@ -359,7 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fresh = Ghostty.Config(at: GhosttyConfigStore.path)
         guard let cfg = fresh.config, let gapp = ghostty?.app else { return }
         _ = gapp
-        for host in hostPool.values {
+        for case let host as PaneHost in hostPool.values {
             if let surface = host.surfaceView?.surface {
                 ghostty_surface_update_config(surface, cfg)
             }
@@ -367,9 +371,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     /// Returns the persistent host for one daemon-owned pane.
     func makePaneHost(pane: PaneState, ws: WorkspaceState,
-                              gapp: ghostty_app_t) -> PaneHost? {
+                      gapp: ghostty_app_t) -> (any PaneHosting)? {
         let key = HostKey(workspace: ws.id, pane: pane.id)
         if let existing = hostPool[key] { return existing }
+        if case .agent(let agentKey) = pane.kind,
+           let agentHost = makeAgentPaneHost(pane: pane, ws: ws, key: key, agentKey: agentKey) {
+            hostPool[key] = agentHost
+            return agentHost
+        }
         let command = ws.focusedTab?.panes.first?.id == pane.id
             ? ws.focusedTab?.paneCommand : nil
         let wsId = ws.id
@@ -404,6 +413,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         host.refreshAITrigger()
         hostPool[key] = host
+        return host
+    }
+
+    /// Persistent host for one GUI agent session pane (ACP over sessiond).
+    func makeAgentPaneHost(pane: PaneState, ws: WorkspaceState,
+                           key: HostKey, agentKey: String) -> AgentPaneHost? {
+        guard let launch = AgentManifests.acpLaunch(for: agentKey),
+              let target = agentPaneTarget(wsId: ws.id, launch: launch) else { return nil }
+        let session = AgentSession(paneId: key.runtimeId, cwd: pane.cwd,
+                                   grid: AgentSession.fixedGrid, environment: target.environment,
+                                   launch: launch, daemon: target.daemon)
+        let host = AgentPaneHost(key: key, session: session)
+        host.onWorkingChange = { [weak self] working in
+            self?.coordinator.agentStateUpdated(wsId: ws.id, paneId: pane.id,
+                                                state: working ? .working : .idle)
+        }
+        host.onPermissionPending = { [weak self] (pending: Bool) in
+            guard pending else { return }
+            self?.coordinator.agentStateUpdated(wsId: ws.id, paneId: pane.id, state: .blocked)
+        }
         return host
     }
 
@@ -459,7 +488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // when it exited). The sidebar row re-renders via `.agent`.
         coordinator.onForegroundChange = { [weak self] changes in
             for (key, command) in changes {
-                self?.hostPool[key]?.updateAgentCommand(command)
+                (self?.hostPool[key] as? PaneHost)?.updateAgentCommand(command)
             }
         }
     }
@@ -659,7 +688,7 @@ extension AppDelegate {
 
 extension AppDelegate: GhosttyAppDelegate {
     func findSurface(forUUID uuid: UUID) -> Ghostty.SurfaceView? {
-        hostPool.values.first { $0.surfaceView?.id == uuid }?.surfaceView
+        hostPool.values.compactMap { $0 as? PaneHost }.first { $0.surfaceView?.id == uuid }?.surfaceView
     }
 
     /// The user's Ghostty config binds ⌘T/⌘W/⌘D as terminal keybinds, so the

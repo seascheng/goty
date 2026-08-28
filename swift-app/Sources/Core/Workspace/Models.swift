@@ -21,6 +21,13 @@ extension HostKey {
     /// UUIDs keep the result stable across GUI restarts.
     var runtimeId: String { "\(workspace.uuidString)_\(pane)" }
 }
+
+enum PaneKind: Codable, Equatable {
+    case terminal
+    /// A GUI agent session; payload = the AgentCatalog key ("omp").
+    case agent(String)
+}
+
 struct PaneState: Codable {
     let id: String        // pane UUID (stable, persisted)
     var cwd: String?
@@ -29,6 +36,31 @@ struct PaneState: Codable {
     var top: Int = 0
     var width: Int = 1
     var height: Int = 1
+    /// Terminal pane vs GUI agent session. Absent in older state.json —
+    /// decodes as .terminal so no migration is ever needed.
+    var kind: PaneKind = .terminal
+
+    init(id: String, cwd: String?, kind: PaneKind = .terminal,
+         left: Int = 0, top: Int = 0, width: Int = 1, height: Int = 1) {
+        self.id = id
+        self.cwd = cwd
+        self.kind = kind
+        self.left = left
+        self.top = top
+        self.width = width
+        self.height = height
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
+        left = try container.decodeIfPresent(Int.self, forKey: .left) ?? 0
+        top = try container.decodeIfPresent(Int.self, forKey: .top) ?? 0
+        width = try container.decodeIfPresent(Int.self, forKey: .width) ?? 1
+        height = try container.decodeIfPresent(Int.self, forKey: .height) ?? 1
+        kind = try container.decodeIfPresent(PaneKind.self, forKey: .kind) ?? .terminal
+    }
 }
 
 struct TabState: Codable {

@@ -426,6 +426,12 @@ final class WorkspaceCoordinator {
         appendTab(name: "agent", command: command, cwd: activeCwd())
     }
 
+    /// New GUI agent session (M1: omp, local daemon only). The caller
+    /// gates on SessionDaemon.supportsAgentSessions().
+    func newAgentSessionTab(agent: String = "omp") {
+        appendTab(name: agent, command: agent, cwd: activeCwd(), kind: .agent(agent))
+    }
+
     func newTab() {
         appendTab(name: nil, command: nil, cwd: activeCwd())
     }
@@ -470,10 +476,11 @@ final class WorkspaceCoordinator {
         return activePane(of: workspace)?.cwd
     }
 
-    private func appendTab(name: String?, command: String?, cwd: String?) {
+    private func appendTab(name: String?, command: String?, cwd: String?,
+                           kind: PaneKind = .terminal) {
         guard let store, store.workspaces.indices.contains(store.focusedIndex) else { return }
         let wi = store.focusedIndex
-        let pane = PaneState(id: UUID().uuidString, cwd: cwd)
+        let pane = PaneState(id: UUID().uuidString, cwd: cwd, kind: kind)
         let number = store.workspaces[wi].tabs.count + 1
         store.workspaces[wi].tabs.append(TabState(
             id: UUID().uuidString, name: name ?? String(number), panes: [pane],
