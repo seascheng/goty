@@ -337,3 +337,11 @@ body {
 .hljs-title.class_, .hljs-type, .hljs-built_in, .hljs-class .hljs-title { color: var(--hl-type); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
+
+/* Scroll-up pagination sentinel: the row that pages older blocks in. */
+.history-more {
+  text-align: center;
+  padding: 8px 0;
+  font-size: 11.5px;
+  color: var(--fg-muted);
+}

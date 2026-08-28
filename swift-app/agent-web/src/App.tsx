@@ -1,9 +1,8 @@
-import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { store } from "./store";
-import type { PlanEntry, ToolCall } from "./store";
+import { store, type Block, type PlanEntry, type ToolCall } from "./store";
 
 /* ——— omp-TUI-style line diff (renderDiff design: ±N gutter, dim context,
    word-level highlight on single-line replacements, … gap collapse) ——— */
@@ -568,6 +567,33 @@ function Composer({ working }: { working: boolean }) {
   );
 }
 
+const INITIAL_WINDOW = 60;
+const WINDOW_PAGE = 150;
+
+/// One transcript row. Memoized: during replay only the newest blocks
+/// change identity, so scroll-up pagination re-renders just the newly
+/// revealed rows and streaming re-renders only the tail block.
+const BlockView = React.memo(
+  function BlockView({ block }: { block: Block }) {
+    switch (block.kind) {
+      case "user": return <div className="user-row"><div className="user">{block.text}</div></div>;
+      case "agent": return block.text ? (
+        <div className="agent"><Markdown remarkPlugins={[remarkGfm]}
+          rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown></div>) : null;
+      case "thought": return <div className="thought"><Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown></div>;
+      case "tool": return <ToolCard id={block.call.id} />;
+      case "plan": return <PlanCard entries={block.entries} />;
+    }
+  },
+  // Same block object usually means nothing changed; tool updates keep
+  // the block but swap `call`, so compare that too.
+  (a, b) => {
+    if (a.block !== b.block) return false;
+    if (a.block.kind === "tool" && b.block.kind === "tool") return a.block.call === b.block.call;
+    return true;
+  },
+);
+
 export function App() {
   useSyncExternalStore(
     (onChange) => store.subscribe(onChange),
@@ -575,6 +601,39 @@ export function App() {
   );
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+
+  // Render window: the store holds the whole transcript, but only the
+  // newest INITIAL_WINDOW blocks mount. Scrolling near the top pages
+  // WINDOW_PAGE older blocks in, anchored so the viewport stays put.
+  const total = store.blocks.length;
+  const [windowCount, setWindowCount] = useState(INITIAL_WINDOW);
+  const generation = store.generation;
+  useEffect(() => { setWindowCount(INITIAL_WINDOW); }, [generation]);
+  const visible = total > windowCount ? store.blocks.slice(-windowCount) : store.blocks;
+
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const growAnchor = useRef<{ height: number; top: number } | null>(null);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    const sc = scroller.current;
+    if (!el || !sc) return;
+    const obs = new IntersectionObserver((entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      if (windowCount >= total) return;
+      growAnchor.current = { height: sc.scrollHeight, top: sc.scrollTop };
+      setWindowCount((c) => Math.min(c + WINDOW_PAGE, total));
+    }, { root: sc, rootMargin: "300px" });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [windowCount, total]);
+
+  useLayoutEffect(() => {
+    const a = growAnchor.current;
+    growAnchor.current = null;
+    const sc = scroller.current;
+    if (!a || !sc) return;
+    sc.scrollTop = a.top + (sc.scrollHeight - a.height);
+  });
 
   useEffect(() => {
     if (pinned.current) scroller.current?.scrollTo(0, scroller.current.scrollHeight);
@@ -588,17 +647,10 @@ export function App() {
   return (
     <div className="pane">
       <div className="transcript" ref={scroller} onScroll={onScroll}>
-        {store.blocks.map((block, i) => {
-          switch (block.kind) {
-            case "user": return <div key={i} className="user-row"><div className="user">{block.text}</div></div>;
-            case "agent": return block.text ? (
-              <div key={i} className="agent"><Markdown remarkPlugins={[remarkGfm]}
-                rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown></div>) : null;
-            case "thought": return <div key={i} className="thought"><Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown></div>;
-            case "tool": return <ToolCard key={i} id={block.call.id} />;
-            case "plan": return <PlanCard key={i} entries={block.entries} />;
-          }
-        })}
+        {visible.length < total && (
+          <div className="history-more" ref={sentinelRef}>加载更早消息…</div>
+        )}
+        {visible.map((block) => <BlockView key={block.id} block={block} />)}
       </div>
       {store.permission && (
         <div className="permission">

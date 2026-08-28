@@ -15,12 +15,16 @@ export type Permission = {
   requestID: number; toolCallTitle?: string | null;
   options: { optionId: string; name: string; kind?: string | null }[];
 };
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+/// A block before it gets its stable identity stamp.
+type BlockInput = DistributiveOmit<Block, "id">;
+
 export type Block =
-  | { kind: "user"; text: string }
-  | { kind: "agent"; text: string }
-  | { kind: "thought"; text: string }
-  | { kind: "tool"; call: ToolCall }
-  | { kind: "plan"; entries: PlanEntry[] };
+  | { kind: "user"; id: number; text: string }
+  | { kind: "agent"; id: number; text: string }
+  | { kind: "thought"; id: number; text: string }
+  | { kind: "tool"; id: number; call: ToolCall }
+  | { kind: "plan"; id: number; entries: PlanEntry[] };
 
 const ToolContentSchema = z.object({
   type: z.string(),
@@ -157,16 +161,40 @@ class Store {
   /// Monotonic counter — the useSyncExternalStore snapshot. Status-only
   /// updates (tool upsert) change nothing else observable.
   revision = 0;
+  /// Bumped whenever blocks are replaced wholesale (clearTranscript):
+  /// the render window resets with it.
+  generation = 0;
+  private nextBlockId = 1;
   private listeners = new Set<Listener>();
 
   subscribe(fn: Listener) { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
   private emit() { this.listeners.forEach((l) => l()); }
 
+  private push(block: BlockInput): Block {
+    const stamped = { ...block, id: this.nextBlockId++ } as Block;
+    this.blocks.push(stamped);
+    return stamped;
+  }
+
+  /// agent/thought chunks append to the LAST block of that kind; a closed
+  /// turn (turnEnded/userMessage/tool in between) starts a fresh block.
+  /// The merged block is replaced (not mutated) so memoized rows keyed by
+  /// stable ids re-render only the tail.
+  private tail(kind: "agent" | "thought"): { kind: "agent" | "thought"; text: string } {
+    const last = this.blocks[this.blocks.length - 1];
+    if (last && last.kind === kind) {
+      const merged = { kind, id: last.id, text: last.text };
+      this.blocks[this.blocks.length - 1] = merged;
+      return merged;
+    }
+    const block = this.push({ kind, text: "" }) as { kind: "agent" | "thought"; text: string };
+    return block;
+  }
   apply(raw: unknown) {
     const event = parseEvent(raw);
     if (!event) return;
     switch (event.type) {
-      case "userMessage": this.blocks.push({ kind: "user", text: event.text }); break;
+      case "userMessage": this.push({ kind: "user", text: event.text }); break;
       case "agentChunk":
         this.tail("agent").text += event.text; break;
       case "thoughtChunk":
@@ -186,15 +214,15 @@ class Store {
         };
         if (!this.tools.has(event.id)) {
           this.toolOrder.push(event.id);
-          this.blocks.push({ kind: "tool", call });
+          this.push({ kind: "tool", call });
         }
         this.tools.set(event.id, call);
         break;
       }
-      case "plan": this.blocks.push({ kind: "plan", entries: event.entries ?? [] }); break;
+      case "plan": this.push({ kind: "plan", entries: event.entries ?? [] }); break;
       case "permission": this.permission = event; break;
       case "permissionResolved": this.permission = null; break;
-      case "turnEnded": this.blocks.push({ kind: "agent", text: "" }); this.working = false; break;
+      case "turnEnded": this.push({ kind: "agent", text: "" }); this.working = false; break;
       case "sessions": this.sessions = coerceList(event.sessions, AgentSessionSummarySchema); break;
       case "working": this.working = event.value; break;
       case "status": this.status = event.text; break;
@@ -204,6 +232,7 @@ class Store {
       case "clearTranscript":
         this.blocks = []; this.toolOrder = []; this.tools.clear();
         this.permission = null; this.working = false;
+        this.generation += 1;
         break;
       case "files": this.files = event.files; break;
       case "meta":
@@ -224,15 +253,11 @@ class Store {
     this.emit();
   }
 
-  /// agent/thought chunks append to the LAST block of that kind; a closed
-  /// turn (turnEnded/userMessage/tool in between) starts a fresh block.
-  private tail(kind: "agent" | "thought"): { kind: "agent" | "thought"; text: string } {
-    const last = this.blocks[this.blocks.length - 1];
-    if (last && last.kind === kind) return last;
-    const block = { kind, text: "" };
-    this.blocks.push(block);
-    return block;
-  }
 }
 
 export const store = new Store();
+
+// Debug/testing handle: perf probes and the e2e harness read block state directly.
+if (typeof window !== "undefined") {
+  (window as unknown as { __gotyStore: Store }).__gotyStore = store;
+}
