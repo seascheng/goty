@@ -7,13 +7,14 @@ pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// meaning the client depends on; clients must treat a lower level as a
 /// degraded daemon, never as an equal. History: 1 = spawn/attach/list
 /// with cwd; 2 = PaneInfo.fg + PaneInfo.agent + the extension report
-/// server + GOTY_GUI_* env injection on spawn.
+/// server + GOTY_GUI_* env injection on spawn; 4 = SpawnRequest.no_echo
+/// + ring_bytes.
 ///
 /// Daemons are singleton and detached (sessions outlive the GUI), so a
 /// host can keep serving an old build indefinitely — this is the only
 /// way the client can tell (2026-08-24: remote workspaces silently
 /// lost agent logo/status to exactly this).
-pub const CAPABILITY: u8 = 3;
+pub const CAPABILITY: u8 = 4;
 
 pub mod kind {
     pub const SPAWN: u8 = 1;
@@ -64,6 +65,16 @@ pub struct SpawnRequest {
     pub env: Vec<(String, String)>,
     pub size: WinSize,
     pub replay: bool,
+    /// Agent sessions: run the command under `sh -c 'stty -echo; exec …'`
+    /// — agent CLIs do not manage termios, and PTY echo would corrupt the
+    /// ndjson stream. Requires CAPABILITY 4.
+    #[serde(default)]
+    pub no_echo: bool,
+    /// Replay-ring capacity override in bytes (agent sessions: 64 MiB so
+    /// long transcripts survive attach); None = RING_CAP. Requires
+    /// CAPABILITY 4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ring_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
