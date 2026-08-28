@@ -29,16 +29,28 @@ final class AgentSchemeHandler: NSObject, WKURLSchemeHandler {
             task.didFailWithError(URLError(.badURL))
             return
         }
-        var relative = url.host.map { $0 + url.path } ?? url.path
+        // `goty://app/index.html` — the host ("app") is a bundling
+        // artifact, NOT a directory; only the path maps into the dist.
+        var relative = url.path
         if relative.isEmpty || relative.hasSuffix("/") { relative += "index.html" }
         if relative.hasPrefix("/") { relative.removeFirst() }
 
         let file = root.appendingPathComponent(relative).standardizedFileURL
-        guard file.path.hasPrefix(root.path),
-              let data = try? Data(contentsOf: file) else {
-            task.didFailWithError(URLError(.fileDoesNotExist))
+        if file.path.hasPrefix(root.path), let data = try? Data(contentsOf: file) {
+            respond(task, url: url, data: data, file: file)
             return
         }
+        // SPA fallback: the app is one index.html — a miss (deep link,
+        // stale asset path) degrades to it instead of a blank pane.
+        let index = root.appendingPathComponent("index.html")
+        if let data = try? Data(contentsOf: index) {
+            respond(task, url: url, data: data, file: index)
+        } else {
+            task.didFailWithError(URLError(.fileDoesNotExist))
+        }
+    }
+
+    private func respond(_ task: WKURLSchemeTask, url: URL, data: Data, file: URL) {
         let ext = file.pathExtension.lowercased()
         let mime = Self.mimeTypes[ext] ?? "application/octet-stream"
         let response = URLResponse(url: url, mimeType: mime,

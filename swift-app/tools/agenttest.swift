@@ -2,6 +2,7 @@
 //
 // Built and run by run-tests.sh; NOT part of the app binary.
 import Foundation
+import WebKit
 @testable import goty
 
 @main
@@ -104,6 +105,39 @@ enum AgentTest {
         check(launch?.ringBytes == 67_108_864, "omp uses the 64 MiB ring")
         check(AgentManifests.acpLaunch(for: "claude") == nil, "v1 is omp-only")
         check(AgentManifests.acpPickerOrder.first?.key == "omp", "picker order leads with omp")
+
+        print("— AgentSchemeHandler —")
+        let dist = URL(fileURLWithPath: "/tmp/goty-scheme-dist-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dist, withIntermediateDirectories: true)
+        try? Data("<html>app</html>".utf8).write(to: dist.appendingPathComponent("index.html"))
+        let handler = AgentSchemeHandler(root: dist)
+        let webView = WKWebView(frame: .zero)
+
+        final class MockTask: NSObject, WKURLSchemeTask {
+            let request: URLRequest
+            private(set) var responded: URLResponse?
+            private(set) var payload: Data?
+            private(set) var finished = false
+            private(set) var failed = false
+            init(url: URL) { request = URLRequest(url: url) }
+            func didReceive(_ response: URLResponse) { responded = response }
+            func didReceive(_ data: Data) { payload = data }
+            func didFinish() { finished = true }
+            func didFailWithError(_ error: Error) { failed = true }
+        }
+        func serve(_ url: String) -> MockTask {
+            let task = MockTask(url: URL(string: url)!)
+            handler.webView(webView, start: task)
+            return task
+        }
+
+        let direct = serve("goty://app/index.html")
+        check(direct.payload != nil && direct.finished,
+              "index.html served (host not treated as a directory)")
+        let fallback = serve("goty://app/deep/link")
+        check(fallback.payload != nil && !fallback.failed,
+              "misses fall back to index.html (SPA)")
+        try? FileManager.default.removeItem(at: dist)
 
         if failures > 0 { exit(1) }
         print("agenttest: all passed")
