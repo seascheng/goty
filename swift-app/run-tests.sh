@@ -22,7 +22,12 @@ cd "$(dirname "$0")"
 
 B="/tmp/goty-build-$$"          # per-run binaries (rpath CGhostty copy)
 mkdir -p "$B"
-CACHE=/tmp/goty-test-cache-$(id -u)
+# Cache is per-CHECKOUT: worktrees share /tmp but not source content,
+# and the mtime stamp can't tell trees apart — a sibling worktree's
+# build made this tree's tools compile against a stale module (the old
+# caseless-enum ReplaySanitizer, missing PaneHost replay gates).
+TREE_ID=$(printf '%s' "$PWD" | shasum -a 256 | cut -c1-12)
+CACHE=/tmp/goty-test-cache-$(id -u)-$TREE_ID
 STAMP="$CACHE/.stamp"
 
 CLANG_CC="-O2"
