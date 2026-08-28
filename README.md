@@ -26,6 +26,8 @@ Grab the DMG from [**Releases**](https://github.com/seascheng/goty/releases/late
 
 <sub>macOS 13+ · Apple Silicon (arm64)</sub>
 
+**Agent GUI Session** requires `omp` ≥ 18.0.8 (ACP mode) on the target machine's PATH — remote SSH hosts need it too, plus a CAPABILITY-4 `goty-sessiond` there.
+
 <sub>Ad-hoc signed for now: on first open, right-click the app → **Open** (once). Updates check automatically — or Goty ▸ <b>Check for Updates…</b></sub>
 
 ## Why
