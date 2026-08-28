@@ -114,6 +114,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
 
         webView.load(URLRequest(url: URL(string: "goty://app/index.html")!))
         session.connect { [weak self] ok in
+            if ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil {
+                print("GOTY_DEBUG: connect ok=\(ok)")
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.bridge.push(["type": "status", "text": ok ? "就绪" : "连接失败"])
@@ -121,6 +124,53 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     self.initialPrompt = nil
                     self.bridge.push(["type": "working", "value": true])
                     self.session.send(prompt)
+                }
+                // GOTY_AUTOLOAD_SESSION=newest|<sessionId>: diagnostic —
+                // resume a persisted session right after connect and dump
+                // the page store. Set only when launching from a terminal.
+                if ok, let target = ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] {
+                    self.debugAutoload(target: target)
+                }
+            }
+        }
+    }
+
+    /// Diagnostic reproduction path for large-session resume; requires
+    /// the GOTY_AUTOLOAD_SESSION environment variable.
+    private func debugAutoload(target: String) {
+        print("GOTY_DEBUG: autoload entry connected")
+        if target != "newest" {
+            runAutoload(sessionId: target, t0: Date())
+            return
+        }
+        session.listSessions { [weak self] list in
+            DispatchQueue.main.async {
+                guard let self, let sid = list.first?.sessionId else {
+                    print("GOTY_DEBUG: no session to autoload")
+                    return
+                }
+                self.runAutoload(sessionId: sid, t0: Date())
+            }
+        }
+    }
+
+    private func runAutoload(sessionId sid: String, t0: Date) {
+        print("GOTY_DEBUG: loading", sid)
+        session.load(sessionId: sid) { ok in
+            DispatchQueue.main.async {
+                print("GOTY_DEBUG: load ok=\(ok) in \(Date().timeIntervalSince(t0))s replayBytes=\(self.session.debugReplayBytes) frames=\(self.session.debugReplayFrames)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                    self.webView.evaluateJavaScript("""
+                        JSON.stringify({
+                          revision: window.__gotyStore.revision,
+                          blocks: window.__gotyStore.blocks.length,
+                          users: window.__gotyStore.blocks.filter(b => b.kind === 'user').length,
+                          tailKind: window.__gotyStore.blocks[window.__gotyStore.blocks.length-1]?.kind ?? 'none',
+                          tailText: ((window.__gotyStore.blocks[window.__gotyStore.blocks.length-1]?.text) ?? '').slice(-100),
+                        })
+                        """) { r, err in
+                        print("GOTY_DEBUG STORE:", err.map { "ERR \($0)" } ?? (r as? String ?? "nil"))
+                    }
                 }
             }
         }

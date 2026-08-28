@@ -142,6 +142,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.dumpViewTree()
             }
         }
+        // GOTY_AUTOLOAD_SESSION: diagnostic — open an agent pane and
+        // resume the newest persisted session, dumping the page store.
+        if ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                print("GOTY_DEBUG: creating agent pane")
+                self?.coordinator.newAgentSessionTab(
+                    agent: "omp",
+                    cwd: FileManager.default.currentDirectoryPath)
+            }
+        }
         app.delegate = self
 
         // Window shell + the three regions (sidebar / terminal / right
@@ -374,6 +384,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                       gapp: ghostty_app_t) -> (any PaneHosting)? {
         let key = HostKey(workspace: ws.id, pane: pane.id)
         if let existing = hostPool[key] { return existing }
+        print("GOTY_DEBUG: makePaneHost kind=\(pane.kind)")
         if case .agent(let agentKey) = pane.kind,
            let agentHost = makeAgentPaneHost(pane: pane, ws: ws, key: key, agentKey: agentKey) {
             agentHost.initialPrompt = coordinator.takeInitialPrompt(paneId: pane.id)

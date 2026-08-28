@@ -17,10 +17,8 @@ declare global {
 // events stranded in the queue (the lost-replay-tail bug).
 window.__goty = {
   push(events: unknown[]) {
-    for (const event of events) {
-      try { store.apply(event); }
-      catch (err) { console.error("goty: dropped event", err); }
-    }
+    try { store.applyAll(events); }
+    catch (err) { console.error("goty: dropped event batch", err); }
   },
 };
 

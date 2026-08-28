@@ -4,14 +4,16 @@ import WebKit
 
 /// Tauri-style IPC for the agent pane's webview.
 ///
-/// Swift → JS: `push(_:)` coalesces events per runloop turn and lands
-/// them as one `window.__goty.push([...])` call (the JS side batches
-/// paints through requestAnimationFrame).
+/// Swift → JS: `push(_:)` coalesces events on a short window and lands
+/// them as `window.__goty.push([...])` calls through callAsyncJavaScript
+/// (structured args — evaluateJavaScript with an event array silently
+/// no-ops in some WebKit states, which cost us replay tails).
 /// JS → Swift: the page posts commands to the `goty` message handler —
 /// `ready`, `send`, `stop`, `permission` — routed to the closures below.
 final class AgentWebBridge: NSObject, WKScriptMessageHandler {
     private weak var webView: WKWebView?
     private var queue: [[String: Any]] = []
+    private var queuedBytes = 0
     private var flushScheduled = false
     private var jsReady = false
 
@@ -25,6 +27,13 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
     var onListFiles: ((@escaping ([String]) -> Void) -> Void)?
     var onPermissionOption: ((String) -> Void)?
 
+    /// Bulk windows: a session/load replay streams thousands of events;
+    /// flushing per runloop tick serialized hundreds of main-thread page
+    /// round trips (the multi-second load stall). 40ms is invisible next
+    /// to a 16ms frame but collapses a whole replay into a few calls.
+    private static let flushInterval: TimeInterval = 0.04
+    private static let maxSliceEvents = 256
+
     init(webView: WKWebView) {
         self.webView = webView
         super.init()
@@ -33,70 +42,65 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
 
     func push(_ event: [String: Any]) {
         queue.append(event)
-        scheduleFlush()
-    }
-
-    private func scheduleFlush() {
         guard !flushScheduled else { return }
         flushScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.flushScheduled = false
-            guard self.jsReady, !self.queue.isEmpty, let webView = self.webView else { return }
-            let batch = self.queue
-            self.queue = []
-            // Structured transport: events cross as a postMessage-style
-            // argument, NOT as JS source text. evaluateJavaScript with an
-            // event array silently no-ops in some states (the replay-tail
-            // killer: no error, no effect), while callAsyncJavaScript both
-            // reports failures and has no practical size limit.
-            var current: [[String: Any]] = []
-            var currentBytes = 0
-            func send(_ events: [[String: Any]]) {
-                guard !events.isEmpty else { return }
-                if #available(macOS 12.0, *) {
-                    webView.callAsyncJavaScript(
-                        "window.__goty.push(events);",
-                        arguments: ["events": events],
-                        in: nil, in: WKContentWorld.page
-                    ) { result in
-                        if case .failure(let error) = result {
-                            print("goty: push of \(events.count) events failed:", error)
-                        }
-                    }
-                } else if let data = try? JSONSerialization.data(withJSONObject: events),
-                          let json = String(data: data, encoding: .utf8) {
-                    webView.evaluateJavaScript("window.__goty.push(\(json))", completionHandler: nil)
-                }
-            }
-            func flushSlice() {
-                // A slice that fails to serialize is halved until the
-                // culprit stands alone; that one is dropped with a log.
-                // Never wedge the queue on one poison event.
-                guard !current.isEmpty else { return }
-                if JSONSerialization.isValidJSONObject(current) {
-                    send(current)
-                } else if current.count > 1 {
-                    let half = current.count / 2
-                    send(Array(current[..<half]))
-                    send(Array(current[half...]))
-                } else {
-                    print("goty: dropped unserializable event:", current.first?["type"] ?? "?")
-                }
-                current = []
-                currentBytes = 0
-            }
-            for event in batch {
-                let size = (try? JSONSerialization.data(withJSONObject: [event]).count) ?? 65536
-                if currentBytes + size > Self.maxSliceBytes { flushSlice() }
-                current.append(event)
-                currentBytes += size
-            }
-            flushSlice()
+        if queue.count >= Self.maxSliceEvents {
+            DispatchQueue.main.async { [weak self] in self?.drainQueue() }
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.flushInterval) { [weak self] in self?.drainQueue() }
         }
     }
 
-    private static let maxSliceBytes = 512 * 1024
+    private func drainQueue() {
+        flushScheduled = false
+        queuedBytes = 0
+        flush()
+    }
+
+    private func flush() {
+        guard jsReady, !queue.isEmpty, let webView else { return }
+        let batch = queue
+        queue = []
+        var current: [[String: Any]] = []
+        func send(_ events: [[String: Any]]) {
+            guard !events.isEmpty else { return }
+            if #available(macOS 12.0, *) {
+                webView.callAsyncJavaScript(
+                    "window.__goty.push(events);",
+                    arguments: ["events": events],
+                    in: nil, in: WKContentWorld.page
+                ) { result in
+                    if case .failure(let error) = result {
+                        print("goty: push of \(events.count) events failed:", error)
+                    }
+                }
+            } else if let data = try? JSONSerialization.data(withJSONObject: events),
+                      let json = String(data: data, encoding: .utf8) {
+                webView.evaluateJavaScript("window.__goty.push(\(json))", completionHandler: nil)
+            }
+        }
+        func flushSlice() {
+            // A slice that fails to serialize is halved until the culprit
+            // stands alone; that one is dropped with a log. Never wedge
+            // the queue on one poison event.
+            guard !current.isEmpty else { return }
+            if JSONSerialization.isValidJSONObject(current) {
+                send(current)
+            } else if current.count > 1 {
+                let half = current.count / 2
+                send(Array(current[..<half]))
+                send(Array(current[half...]))
+            } else {
+                print("goty: dropped unserializable event:", current.first?["type"] ?? "?")
+            }
+            current = []
+        }
+        for event in batch {
+            if current.count >= Self.maxSliceEvents { flushSlice() }
+            current.append(event)
+        }
+        flushSlice()
+    }
 
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
@@ -106,7 +110,7 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
         case "ready":
             jsReady = true
             onReady?()
-            scheduleFlush()
+            drainQueue()
         case "send":
             if let text = body["text"] as? String, !text.isEmpty { onSend?(text) }
         case "stop":

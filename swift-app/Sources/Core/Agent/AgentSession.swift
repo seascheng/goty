@@ -87,6 +87,9 @@ final class AgentSession: AgentSessioning {
             },
             onDisconnect: { [weak self] in
                 guard let self else { return }
+                if ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil {
+                    print("GOTY_DEBUG: pane DISCONNECTED")
+                }
                 self.connected = false
                 self.delegate?.sessionDidFail(self, reason: "daemon 连接断开")
             })
@@ -97,10 +100,16 @@ final class AgentSession: AgentSessioning {
             return
         }
         pane?.start()
+        if ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil {
+            print("GOTY_DEBUG: pane started, sending initialize")
+        }
         client.request("initialize", [
             "protocolVersion": 1,
             "clientCapabilities": ["fs": ["readTextFile": false, "writeTextFile": false]],
         ]) { [weak self] result in
+            if ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil {
+                print("GOTY_DEBUG: initialize returned")
+            }
             guard let self, case .success = result else {
                 self?.delegate?.sessionDidFail(self!, reason: "initialize 失败")
                 completion?(false)
@@ -126,8 +135,62 @@ final class AgentSession: AgentSessioning {
 
     private func handleFrame(kind: UInt8, data: Data) {
         guard kind == SessionOutputKind.output else { return } // SIZE/SNAPSHOT 已进 ring，无需解析
+        if debugFramesEnabled {
+            if loadDebugBytes == 0 { loadDebugStart = Date() }
+            loadDebugBytes += data.count
+            loadDebugFrames += 1
+            if loadDebugBytes / 262_144 != (loadDebugBytes - data.count) / 262_144 {
+                print("GOTY_DEBUG: replay \(loadDebugBytes)B in \(Date().timeIntervalSince(loadDebugStart))s frames=\(loadDebugFrames)")
+            }
+        }
         client.feed([UInt8](data))
     }
+
+    /// Replay bursts arrive as thousands of single-event emits; hopping
+    /// each onto the main queue individually stalls the replay pipeline
+    /// (a multi-second session/load). Deliver at most one batched
+    /// delegate call per main-queue turn — ordering preserved, connect-
+    /// time ready/config events can never strand in the buffer.
+    private func emit(_ events: [AgentSessionEvent]) {
+        guard !events.isEmpty else { return }
+        pendingLock.lock()
+        pendingEvents.append(contentsOf: events)
+        let needsSchedule = !pendingFlushScheduled
+        pendingFlushScheduled = true
+        pendingLock.unlock()
+        if needsSchedule {
+            DispatchQueue.main.async { [weak self] in self?.flushPendingEvents() }
+        }
+    }
+
+    private func flushPendingEvents() {
+        pendingLock.lock()
+        defer { pendingFlushScheduled = false }
+        let events = pendingEvents
+        pendingEvents = []
+        pendingLock.unlock()
+        if events.isEmpty { return }
+        delegate?.session(self, didEmit: events)
+        pendingLock.lock()
+        let again = !pendingEvents.isEmpty
+        if again { pendingFlushScheduled = true }
+        pendingLock.unlock()
+        if again {
+            DispatchQueue.main.async { [weak self] in self?.flushPendingEvents() }
+        }
+    }
+    private var pendingEvents: [AgentSessionEvent] = []
+    private var pendingFlushScheduled = false
+    private let pendingLock = NSLock()
+    /// Hoisted out of handleFrame: ProcessInfo.environment copies the whole
+    /// environment dictionary on every access — per frame that dominated
+    /// the replay pipeline.
+    private var loadDebugBytes = 0
+    private var loadDebugFrames = 0
+    private var loadDebugStart = Date()
+    private let debugFramesEnabled = ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil
+    var debugReplayBytes: Int { loadDebugBytes }
+    var debugReplayFrames: Int { loadDebugFrames }
 
     func send(_ text: String) {
         guard let sessionId, !isWorking else { return }
@@ -195,9 +258,15 @@ final class AgentSession: AgentSessioning {
     /// Resume a persisted agent session on this connection; replayed
     /// history arrives as normal session/update events.
     func load(sessionId id: String, completion: ((Bool) -> Void)? = nil) {
-        client.request("session/load", [
-            "sessionId": id, "cwd": cwd ?? NSNull(), "mcpServers": [],
-        ]) { [weak self] result in
+        // omp REQUIRES a string cwd ("path must be of type string" on
+        // null/missing) — fall back to the process cwd for panes whose
+        // workspace never tracked one.
+        var params: [String: Any] = [
+            "sessionId": id,
+            "cwd": cwd ?? FileManager.default.currentDirectoryPath,
+            "mcpServers": [],
+        ]
+        client.request("session/load", params) { [weak self] result in
             guard let self, case .success(let value) = result else {
                 completion?(false)
                 return
@@ -320,8 +389,4 @@ final class AgentSession: AgentSessioning {
         return events
     }
 
-    private func emit(_ events: [AgentSessionEvent]) {
-        guard !events.isEmpty else { return }
-        delegate?.session(self, didEmit: events)
-    }
 }

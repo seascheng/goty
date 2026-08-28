@@ -1,9 +1,9 @@
 // goty — see CLAUDE.md for the working principles.
-// Diagnostic probe (not a test): reproduces the GUI chain end to end —
-// sessiond pane + PTY + ACPClient + AgentSession (Core), then a real
-// WKWebView running the real dist bundle (UI). Runs session/load on the
-// newest persisted omp session, injects the mapped events, reads the
-// store back. Isolates which layer loses the replay tail.
+// End-to-end diagnostic: real Core chain (sessiond + PTY + ACPClient +
+// AgentSession) → real AgentWebBridge → real WKWebView running the real
+// dist bundle. Runs session/load on the newest persisted omp session and
+// reads the store back. If blocks land short of the delegate event count,
+// the production transport loses them; if they match, the loss is above.
 import Foundation
 import AppKit
 import WebKit
@@ -22,8 +22,8 @@ final class ProbeDelegate: AgentSessionDelegate {
     var eventCounts: [String: Int] = [:]
     var lastAgentText = ""
     var lastUserText = ""
-    /// The exact JS event dicts AgentPaneHost would push (same mapping).
     var mapped: [[String: Any]] = []
+    weak var bridge: AgentWebBridge?
 
     func session(_ session: AgentSession, didEmit events: [AgentSessionEvent]) {
         lock.lock(); defer { lock.unlock() }
@@ -79,8 +79,53 @@ final class ProbeDelegate: AgentSessionDelegate {
                                "input": input ?? NSNull(), "output": output ?? NSNull(),
                                "costAmount": amount ?? NSNull(), "costCurrency": currency ?? NSNull()])
             }
+            if let bridge, let js = jsEvent(e), !js.isEmpty {
+                bridge.push(js)
+            }
         }
     }
+
+    /// Mirrors AgentPaneHost.jsEvent — keep in sync when editing that.
+    private func jsEvent(_ event: AgentSessionEvent) -> [String: Any]? {
+        switch event {
+        case .ready: return nil
+        case .userChunk(let text): return ["type": "userChunk", "text": text]
+        case .messageChunk(let text): return ["type": "agentChunk", "text": text]
+        case .thoughtChunk(let text): return ["type": "thoughtChunk", "text": text]
+        case .toolCallUpdate(let id, let title, let kind, let status, let content, let rawInput, let oldText):
+            let contentList: [[String: Any]] = content.map { item in
+                var d: [String: Any] = ["type": item.type]
+                if let text = item.text { d["text"] = text }
+                if let path = item.path { d["path"] = path }
+                return d
+            }
+            var d: [String: Any] = ["type": "toolCall", "id": id, "content": contentList]
+            d["title"] = title ?? NSNull()
+            d["kind"] = kind ?? NSNull()
+            d["status"] = status ?? NSNull()
+            d["rawInput"] = rawInput ?? NSNull()
+            d["oldText"] = oldText ?? NSNull()
+            return d
+        case .plan(let entries):
+            return ["type": "plan", "entries": entries.map { ["content": $0.content, "priority": $0.priority ?? NSNull(), "status": $0.status ?? NSNull()] as [String: Any] }]
+        case .permissionRequested(let prompt):
+            return ["type": "permission", "requestID": prompt.requestID,
+                    "toolCallTitle": prompt.toolCallTitle ?? NSNull(),
+                    "options": prompt.options.map { ["optionId": $0.optionId, "name": $0.name, "kind": $0.kind ?? NSNull()] as [String: Any] }]
+        case .turnEnded(let stopReason):
+            _ = stopReason
+            return ["type": "turnEnded"]
+        case .configChanged(let opts):
+            return ["type": "configOptions", "options": opts.map { ["id": $0.id, "name": $0.name] }]
+        case .commandsChanged(let cmds):
+            return ["type": "commands", "commands": cmds.map { ["name": $0.name, "description": $0.description ?? "", "input": ["hint": $0.inputHint ?? ""] as [String: String] ] as [String: Any] }]
+        case .usageUpdate(let used, let size, let input, let output, let amount, let currency):
+            return ["type": "usage", "used": used ?? NSNull(), "size": size ?? NSNull(),
+                    "input": input ?? NSNull(), "output": output ?? NSNull(),
+                    "costAmount": amount ?? NSNull(), "costCurrency": currency ?? NSNull()]
+        }
+    }
+
     func sessionDidFail(_ session: AgentSession, reason: String) {
         print("SESSION FAIL: \(reason)")
     }
@@ -98,47 +143,20 @@ enum ReplayProbe {
 
     static func main() {
         let app = NSApplication.shared
+        app.setActivationPolicy(.regular)
 
         let delegate = ProbeDelegate()
         let session = AgentSession(
             paneId: "replayprobe-\(Int(Date().timeIntervalSince1970))",
             cwd: "/Users/seascheng/Downloads/ai_project/goty-agent-gui",
             grid: SessionGrid(columns: 120, rows: 40, cellWidth: 7, cellHeight: 17),
-            environment: ["TERM": "xterm-256color", "COLORTERM": "truecolor"],
+            environment: ProcessInfo.processInfo.environment.filter { $0.key != "GOTY_AUTOLOAD_SESSION" },
             launch: AgentManifests.acpLaunch(for: "omp")!,
             daemon: .shared,
             delegate: delegate)
 
-        var connectOk = false
-        session.connect { ok in connectOk = ok }
-        guard pump(until: { connectOk }, timeout: 30) else { print("FATAL: connect"); exit(1) }
-        print("connect: true")
-
-        var listed: [ACPSessionSummary]?
-        session.listSessions { list in listed = list }
-        guard pump(until: { listed != nil }, timeout: 30), let sid = listed?.first?.sessionId else {
-            print("FATAL: no sessions"); exit(1)
-        }
-        print("loading:", sid)
-
-        var loadOk = false
-        session.load(sessionId: sid) { ok in loadOk = ok }
-        _ = pump(until: { loadOk }, timeout: 60)
-        print("load ok:", loadOk)
-        pump(until: { false }, timeout: 3)
-
-        delegate.lock.lock()
-        print("EVENTS:", delegate.eventCounts.sorted { $0.key < $1.key })
-        print("mapped events:", delegate.mapped.count)
-        print("AGENT TAIL:", delegate.lastAgentText.suffix(150))
-        let payload = delegate.mapped
-        delegate.lock.unlock()
-
-        // — UI layer: real WKWebView + real dist bundle —
-        app.setActivationPolicy(.regular)
+        // Web layer first so the bridge can push live during the replay.
         let webCfg = WKWebViewConfiguration()
-        let sink = ProbeSink()
-        webCfg.userContentController.add(sink, name: "goty")
         let webView = WKWebView(frame: NSRect(x: 100, y: 100, width: 900, height: 700), configuration: webCfg)
         let win = NSWindow(contentRect: webView.frame, styleMask: [.titled], backing: .buffered, defer: false)
         win.contentView = webView
@@ -147,97 +165,54 @@ enum ReplayProbe {
         let dist = FileManager.default.currentDirectoryPath + "/swift-app/agent-web/dist/index.html"
         webView.loadFileURL(URL(fileURLWithPath: dist),
                             allowingReadAccessTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
-        guard pump(until: { ProbeSink.ready }, timeout: 15) else {
+        let bridge = AgentWebBridge(webView: webView)
+        delegate.bridge = bridge
+        var bridgeReady = false
+        bridge.onReady = { bridgeReady = true }
+        guard pump(until: { bridgeReady }, timeout: 15) else {
             print("FATAL: page never signalled ready"); exit(1)
         }
-        func read(_ js: String, label: String) {
-            var out: String?
-            webView.evaluateJavaScript(js) { r, e in out = e.map { "ERR \($0)" } ?? (r.map { "\($0)" } ?? "nil") }
-            _ = pump(until: { out != nil }, timeout: 10)
-            print("\(label):", out ?? "nil")
+        print("page ready")
+
+        var connectOk = false
+        session.connect { ok in connectOk = ok }
+        guard pump(until: { connectOk }, timeout: 30) else { print("FATAL: connect"); exit(1) }
+
+        var listed: [ACPSessionSummary]?
+        session.listSessions { list in listed = list }
+        guard pump(until: { listed != nil }, timeout: 30), let sid = listed?.first?.sessionId else {
+            print("FATAL: no sessions"); exit(1)
         }
-        read("window.__errs = []; window.onerror = function(m){ window.__errs.push(String(m)); }; 1", label: "diag-install")
-        read("window.__gotyStore.apply({type:'turnEnded'}); window.__gotyStore.blocks.length", label: "direct-apply")
-        read("window.__raf = 0; requestAnimationFrame(() => window.__raf++); 'raf-armed'", label: "raf-arm")
-        var raf: String?
-        webView.evaluateJavaScript("window.__raf") { r, _ in raf = r.map { "\($0)" } }
-        _ = pump(until: { raf != nil }, timeout: 10)
-        pump(until: { false }, timeout: 1)
-        webView.evaluateJavaScript("window.__raf") { r, _ in raf = r.map { "\($0)" } }
-        _ = pump(until: { raf != nil }, timeout: 10)
-        print("raf-fired:", raf ?? "nil")
-        read("window.__goty.push([{type:'turnEnded'}]); 'pushed'", label: "tiny-push")
-        read("window.__gotyStore.blocks.length", label: "blocks-after-tiny")
-        read("JSON.stringify(window.__errs)", label: "page-errors")
-        // read back store state
+        print("loading:", sid)
+
+        let t0 = Date()
+        var loadOk = false
+        session.load(sessionId: sid) { ok in loadOk = ok }
+        _ = pump(until: { loadOk }, timeout: 60)
+        print("load ok:", loadOk, "in", Date().timeIntervalSince(t0), "s")
+        pump(until: { false }, timeout: 5)
+
+        delegate.lock.lock()
+        print("EVENTS:", delegate.eventCounts.sorted { $0.key < $1.key })
+        print("AGENT TAIL:", delegate.lastAgentText.suffix(120))
+        delegate.lock.unlock()
+
         var readBack: String?
-        webView.evaluateJavaScript(#"JSON.stringify({blocks: window.__gotyStore.blocks.length, users: window.__gotyStore.blocks.filter(b => b.kind === "user").length, tailKind: window.__gotyStore.blocks[window.__gotyStore.blocks.length-1]?.kind ?? "none"})"#) { result, _ in
-            readBack = result as? String
+        webView.evaluateJavaScript("""
+            JSON.stringify({
+              revision: window.__gotyStore.revision,
+              blocks: window.__gotyStore.blocks.length,
+              users: window.__gotyStore.blocks.filter(b => b.kind === 'user').length,
+              lastUser: (() => { const u = [...window.__gotyStore.blocks].reverse().find(b => b.kind === 'user'); return u ? u.text.slice(0, 80) : null; })(),
+              tailKind: window.__gotyStore.blocks[window.__gotyStore.blocks.length-1]?.kind ?? 'none',
+              tailText: ((window.__gotyStore.blocks[window.__gotyStore.blocks.length-1]?.text) ?? '').slice(-120),
+            })
+            """) { r, err in
+            if let err { print("READ ERROR:", err) }
+            readBack = r as? String
         }
         _ = pump(until: { readBack != nil }, timeout: 30)
-        print("STORE after one-shot:", readBack ?? "nil")
-        // — empirical threshold sweep: how big may ONE push be? —
-        // wrap push to surface any in-page exception the bridge would swallow
-        webView.evaluateJavaScript("""
-            const real = window.__goty.push.bind(window.__goty);
-            window.__perr = [];
-            window.__goty.push = (evs) => { try { real(evs); } catch (e) { window.__perr.push(String(e && e.stack || e)); } };
-            'wrapped'
-            """) { _, _ in }
-        _ = pump(until: { false }, timeout: 0.5)
-        // — how big may ONE evaluateJavaScript payload be? —
-        for bytes in [8_000, 32_000, 128_000] {
-            var donePush = false
-            webView.evaluateJavaScript("window.__s='\(String(repeating: "x", count: bytes))'; window.__s.length") { _, _ in donePush = true }
-            _ = pump(until: { donePush }, timeout: 30)
-            var len = -1
-            webView.evaluateJavaScript("window.__s ? window.__s.length : 0") { r, _ in len = (r as? Int) ?? -1 }
-            _ = pump(until: { len >= 0 }, timeout: 10)
-            print("evaluate assign \(bytes)B -> stored len:", len)
-        }
-        // — push sweep with in-page error capture —
-        for bytes in [8_000, 32_000, 128_000] {
-            var evs: [[String: Any]] = []
-            var total = 0
-            while total < bytes {
-                evs.append(["type": "agentChunk", "text": String(repeating: "x", count: 400)])
-                total += 420
-            }
-            var donePush = false
-            let payload2 = try! String(data: JSONSerialization.data(withJSONObject: evs), encoding: .utf8)!
-            webView.evaluateJavaScript("window.__goty.push(\(payload2))") { r, err in
-                donePush = true
-                if let err { print("PUSH EVAL ERROR @\(bytes):", err) }
-            }
-            _ = pump(until: { donePush }, timeout: 30)
-            pump(until: { false }, timeout: 1)
-            var out: String?
-            webView.evaluateJavaScript("JSON.stringify({blocks: window.__gotyStore.blocks.length, perr: window.__perr.slice(-2)})") { r, _ in out = r as? String }
-            _ = pump(until: { out != nil }, timeout: 10)
-            print("push \(bytes)B (evaluated source \(payload2.count)B) ->", out ?? "nil")
-        }
-        // — callAsyncJavaScript: structured args, not JS source —
-        if #available(macOS 12.0, *) {
-            var evs: [[String: Any]] = []
-            for t in 0..<300 {
-                evs.append(["type": "userMessage", "text": "Turn \(t)"])
-                for _ in 0..<6 { evs.append(["type": "agentChunk", "text": String(repeating: "x", count: 1500)]) }
-            }
-            var asyncDone = false
-            let body = """
-                for (const e of events) { try { window.__gotyStore.apply(e); } catch (err) {} }
-                return window.__gotyStore.blocks.length;
-                """
-            webView.callAsyncJavaScript(body, arguments: ["events": evs], in: nil, in: WKContentWorld.page) { result in
-                if case .failure(let e) = result { print("CALLASYNC ERROR:", e) }
-                asyncDone = true
-            }
-            _ = pump(until: { asyncDone }, timeout: 30)
-            var count = -1
-            webView.evaluateJavaScript("window.__gotyStore.blocks.length") { r, _ in count = (r as? Int) ?? -1 }
-            _ = pump(until: { count >= 0 }, timeout: 10)
-            print("callAsync \(evs.count) events -> blocks:", count)
-        }
+        print("STORE:", readBack ?? "nil")
         session.shutdown()
         exit(0)
     }

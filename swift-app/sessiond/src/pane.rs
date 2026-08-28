@@ -606,10 +606,28 @@ fn spawn_reader(
         .name(format!("goty-pane-{}", pane.id))
         .spawn(move || {
             let mut scratch = [0u8; 64 * 1024];
+            let mut diag_bytes: usize = 0;
+            let mut diag_chunks: usize = 0;
+            let diag_t0 = std::time::Instant::now();
             loop {
                 match reader.read(&mut scratch) {
                     Ok(0) => break,
                     Ok(count) => {
+                        if std::env::var("GOTYD_REPLAY_DIAG").is_ok() {
+                            diag_bytes += count;
+                            diag_chunks += 1;
+                            if diag_bytes / 262_144 != (diag_bytes - count) / 262_144 {
+                                eprintln!(
+                                    "gotyd: reader {}B in {:.3}s chunks={} ({:.2} MB/s)",
+                                    diag_bytes,
+                                    diag_t0.elapsed().as_secs_f32(),
+                                    diag_chunks,
+                                    diag_bytes as f32
+                                        / 1048576.0
+                                        / diag_t0.elapsed().as_secs_f32().max(0.001)
+                                );
+                            }
+                        }
                         let bytes = &scratch[..count];
                         let Ok(mut state) = pane.state.lock() else {
                             break;

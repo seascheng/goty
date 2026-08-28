@@ -195,10 +195,24 @@ fn dispatch(
     match kind {
         protocol::kind::SPAWN => {
             let request: SpawnRequest = protocol::from_json(&payload)?;
+            eprintln!(
+                "gotyd: SPAWN pane={} env={} no_echo={} ring={:?}",
+                request.pane_id,
+                request.env.len(),
+                request.no_echo,
+                request.ring_bytes
+            );
             if registry.get(&request.pane_id).is_some() {
                 return write_error(&stream, format!("pane {} already exists", request.pane_id));
             }
-            let pane = Pane::spawn(request)?;
+            let pane = match Pane::spawn(request) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("gotyd: SPAWN FAILED: {e:#}");
+                    return Err(e);
+                }
+            };
+            eprintln!("gotyd: SPAWNED pane={}", pane.id);
             registry.insert(pane.clone()).map_err(anyhow::Error::msg)?;
             protocol::write_frame(&stream, protocol::kind::SPAWNED, pane.id.as_bytes())?;
             stream_pane(stream, pane)
@@ -232,7 +246,10 @@ fn dispatch(
             )?;
             Ok(())
         }
-        _ => write_error(&stream, "invalid first frame".to_string()),
+        _ => {
+            eprintln!("gotyd: INVALID first frame kind={kind}");
+            write_error(&stream, "invalid first frame".to_string())
+        }
     }
 }
 

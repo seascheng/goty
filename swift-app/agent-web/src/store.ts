@@ -205,9 +205,32 @@ class Store {
     if (!text) return;
     this.push({ kind: "user", text });
   }
+  /// Batch apply: parse and merge every event, then notify React ONCE.
+  /// A replay burst is hundreds of events — per-event notification made
+  /// React re-render the visible window after each one (the multi-second
+  /// session/load stall).
+  applyAll(rawList: unknown[]) {
+    let applied = 0;
+    for (const raw of rawList) {
+      const event = parseEvent(raw);
+      if (!event) continue;
+      this.applyParsed(event);
+      applied += 1;
+    }
+    if (applied === 0) return;
+    this.revision += 1;
+    this.emit();
+  }
+
   apply(raw: unknown) {
     const event = parseEvent(raw);
     if (!event) return;
+    this.applyParsed(event);
+    this.revision += 1;
+    this.emit();
+  }
+
+  private applyParsed(event: IncomingEvent) {
     switch (event.type) {
       case "userMessage": this.push({ kind: "user", text: event.text }); break;
       case "userChunk":
@@ -266,8 +289,6 @@ class Store {
         break;
       }
     }
-    this.revision += 1;
-    this.emit();
   }
 
 }
