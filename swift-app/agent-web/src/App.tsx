@@ -436,7 +436,6 @@ function Composer({ working }: { working: boolean }) {
             ))}
           </div>
         )}
-      </div>
       <div className="composer-toolbar">
         <div className="toolbar-left">
           <HistoryChip />
@@ -469,6 +468,7 @@ function Composer({ working }: { working: boolean }) {
             <Icon kind={working ? "stop" : "send"} />
           </button>
         </div>
+      </div>
       </div>
     </div>
   );

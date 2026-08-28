@@ -162,20 +162,21 @@ body {
 /* — composer — */
 .composer { padding: 8px 20px 12px; }
 .composer-box {
+  display: flex; flex-direction: column;
   background: var(--surface1); border: 1px solid var(--border-accent);
-  border-radius: 12px; padding: 2px 12px 6px;
+  border-radius: 14px; padding: 0 8px 6px;
   transition: border-color 0.12s;
 }
 .composer-box:focus-within { border-color: var(--accent); }
 .composer textarea {
   width: 100%; background: none; border: none; outline: none; resize: none;
   color: var(--foreground); font: inherit; line-height: 1.55;
-  padding: 9px 0 2px; min-height: 34px; display: block;
+  padding: 12px 6px 2px; min-height: 34px; display: block;
 }
 .composer textarea::placeholder { color: var(--fg-extra-muted); }
 .composer-toolbar {
-  display: flex; align-items: center; gap: 8px;
-  padding: 5px 0 3px; border-top: 1px solid var(--border);
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 4px 0;
 }
 .toolbar-left { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .toolbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
