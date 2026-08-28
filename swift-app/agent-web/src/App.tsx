@@ -21,7 +21,6 @@ function lineDiff(oldText: string, newText: string): DiffRow[] {
     const rows: DiffRow[] = a.map((t) => ({ type: "del", oldNum: oldNum++, text: t }));
     return rows.concat(b.map((t) => ({ type: "add", newNum: newNum++, text: t })));
   }
-  // LCS table (a, b); cell (i, j) = LCS length of a[i..], b[j..]
   const m = a.length;
   const n = b.length;
   const dp = new Uint32Array((m + 1) * (n + 1));
@@ -74,6 +73,25 @@ function wordSegments(oldLine: string, newLine: string): {
 
 const CTX_COLLAPSE = 10;
 
+function renderRow(row: DiffRow, gutterWidth: number): React.ReactNode {
+  const gutter = String(row.oldNum ?? row.newNum ?? "").padStart(gutterWidth);
+  if (row.type === "ctx") {
+    return (
+      <div key={"c" + row.oldNum + "-" + row.newNum + row.text} className="diff-row ctx">
+        <span className="ln">{gutter}</span>
+        <span className="tx">{row.text || " "}</span>
+      </div>
+    );
+  }
+  const cls = row.type === "add" ? "add" : "del";
+  return (
+    <div key={cls + (row.oldNum ?? 0) + "-" + (row.newNum ?? 0) + row.text} className={"diff-row " + cls}>
+      <span className="ln">{gutter}</span>
+      <span className="tx">{row.text || " "}</span>
+    </div>
+  );
+}
+
 function DiffBody({ rows }: { rows: DiffRow[] }) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const gutterWidth = Math.max(3, ...rows.map((r) => String(r.oldNum ?? r.newNum ?? "").length));
@@ -104,30 +122,9 @@ function DiffBody({ rows }: { rows: DiffRow[] }) {
   return <>{out}</>;
 }
 
-function renderRow(row: DiffRow, gutterWidth: number): React.ReactNode {
-  if (row.type === "ctx") {
-    return (
-      <div key={"c" + row.oldNum + "-" + row.newNum + row.text} className="diff-row ctx">
-        <span className="ln">{row.oldNum}</span>
-        <span className="ln">{row.newNum}</span>
-        <span className="tx">{row.text || " "}</span>
-      </div>
-    );
-  }
-  const cls = row.type === "add" ? "add" : "del";
-  const num = row.type === "add" ? row.newNum : row.oldNum;
-  return (
-    <div key={cls + num + row.text} className={"diff-row " + cls}>
-      <span className="ln">{row.oldNum ?? ""}</span>
-      <span className="ln">{row.newNum ?? ""}</span>
-      <span className="tx">{row.text || " "}</span>
-    </div>
-  );
-}
-
 const editKinds = new Set(["edit", "write", "multiedit", "apply_patch", "patch"]);
 
-function DiffView({ call }: { call: import("./store").ToolCall }) {
+function DiffView({ call }: { call: ToolCall }) {
   const raw = call.rawInput ?? {};
   const path = typeof raw.path === "string" ? raw.path : null;
   const newText = typeof raw.content === "string" ? raw.content
@@ -243,16 +240,78 @@ function ConfigChip({ option, open, onToggle, onPick }: {
   );
 }
 
+function HistoryChip() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="chip-wrap">
+      <button className={"chip" + (open ? " open" : "")}
+        onClick={() => {
+          setOpen(!open);
+          if (!open) window.webkit?.messageHandlers.goty.postMessage({ type: "listSessions" });
+        }}>
+        <span className="chip-name">历史</span>
+        <span className="chip-caret">▾</span>
+      </button>
+      {open && (
+        <div className="chip-pop">
+          {store.sessions.length === 0 && <div className="slash-desc">无会话记录</div>}
+          {store.sessions.map((s) => (
+            <button key={s.sessionId} className="chip-opt hist"
+              onClick={() => {
+                window.webkit?.messageHandlers.goty.postMessage({ type: "loadSession", sessionId: s.sessionId });
+                store.apply({ type: "clearTranscript" });
+                setOpen(false);
+              }}>
+              <span className="hist-title">{s.title ?? s.sessionId.slice(0, 8)}</span>
+              <span className="hist-meta">{s.messageCount != null ? `${s.messageCount} 条` : ""}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Composer({ working }: { working: boolean }) {
   const [text, setText] = useState("");
   const [openChip, setOpenChip] = useState<string | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
+  const [atIndex, setAtIndex] = useState(0);
   const ref = useRef<HTMLTextAreaElement>(null);
 
   const slashQuery = /^\/[\w-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
   const slashMatches = slashQuery == null ? [] :
     store.commands.filter((c) => c.name.toLowerCase().startsWith(slashQuery));
   const slashOpen = slashQuery != null && slashMatches.length > 0;
+
+  const atMatch = /@([\w./-]*)$/.exec(text);
+  const atOpen = atMatch != null;
+  const atQuery = (atMatch?.[1] ?? "").toLowerCase();
+  const atMatches = atOpen
+    ? store.files.filter((f) => f.toLowerCase().includes(atQuery)).slice(0, 8)
+    : [];
+
+  useEffect(() => {
+    if (atOpen && store.files.length === 0) {
+      window.webkit?.messageHandlers.goty.postMessage({ type: "listFiles" });
+    }
+  }, [atOpen]);
+
+  const pickSlash = (name: string) => {
+    setText("/" + name + " ");
+    ref.current?.focus();
+  };
+
+  const pickAt = (file: string) => {
+    setText(text.replace(/@([\w./-]*)$/, "@" + file + " "));
+    ref.current?.focus();
+  };
+
+  const pickConfig = (configId: string, value: string) => {
+    window.webkit?.messageHandlers.goty.postMessage({ type: "setConfig", configId, value });
+    setOpenChip(null);
+  };
+
 
   const submit = () => {
     const trimmed = text.trim();
@@ -263,14 +322,28 @@ function Composer({ working }: { working: boolean }) {
     ref.current?.style.setProperty("height", "auto");
   };
 
-  const pickSlash = (name: string) => {
-    setText("/" + name + " ");
-    ref.current?.focus();
-  };
-
-  const pickConfig = (configId: string, value: string) => {
-    window.webkit?.messageHandlers.goty.postMessage({ type: "setConfig", configId, value });
-    setOpenChip(null);
+  const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing) return;
+    if (atOpen && atMatches.length > 0) {
+      if (e.key === "ArrowDown") { e.preventDefault(); setAtIndex((i) => (i + 1) % atMatches.length); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); setAtIndex((i) => (i - 1 + atMatches.length) % atMatches.length); return; }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault(); pickAt(atMatches[atIndex]); return;
+      }
+      if (e.key === "Escape") { e.preventDefault(); setText(""); return; }
+    }
+    if (slashOpen) {
+      if (e.key === "ArrowDown") { e.preventDefault(); setSlashIndex((i) => (i + 1) % slashMatches.length); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); setSlashIndex((i) => (i - 1 + slashMatches.length) % slashMatches.length); return; }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault(); pickSlash(slashMatches[slashIndex].name); return;
+      }
+      if (e.key === "Escape") { e.preventDefault(); setText(""); return; }
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
   };
 
   return (
@@ -280,30 +353,29 @@ function Composer({ working }: { working: boolean }) {
           ref={ref}
           value={text}
           rows={1}
-          placeholder="Message the agent…  (Enter 发送，Shift+Enter 换行，/ 指令)"
+          placeholder="Message the agent…  (Enter 发送，Shift+Enter 换行，/ 指令，@ 引用文件)"
           onChange={(e) => {
             setText(e.target.value);
             setSlashIndex(0);
+            setAtIndex(0);
             const el = e.target;
             el.style.height = "auto";
             el.style.height = Math.min(el.scrollHeight, 140) + "px";
           }}
-          onKeyDown={(e) => {
-            if (e.nativeEvent.isComposing) return;
-            if (slashOpen) {
-              if (e.key === "ArrowDown") { e.preventDefault(); setSlashIndex((i) => (i + 1) % slashMatches.length); return; }
-              if (e.key === "ArrowUp") { e.preventDefault(); setSlashIndex((i) => (i - 1 + slashMatches.length) % slashMatches.length); return; }
-              if (e.key === "Enter" || e.key === "Tab") {
-                e.preventDefault(); pickSlash(slashMatches[slashIndex].name); return;
-              }
-              if (e.key === "Escape") { e.preventDefault(); setText(""); return; }
-            }
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
-          }}
+          onKeyDown={onComposerKeyDown}
         />
+        {atOpen && atMatches.length > 0 && (
+          <div className="slash-pop">
+            {atMatches.map((f, i) => (
+              <button key={f}
+                className={"slash-opt" + (i === atIndex ? " cur" : "")}
+                onMouseEnter={() => setAtIndex(i)}
+                onClick={() => pickAt(f)}>
+                <span className="slash-name">@{f}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {slashOpen && (
           <div className="slash-pop">
             {slashMatches.map((c, i) => (
@@ -321,6 +393,7 @@ function Composer({ working }: { working: boolean }) {
       </div>
       <div className="composer-bar">
         <div className="statusbar-left">
+          <HistoryChip />
           {store.configOptions.map((option) => (
             <ConfigChip key={option.id} option={option}
               open={openChip === option.id}

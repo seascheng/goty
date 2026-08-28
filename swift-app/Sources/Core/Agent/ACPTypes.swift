@@ -107,6 +107,29 @@ struct ACPSlashCommand {
     }
 }
 
+/// One persisted agent session from `session/list`.
+struct ACPSessionSummary {
+    let sessionId: String
+    let cwd: String?
+    let title: String?
+    let updatedAt: String?
+    let messageCount: Int?
+
+    init?(raw: [String: Any]) {
+        guard let sessionId = raw["sessionId"] as? String else { return nil }
+        self.sessionId = sessionId
+        self.cwd = raw["cwd"] as? String
+        self.title = raw["title"] as? String
+        self.updatedAt = raw["updatedAt"] as? String
+        let meta = raw["_meta"] as? [String: Any]
+        self.messageCount = meta?["messageCount"] as? Int
+    }
+
+    static func list(_ raw: Any?) -> [ACPSessionSummary] {
+        (raw as? [[String: Any]] ?? []).compactMap { ACPSessionSummary(raw: $0) }
+    }
+}
+
 /// One decoded inbound ACP event, already shaped for the UI layer.
 /// `toolCallUpdate` is upsert-by-id on the JS side; `permissionRequested`
 /// carries the raw JSON-RPC id so the answer routes back correctly.

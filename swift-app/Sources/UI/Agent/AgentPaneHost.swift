@@ -55,6 +55,30 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
         bridge.onSetConfig = { [weak self] configId, value in
             self?.session.setConfigOption(id: configId, value: value)
         }
+        bridge.onListSessions = { [weak self] in
+            guard let self else { return }
+            self.session.listSessions { summaries in
+                DispatchQueue.main.async {
+                    self.bridge.push(["type": "sessions", "sessions": summaries.map { summary in
+                        ["sessionId": summary.sessionId,
+                         "cwd": summary.cwd ?? NSNull(),
+                         "title": summary.title ?? NSNull(),
+                         "updatedAt": summary.updatedAt ?? NSNull(),
+                         "messageCount": summary.messageCount ?? NSNull()] as [String: Any]
+                    }])
+                }
+            }
+        }
+        bridge.onLoadSession = { [weak self] sessionId in
+            self?.session.load(sessionId: sessionId) { _ in }
+        }
+        bridge.onListFiles = { [weak self] reply in
+            guard let self, let cwd = self.session.cwd else { return reply([]) }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let files = AgentFileIndex.list(root: cwd)
+                DispatchQueue.main.async { reply(files) }
+            }
+        }
         bridge.onPermissionOption = { [weak self] optionId in
             guard let self, let prompt = self.pendingPrompt else { return }
             self.session.respondPermission(requestID: prompt.requestID, optionId: optionId)
@@ -122,7 +146,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
             return [:]
         case .messageChunk(let text):
             return ["type": "agentChunk", "text": text]
-        case .toolCallUpdate(let id, let title, let kind, let status, _, let rawInput, let oldText):
+        case .thoughtChunk(let text):
+            return ["type": "thoughtChunk", "text": text]
+        case .toolCallUpdate(let id, let title, let kind, let status, let content, let rawInput, let oldText):
+            let contentList: [[String: Any]] = content.map { item in
+                ["type": item.type, "text": item.text ?? NSNull(), "path": item.path ?? NSNull()]
+            }
             return ["type": "toolCall",
                     "id": id,
                     "title": title ?? NSNull(),

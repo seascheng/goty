@@ -37,6 +37,17 @@ const PermissionOptionSchema = z.object({
   name: z.string(),
   kind: z.string().nullish(),
 });
+export type AgentSessionSummary = {
+  sessionId: string; cwd?: string | null; title?: string | null;
+  updatedAt?: string | null; messageCount?: number | null;
+};
+const AgentSessionSummarySchema = z.object({
+  sessionId: z.string(),
+  cwd: z.string().nullish(),
+  title: z.string().nullish(),
+  updatedAt: z.string().nullish(),
+  messageCount: z.number().nullish(),
+});
 const ConfigChoiceSchema = z.object({
   value: z.string(),
   name: z.string(),
@@ -92,6 +103,9 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
     costAmount: z.number().nullish(),
     costCurrency: z.string().nullish(),
   }),
+  z.object({ type: z.literal("sessions"), sessions: z.array(AgentSessionSummarySchema) }),
+  z.object({ type: z.literal("clearTranscript") }),
+  z.object({ type: z.literal("files"), files: z.array(z.string()) }),
 ]);
 
 export type IncomingEvent = z.infer<typeof IncomingEventSchema>;
@@ -106,7 +120,9 @@ function parseEvent(raw: unknown): IncomingEvent | null {
 class Store {
   blocks: Block[] = [];
   toolOrder: string[] = [];
+  sessions: AgentSessionSummary[] = [];
   tools = new Map<string, ToolCall>();
+  files: string[] = [];
   permission: Permission | null = null;
   working = false;
   configOptions: ConfigOption[] = [];
@@ -147,11 +163,17 @@ class Store {
       case "permission": this.permission = event; break;
       case "permissionResolved": this.permission = null; break;
       case "turnEnded": this.blocks.push({ kind: "agent", text: "" }); this.working = false; break;
+      case "sessions": this.sessions = event.sessions; break;
       case "working": this.working = event.value; break;
       case "status": this.status = event.text; break;
       case "configOptions": this.configOptions = event.options; break;
       case "commands": this.commands = event.commands; break;
       case "usage": this.usage = event; break;
+      case "clearTranscript":
+        this.blocks = []; this.toolOrder = []; this.tools.clear();
+        this.permission = null; this.working = false;
+        break;
+      case "files": this.files = event.files; break;
     }
     this.revision += 1;
     this.emit();

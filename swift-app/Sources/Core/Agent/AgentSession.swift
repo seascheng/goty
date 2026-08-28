@@ -18,6 +18,11 @@ protocol AgentSessioning: AnyObject {
     func cancel()
     func respondPermission(requestID: Int, optionId: String)
     func setConfigOption(id: String, value: String)
+    /// Persisted-session directory (session/list) filtered to the pane cwd.
+    func listSessions(completion: @escaping ([ACPSessionSummary]) -> Void)
+    /// Resume a persisted agent session on this connection; replayed
+    /// history arrives as normal session/update events.
+    func load(sessionId: String, completion: ((Bool) -> Void)?)
     func shutdown()
 }
 
@@ -28,8 +33,8 @@ protocol AgentSessioning: AnyObject {
 final class AgentSession: AgentSessioning {
     weak var delegate: AgentSessionDelegate?
 
+    let cwd: String?
     private let paneId: String
-    private let cwd: String?
     private let environment: [String: String]
     private let launch: AgentManifests.ACPLaunch
     private let daemon: SessionDaemon
@@ -166,6 +171,41 @@ final class AgentSession: AgentSessioning {
             guard !configs.isEmpty else { return }
             self.configOptions = configs
             self.emit([.configChanged(configs)])
+        }
+    }
+
+    /// Persisted-session directory (session/list) filtered to the pane cwd.
+    func listSessions(completion: @escaping ([ACPSessionSummary]) -> Void) {
+        var params: [String: Any] = [:]
+        if let cwd { params["cwd"] = cwd }
+        client.request("session/list", params) { result in
+            guard case .success(let value) = result else {
+                completion([])
+                return
+            }
+            completion(ACPSessionSummary.list(value["sessions"]))
+        }
+    }
+
+    /// Resume a persisted agent session on this connection; replayed
+    /// history arrives as normal session/update events.
+    func load(sessionId id: String, completion: ((Bool) -> Void)? = nil) {
+        client.request("session/load", [
+            "sessionId": id, "cwd": cwd ?? NSNull(), "mcpServers": [],
+        ]) { [weak self] result in
+            guard let self, case .success(let value) = result else {
+                completion?(false)
+                return
+            }
+            self.sessionId = id
+            self.isWorking = false
+            let configs = ACPConfigOption.list(value["configOptions"])
+            self.configOptions = configs
+            var events: [AgentSessionEvent] = []
+            if !configs.isEmpty { events.append(.configChanged(configs)) }
+            events.append(.ready)
+            self.emit(events)
+            completion?(true)
         }
     }
 

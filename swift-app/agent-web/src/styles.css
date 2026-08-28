@@ -175,6 +175,9 @@ body {
 .composer textarea::placeholder { color: var(--fg-extra-muted); }
 .composer-bar { display: flex; align-items: center; gap: 8px; padding: 0 4px; margin-top: 6px; }
 
+.chip-opt.hist { display: grid; grid-template-columns: 1fr auto; row-gap: 2px; }
+.hist-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.hist-meta { color: var(--fg-extra-muted); font-size: 11px; align-self: center; }
 /* — statusbar: config chips left, usage/state right — */
 .statusbar-left { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .statusbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }

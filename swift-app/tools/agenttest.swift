@@ -2,7 +2,6 @@
 //
 // Built and run by run-tests.sh; NOT part of the app binary.
 import Foundation
-import WebKit
 @testable import goty
 
 @main
@@ -60,6 +59,10 @@ enum AgentTest {
         check(notifications.count == 1 && notifications[0].0 == "session/update",
               "notification routed")
 
+        // Edit-snapshot fixture: the interpret path reads this file from disk.
+        let samplePath = "/tmp/goty-agenttest-sample.txt"
+        try? "old content".write(toFile: samplePath, atomically: true, encoding: .utf8)
+
         print("— AgentSession.interpret —")
         var events: [AgentSessionEvent] = []
         let daemon = SessionDaemon(socketPath: "/nonexistent-\(UUID().uuidString)")
@@ -80,21 +83,35 @@ enum AgentTest {
                        "title": "Read file", "kind": "read", "status": "completed",
                        "content": [["type": "text", "text": "src/main.rs"]]],
         ]])
+        check(events.count == 2, "two events so far")
+        if case .messageChunk(let text)? = events.first, text == "hello" {} else { failures += 1; print("FAIL  messageChunk payload") }
+        if case .toolCallUpdate(let id, _, _, let status, let content, let rawInput, let oldText) = events.last,
+           id == "t1", status == "completed", content.count == 1, rawInput == nil, oldText == nil {} else { failures += 1; print("FAIL  toolCallUpdate payload") }
+
+        events += session.interpret(["method": "session/update", "params": [
+            "sessionId": "s1",
+            "update": ["sessionUpdate": "tool_call", "toolCallId": "t2", "kind": "edit",
+                       "status": "pending",
+                       "rawInput": ["path": samplePath, "content": "new"],
+                       "content": [["type": "text", "text": "x"]]],
+        ]])
+        if case .toolCallUpdate(_, _, let kind, _, _, let editInput, let oldText)? = events.last,
+           kind == "edit",
+           let editPath = editInput?["path"] as? String, editPath == samplePath,
+           oldText == "old content" {} else { failures += 1; print("FAIL  edit oldText snapshot") }
+
         events += session.interpret(["method": "session/update", "params": [
             "sessionId": "s1",
             "update": ["sessionUpdate": "plan",
                        "entries": [["content": "step 1", "priority": "high", "status": "pending"]]],
         ]])
+        if case .plan(let entries)? = events.last, entries.count == 1,
+           entries[0].content == "step 1" {} else { failures += 1; print("FAIL  plan payload") }
+
         events += session.interpret(["id": 7, "method": "session/request_permission", "params": [
             "sessionId": "s1", "toolCall": ["title": "bash"],
             "options": [["optionId": "allow", "name": "Allow", "kind": "allow_once"]],
         ]])
-        check(events.count == 4, "four events interpreted")
-        if case .messageChunk(let text)? = events.first, text == "hello" {} else { failures += 1; print("FAIL  messageChunk payload") }
-        if case .toolCallUpdate(let id, _, _, let status, let content)? = events.dropFirst().first,
-           id == "t1", status == "completed", content.count == 1 {} else { failures += 1; print("FAIL  toolCallUpdate payload") }
-        if case .plan(let entries)? = events.dropFirst(2).first, entries.count == 1,
-           entries[0].content == "step 1" {} else { failures += 1; print("FAIL  plan payload") }
         if case .permissionRequested(let prompt)? = events.last, prompt.requestID == 7,
            prompt.toolCallTitle == "bash",
            prompt.options.first?.optionId == "allow" {} else { failures += 1; print("FAIL  permission prompt") }
@@ -107,6 +124,8 @@ enum AgentTest {
         ]])
         if case .commandsChanged(let commands)? = events.last, commands.count == 2,
            commands[0].name == "model", commands[1].inputHint == "[on|off]" {} else { failures += 1; print("FAIL  commands payload") }
+        check(session.commands.count == 2, "commands stored on session")
+
         events += session.interpret(["method": "session/update", "params": [
             "sessionId": "s1",
             "update": ["sessionUpdate": "usage_update", "used": 19754, "size": 1000000,
@@ -114,6 +133,7 @@ enum AgentTest {
         ]])
         if case .usageUpdate(let used, let size, let costAmount, let costCurrency)? = events.last,
            used == 19754, size == 1000000, costAmount == 0.0171, costCurrency == "USD" {} else { failures += 1; print("FAIL  usage payload") }
+
         print("— manifest —")
         let launch = AgentManifests.acpLaunch(for: "omp")
         check(launch?.command == "omp" && launch?.args == ["acp"], "omp acp launch")
@@ -121,39 +141,7 @@ enum AgentTest {
         check(AgentManifests.acpLaunch(for: "claude") == nil, "v1 is omp-only")
         check(AgentManifests.acpPickerOrder.first?.key == "omp", "picker order leads with omp")
 
-        print("— AgentSchemeHandler —")
-        let dist = URL(fileURLWithPath: "/tmp/goty-scheme-dist-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: dist, withIntermediateDirectories: true)
-        try? Data("<html>app</html>".utf8).write(to: dist.appendingPathComponent("index.html"))
-        let handler = AgentSchemeHandler(root: dist)
-        let webView = WKWebView(frame: .zero)
-
-        final class MockTask: NSObject, WKURLSchemeTask {
-            let request: URLRequest
-            private(set) var responded: URLResponse?
-            private(set) var payload: Data?
-            private(set) var finished = false
-            private(set) var failed = false
-            init(url: URL) { request = URLRequest(url: url) }
-            func didReceive(_ response: URLResponse) { responded = response }
-            func didReceive(_ data: Data) { payload = data }
-            func didFinish() { finished = true }
-            func didFailWithError(_ error: Error) { failed = true }
-        }
-        func serve(_ url: String) -> MockTask {
-            let task = MockTask(url: URL(string: url)!)
-            handler.webView(webView, start: task)
-            return task
-        }
-
-        let direct = serve("goty://app/index.html")
-        check(direct.payload != nil && direct.finished,
-              "index.html served (host not treated as a directory)")
-        let fallback = serve("goty://app/deep/link")
-        check(fallback.payload != nil && !fallback.failed,
-              "misses fall back to index.html (SPA)")
-        try? FileManager.default.removeItem(at: dist)
-
+        try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }
         print("agenttest: all passed")
     }

@@ -18,6 +18,10 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
     var onSend: ((String) -> Void)?
     var onStop: (() -> Void)?
     var onSetConfig: ((String, String) -> Void)?
+    var onListSessions: (() -> Void)?
+    var onLoadSession: ((String) -> Void)?
+    /// `@` references: enumerate workspace files, reply via push.
+    var onListFiles: ((@escaping ([String]) -> Void) -> Void)?
     var onPermissionOption: ((String) -> Void)?
 
     init(webView: WKWebView) {
@@ -63,10 +67,20 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
                let value = body["value"] as? String {
                 onSetConfig?(configId, value)
             }
+        case "listSessions":
+            onListSessions?()
+        case "loadSession":
+            if let sessionId = body["sessionId"] as? String {
+                onLoadSession?(sessionId)
+            }
         case "permission":
             if let optionId = body["optionId"] as? String {
                 onPermissionOption?(optionId)
                 push(["type": "permissionResolved"])
+            }
+        case "listFiles":
+            onListFiles? { [weak self] files in
+                self?.push(["type": "files", "files": files])
             }
         default:
             break
