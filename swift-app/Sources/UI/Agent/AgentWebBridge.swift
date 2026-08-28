@@ -17,6 +17,7 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
 
     var onSend: ((String) -> Void)?
     var onStop: (() -> Void)?
+    var onSetConfig: ((String, String) -> Void)?
     var onPermissionOption: ((String) -> Void)?
 
     init(webView: WKWebView) {
@@ -57,6 +58,11 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
             if let text = body["text"] as? String, !text.isEmpty { onSend?(text) }
         case "stop":
             onStop?()
+        case "setConfig":
+            if let configId = body["configId"] as? String,
+               let value = body["value"] as? String {
+                onSetConfig?(configId, value)
+            }
         case "permission":
             if let optionId = body["optionId"] as? String {
                 onPermissionOption?(optionId)

@@ -49,6 +49,64 @@ struct ACPPermissionPrompt {
     let options: [ACPOption]
 }
 
+/// One `session/set_config_option`-selectable knob (mode / model /
+/// thinking …) as `session/new` and the set response return it.
+struct ACPConfigChoice {
+    let value: String
+    let name: String
+    let description: String?
+
+    init?(raw: [String: Any]) {
+        guard let value = raw["value"] as? String,
+              let name = raw["name"] as? String else { return nil }
+        self.value = value
+        self.name = name
+        self.description = raw["description"] as? String
+    }
+}
+
+struct ACPConfigOption {
+    let id: String
+    let name: String
+    let category: String?
+    let currentValue: String?
+    let options: [ACPConfigChoice]
+
+    init?(raw: [String: Any]) {
+        guard let id = raw["id"] as? String,
+              let name = raw["name"] as? String else { return nil }
+        self.id = id
+        self.name = name
+        self.category = raw["category"] as? String
+        self.currentValue = raw["currentValue"] as? String
+        self.options = (raw["options"] as? [[String: Any]] ?? [])
+            .compactMap { ACPConfigChoice(raw: $0) }
+    }
+
+    static func list(_ raw: Any?) -> [ACPConfigOption] {
+        (raw as? [[String: Any]] ?? []).compactMap { ACPConfigOption(raw: $0) }
+    }
+}
+
+/// One agent slash command from `available_commands_update`. Invoked by
+/// prompting with `/{name} …` — the plain prompt path, no extra RPC.
+struct ACPSlashCommand {
+    let name: String
+    let description: String?
+    let inputHint: String?
+
+    init?(raw: [String: Any]) {
+        guard let name = raw["name"] as? String else { return nil }
+        self.name = name
+        self.description = raw["description"] as? String
+        self.inputHint = (raw["input"] as? [String: Any])?["hint"] as? String
+    }
+
+    static func list(_ raw: Any?) -> [ACPSlashCommand] {
+        (raw as? [[String: Any]] ?? []).compactMap { ACPSlashCommand(raw: $0) }
+    }
+}
+
 /// One decoded inbound ACP event, already shaped for the UI layer.
 /// `toolCallUpdate` is upsert-by-id on the JS side; `permissionRequested`
 /// carries the raw JSON-RPC id so the answer routes back correctly.
@@ -61,6 +119,12 @@ enum AgentSessionEvent {
     case plan([ACPPlanEntry])
     case permissionRequested(ACPPermissionPrompt)
     case turnEnded(stopReason: String?)
+    /// Full config knob list (session/new + every set_config_option OK).
+    case configChanged([ACPConfigOption])
+    /// Agent slash-command directory (available_commands_update).
+    case commandsChanged([ACPSlashCommand])
+    /// Token/cost meter (usage_update; omp carries size/used/cost).
+    case usageUpdate(used: Int?, size: Int?, costAmount: Double?, costCurrency: String?)
 }
 
 protocol AgentSessionDelegate: AnyObject {

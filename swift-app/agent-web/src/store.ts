@@ -35,6 +35,27 @@ const PermissionOptionSchema = z.object({
   name: z.string(),
   kind: z.string().nullish(),
 });
+const ConfigChoiceSchema = z.object({
+  value: z.string(),
+  name: z.string(),
+  description: z.string().nullish(),
+});
+export type ConfigChoice = z.infer<typeof ConfigChoiceSchema>;
+const ConfigOptionSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  category: z.string().nullish(),
+  currentValue: z.string().nullish(),
+  options: z.array(ConfigChoiceSchema),
+});
+export type ConfigOption = z.infer<typeof ConfigOptionSchema>;
+const AgentCommandSchema = z.object({
+  name: z.string(),
+  description: z.string().nullish(),
+  inputHint: z.string().nullish(),
+});
+export type AgentCommand = z.infer<typeof AgentCommandSchema>;
+
 
 const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("userMessage"), text: z.string() }),
@@ -59,6 +80,15 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("turnEnded") }),
   z.object({ type: z.literal("working"), value: z.boolean() }),
   z.object({ type: z.literal("status"), text: z.string() }),
+  z.object({ type: z.literal("configOptions"), options: z.array(ConfigOptionSchema) }),
+  z.object({ type: z.literal("commands"), commands: z.array(AgentCommandSchema) }),
+  z.object({
+    type: z.literal("usage"),
+    used: z.number().nullish(),
+    size: z.number().nullish(),
+    costAmount: z.number().nullish(),
+    costCurrency: z.string().nullish(),
+  }),
 ]);
 
 export type IncomingEvent = z.infer<typeof IncomingEventSchema>;
@@ -76,6 +106,10 @@ class Store {
   tools = new Map<string, ToolCall>();
   permission: Permission | null = null;
   working = false;
+  configOptions: ConfigOption[] = [];
+  commands: AgentCommand[] = [];
+  usage: { used?: number | null; size?: number | null;
+           costAmount?: number | null; costCurrency?: string | null } | null = null;
   status = "连接中…";
   /// Monotonic counter — the useSyncExternalStore snapshot. Status-only
   /// updates (tool upsert) change nothing else observable.
@@ -111,6 +145,9 @@ class Store {
       case "turnEnded": this.blocks.push({ kind: "agent", text: "" }); this.working = false; break;
       case "working": this.working = event.value; break;
       case "status": this.status = event.text; break;
+      case "configOptions": this.configOptions = event.options; break;
+      case "commands": this.commands = event.commands; break;
+      case "usage": this.usage = event; break;
     }
     this.revision += 1;
     this.emit();

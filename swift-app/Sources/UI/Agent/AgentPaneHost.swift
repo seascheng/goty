@@ -52,6 +52,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
             self.session.send(text)
         }
         bridge.onStop = { [weak self] in self?.session.cancel() }
+        bridge.onSetConfig = { [weak self] configId, value in
+            self?.session.setConfigOption(id: configId, value: value)
+        }
         bridge.onPermissionOption = { [weak self] optionId in
             guard let self, let prompt = self.pendingPrompt else { return }
             self.session.respondPermission(requestID: prompt.requestID, optionId: optionId)
@@ -148,6 +151,29 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
                     "requestID": prompt.requestID,
                     "toolCallTitle": prompt.toolCallTitle ?? NSNull(),
                     "options": optionList]
+        case .configChanged(let options):
+            let optionList: [[String: Any]] = options.map { option in
+                let choices: [[String: Any]] = option.options.map { choice in
+                    ["value": choice.value, "name": choice.name,
+                     "description": choice.description ?? NSNull()]
+                }
+                return ["id": option.id, "name": option.name,
+                        "category": option.category ?? NSNull(),
+                        "currentValue": option.currentValue ?? NSNull(),
+                        "options": choices]
+            }
+            return ["type": "configOptions", "options": optionList]
+        case .commandsChanged(let commands):
+            let commandList: [[String: Any]] = commands.map { command in
+                ["name": command.name,
+                 "description": command.description ?? NSNull(),
+                 "inputHint": command.inputHint ?? NSNull()]
+            }
+            return ["type": "commands", "commands": commandList]
+        case .usageUpdate(let used, let size, let costAmount, let costCurrency):
+            return ["type": "usage", "used": used ?? NSNull(), "size": size ?? NSNull(),
+                    "costAmount": costAmount ?? NSNull(),
+                    "costCurrency": costCurrency ?? NSNull()]
         case .turnEnded:
             return ["type": "turnEnded"]
         }

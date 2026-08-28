@@ -99,6 +99,21 @@ enum AgentTest {
            prompt.toolCallTitle == "bash",
            prompt.options.first?.optionId == "allow" {} else { failures += 1; print("FAIL  permission prompt") }
 
+        events += session.interpret(["method": "session/update", "params": [
+            "sessionId": "s1",
+            "update": ["sessionUpdate": "available_commands_update",
+                       "availableCommands": [["name": "model", "description": "Show current model"],
+                                             ["name": "fast", "input": ["hint": "[on|off]"]]]],
+        ]])
+        if case .commandsChanged(let commands)? = events.last, commands.count == 2,
+           commands[0].name == "model", commands[1].inputHint == "[on|off]" {} else { failures += 1; print("FAIL  commands payload") }
+        events += session.interpret(["method": "session/update", "params": [
+            "sessionId": "s1",
+            "update": ["sessionUpdate": "usage_update", "used": 19754, "size": 1000000,
+                       "cost": ["amount": 0.0171, "currency": "USD"]],
+        ]])
+        if case .usageUpdate(let used, let size, let costAmount, let costCurrency)? = events.last,
+           used == 19754, size == 1000000, costAmount == 0.0171, costCurrency == "USD" {} else { failures += 1; print("FAIL  usage payload") }
         print("— manifest —")
         let launch = AgentManifests.acpLaunch(for: "omp")
         check(launch?.command == "omp" && launch?.args == ["acp"], "omp acp launch")

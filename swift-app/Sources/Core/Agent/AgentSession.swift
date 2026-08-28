@@ -1,11 +1,31 @@
 // goty — see CLAUDE.md for the working principles.
 import Foundation
 
+/// What a GUI agent pane needs from ANY agent implementation. The UI
+/// speaks this interface; each agent family adapts its wire dialect
+/// behind it (AgentSession is the ACP one — omp today, spec-strict
+/// agents via adapters later). Events (`AgentSessionEvent`) are the
+/// dialect-neutral currency crossing this seam.
+protocol AgentSessioning: AnyObject {
+    var delegate: AgentSessionDelegate? { get set }
+    var sessionId: String? { get }
+    var isWorking: Bool { get }
+    var configOptions: [ACPConfigOption] { get }
+    var commands: [ACPSlashCommand] { get }
+
+    func connect(completion: ((Bool) -> Void)?)
+    func send(_ text: String)
+    func cancel()
+    func respondPermission(requestID: Int, optionId: String)
+    func setConfigOption(id: String, value: String)
+    func shutdown()
+}
+
 /// One GUI agent session: an ACP-speaking agent process hosted by
 /// sessiond (attach-or-spawn), driven over the shared frame channel.
 /// State machine: disconnected → connecting → ready ⇄ working /
 /// awaitingPermission; death surfaces as the daemon's EXITED frame.
-final class AgentSession {
+final class AgentSession: AgentSessioning {
     weak var delegate: AgentSessionDelegate?
 
     private let paneId: String
@@ -18,6 +38,8 @@ final class AgentSession {
     private let client = ACPClient()
     private(set) var sessionId: String?
     private(set) var isWorking = false
+    private(set) var configOptions: [ACPConfigOption] = []
+    private(set) var commands: [ACPSlashCommand] = []
     private var connected = false
 
     init(paneId: String, cwd: String?, grid: SessionGrid,
@@ -89,7 +111,9 @@ final class AgentSession {
                     return
                 }
                 self.sessionId = sessionId
-                self.emit([.ready])
+                let configs = ACPConfigOption.list(value["configOptions"])
+                self.configOptions = configs
+                self.emit(configs.isEmpty ? [.ready] : [.configChanged(configs), .ready])
                 completion?(true)
             }
         }
@@ -127,6 +151,22 @@ final class AgentSession {
     func respondPermission(requestID: Int, optionId: String) {
         client.respond(id: requestID,
                        result: ["outcome": ["outcome": "selected", "optionId": optionId]])
+    }
+
+    /// Flip one config knob (mode / model / thinking …). The OK response
+    /// carries the full updated knob list — that is the new state, apply
+    /// it wholesale.
+    func setConfigOption(id: String, value: String) {
+        guard let sessionId else { return }
+        client.request("session/set_config_option", [
+            "sessionId": sessionId, "configId": id, "value": value,
+        ]) { [weak self] result in
+            guard let self, case .success(let response) = result else { return }
+            let configs = ACPConfigOption.list(response["configOptions"])
+            guard !configs.isEmpty else { return }
+            self.configOptions = configs
+            self.emit([.configChanged(configs)])
+        }
     }
 
     func shutdown() {
@@ -184,6 +224,16 @@ final class AgentSession {
             if !entries.isEmpty {
                 events.append(.plan(entries))
             }
+        case "available_commands_update":
+            let list = ACPSlashCommand.list(update["availableCommands"])
+            commands = list
+            events.append(.commandsChanged(list))
+        case "usage_update":
+            let cost = update["cost"] as? [String: Any]
+            events.append(.usageUpdate(used: update["used"] as? Int,
+                                       size: update["size"] as? Int,
+                                       costAmount: cost?["amount"] as? Double,
+                                       costCurrency: cost?["currency"] as? String))
         default:
             break
         }
