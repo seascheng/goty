@@ -72,6 +72,13 @@ final class PaneHost: NSView {
     private var streamGrid: SessionGrid?
     private var targetGrid: SessionGrid?
     private var lastRequestedGrid: SessionGrid?
+    /// True from session start through ATTACHED. Historical mode SETs can
+    /// generate replies not only while parsing a SNAPSHOT, but later when a
+    /// replay SIZE marker resizes that restored mode. Keep the gate closed
+    /// across the whole replay protocol, including pre-ATTACHED OUTPUT and
+    /// final grid installation; opening it per snapshot leaks mode-2048 size
+    /// reports (`8;39;144;1716;2448t`) into the PTY.
+    private var suppressParserWrites = true
 
     /// The pane's byte stream is processed OFF the main thread. libghostty
     /// parses here and pushes apprt actions into the 64-slot app mailbox;
@@ -120,6 +127,7 @@ final class PaneHost: NSView {
     // Core types owned here, fed from the byte paths below.
     let aiTrigger = LineTrigger()
     let aiTail = OutputTail()
+    private let replaySanitizer = ReplaySanitizer()
     /// A trigger fires this with the request text (after the host has
     /// cleared the shell's readline copy of the line).
     var onAITask: ((PaneHost, String) -> Void)?
@@ -196,6 +204,10 @@ final class PaneHost: NSView {
         config.ioMode = GHOSTTY_SURFACE_IO_MANUAL
         config.onWrite = { [weak self] bytes in
             guard let self else { return }
+            self.sharedStateLock.lock()
+            let suppress = self.suppressParserWrites
+            self.sharedStateLock.unlock()
+            guard Self.shouldForwardParserWrite(isReplaying: suppress) else { return }
             // The AI trigger gets first refusal on every keystroke: a
             // captured @ai enter is swallowed here, never reaching the
             // PTY. Everything else flows on unchanged.
@@ -224,6 +236,7 @@ final class PaneHost: NSView {
         cover.wantsLayer = true
         cover.layer?.backgroundColor = Self.backdropColorForNewHost()?.cgColor
         cover.translatesAutoresizingMaskIntoConstraints = false
+
         addSubview(cover)
         NSLayoutConstraint.activate([
             cover.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -234,12 +247,33 @@ final class PaneHost: NSView {
         coverView = cover
 
     }
+    /// Pure gate used by the callback and its replay lifecycle regression.
+    static func shouldForwardParserWrite(isReplaying: Bool) -> Bool {
+        !isReplaying
+    }
+
+    /// Pure model of the stream protocol: no parser-generated write may
+    /// escape before ATTACHED, including SIZE and pre-attach OUTPUT frames.
+    static func parserWriteStates(for frameKinds: [UInt8]) -> [Bool] {
+        var replaying = true
+        return frameKinds.map { kind in
+            let forward = shouldForwardParserWrite(isReplaying: replaying)
+            if kind == SessionOutputKind.attached { replaying = false }
+            return forward
+        }
+    }
     private func startSessionIfNeeded() {
         guard !retired, !sessionStarting, session == nil,
               !isHidden, window != nil, let grid = currentGrid(),
               let target = daemonTarget() else { return }
         sessionStarting = true
-        streamQueue.async { [weak self] in self?.targetGrid = grid }
+        streamQueue.async { [weak self] in
+            guard let self else { return }
+            self.targetGrid = grid
+            self.sharedStateLock.lock()
+            self.suppressParserWrites = true
+            self.sharedStateLock.unlock()
+        }
         let runtimeId = hostKey.runtimeId
         let cwd = initialCwd
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -310,7 +344,7 @@ final class PaneHost: NSView {
             // history also holds the prompt theme's terminal queries —
             // strip them, or the parser regenerates their replies into
             // the PTY as garbage input (see ReplaySanitizer).
-            processOutput(ReplaySanitizer.stripQueries(from: data),
+            processOutput(replaySanitizer.stripQueries(from: data),
                           surface: surface, present: false)
         case SessionOutputKind.output:
             coalescedOutput.append(data)
@@ -321,6 +355,10 @@ final class PaneHost: NSView {
                 self.onConnected?(self)
             }
             attached = true
+            let replayTail = replaySanitizer.finish()
+            if !replayTail.isEmpty {
+                processOutput(replayTail, surface: surface, present: false)
+            }
             if let grid = lastLayoutGrid ?? targetGrid {
                 targetGrid = grid
                 lastRequestedGrid = grid
@@ -329,6 +367,9 @@ final class PaneHost: NSView {
                     session?.resize(grid)
                 }
             }
+            sharedStateLock.lock()
+            suppressParserWrites = false
+            sharedStateLock.unlock()
             // One present for the whole replay: the core already holds all
             // replayed bytes reflowed to the final geometry.
             ghostty_surface_refresh(surface)
@@ -434,8 +475,6 @@ final class PaneHost: NSView {
                         atomically: true, encoding: .utf8)
     }
 
-    /// streamQueue only. `agentContentSeq` is also read by the main-thread
-    /// detect tick — sharedStateLock covers that pair.
     private func processOutput(_ data: Data, surface: ghostty_surface_t, present: Bool) {
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress, !raw.isEmpty else { return }
@@ -517,7 +556,13 @@ final class PaneHost: NSView {
     private func sessionDisconnected() {
         guard !retired else { return }
         session = nil
-        streamQueue.async { [weak self] in self?.attached = false }
+        streamQueue.async { [weak self] in
+            guard let self else { return }
+            self.attached = false
+            self.sharedStateLock.lock()
+            self.suppressParserWrites = true
+            self.sharedStateLock.unlock()
+        }
         stopAgentDetection()
         onDisconnected?(self)
     }

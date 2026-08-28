@@ -18,13 +18,16 @@ import Foundation
 /// Structure-only scanning: escape sequences are parsed, and anything
 /// that is not a query passes through byte-identical — SGR, clear,
 /// cursor moves, palette SETS, kitty graphics payloads, plain text,
-/// and truncated sequences at the frame edge are all preserved. Live
+/// and truncated sequences at the end of replay are all preserved. Live
 /// output is never routed through here.
-enum ReplaySanitizer {
-    /// One snapshot chunk with queries removed.
-    static func stripQueries(from data: Data) -> Data {
-        var out = Data(); out.reserveCapacity(data.count)
-        let bytes = [UInt8](data)
+final class ReplaySanitizer {
+    private var pending = Data()
+
+    /// One snapshot chunk with queries removed. Incomplete control strings
+    /// stay buffered because replay geometry can split them across snapshots.
+    func stripQueries(from data: Data) -> Data {
+        var out = Data(); out.reserveCapacity(data.count + pending.count)
+        let bytes = inputBytes(data)
         var i = 0
         let n = bytes.count
 
@@ -50,12 +53,13 @@ enum ReplaySanitizer {
                 while j < n, (0x20...0x2f).contains(bytes[j]) { j += 1 }
                 let interm = String(bytes: bytes[intermStart..<j], encoding: .ascii) ?? ""
                 guard j < n, (0x40...0x7e).contains(bytes[j]) else {
-                    pass(i..<n); return out   // truncated at frame edge — keep
+                    pending.append(contentsOf: bytes[i..<n])
+                    return out
                 }
                 let final = bytes[j]
                 let seq = i..<(j + 1)
                 i = j + 1
-                if isQueryCSI(params: params, intermediates: interm, final: final) {
+                if Self.isQueryCSI(params: params, intermediates: interm, final: final) {
                     continue   // drop, replies would regenerate
                 }
                 pass(seq)
@@ -73,13 +77,16 @@ enum ReplaySanitizer {
                     j += 1
                     payloadEnd = j
                 }
-                if j > n || payloadEnd > j { pass(i..<n); return out }   // truncated — keep
+                guard j <= n, payloadEnd < j else {
+                    pending.append(contentsOf: bytes[i..<n])
+                    return out
+                }
                 guard payloadEnd > i + 2 else { pass(i..<j); i = j; continue }
                 let payload = String(bytes: bytes[(i + 2)..<payloadEnd],
                                      encoding: .ascii) ?? ""
                 let seq = i..<j
                 i = j
-                if isQueryOSC(payload) { continue }
+                if Self.isQueryOSC(payload) { continue }
                 pass(seq)
                 continue
             }
@@ -92,7 +99,11 @@ enum ReplaySanitizer {
                     }
                     j += 1
                 }
-                guard j < n else { pass(i..<n); return out }   // truncated — keep
+                guard j <= n, j >= 2, bytes[j - 2] == 0x1b,
+                      bytes[j - 1] == UInt8(ascii: "\\") else {
+                    pending.append(contentsOf: bytes[i..<n])
+                    return out
+                }
                 let head = String(bytes: bytes[(i + 2)..<min(i + 4, j - 2)],
                                   encoding: .ascii) ?? ""
                 let seq = i..<j
@@ -103,9 +114,24 @@ enum ReplaySanitizer {
             }
             // Any other ESC + byte (two-byte sequences, ST halves).
             if i + 1 < n { pass(i..<(i + 2)); i += 2; continue }
-            pass(i..<n); return out
+            pending.append(bytes[i]); return out
         }
         return out
+    }
+
+    /// End of replay. A remaining prefix never became a complete query, so
+    /// preserve it byte-identical instead of dropping real truncated output.
+    func finish() -> Data {
+        defer { pending.removeAll(keepingCapacity: true) }
+        return pending
+    }
+
+    private func inputBytes(_ data: Data) -> [UInt8] {
+        guard !pending.isEmpty else { return [UInt8](data) }
+        pending.append(data)
+        let bytes = [UInt8](pending)
+        pending.removeAll(keepingCapacity: true)
+        return bytes
     }
 
     /// CSI sequences that make the terminal ANSWER. Parameter grammar is

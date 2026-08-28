@@ -714,7 +714,7 @@ func run() {
         + esc + "[16t" + esc + "[18t" + esc + "]10;?\u{7}"
         + esc + "[1;32m" + "ok" + esc + "[0m" + esc + "[2J" + esc + "[4;10;20t"
         + esc + "]0;set-title\u{7}" + esc + "]11;#101010\u{7}"
-    let cleaned = ReplaySanitizer.stripQueries(from: replay.data(using: .utf8)!)
+    let cleaned = ReplaySanitizer().stripQueries(from: replay.data(using: .utf8)!)
     let s = String(decoding: cleaned, as: UTF8.self)
     check(!s.contains("$p") && !s.contains(">c") && !s.contains("[16t")
           && !s.contains("[18t") && !s.contains("10;?"),
@@ -724,13 +724,44 @@ func run() {
           && s.contains(esc + "[2J") && s.contains(esc + "[4;10;20t")
           && s.contains("]0;set-title") && s.contains("]11;#101010"),
           "text, SGR, clear, non-query t, title and color SETS preserved")
-    // Truncated sequence at the frame edge passes through untouched.
+    // A trailing incomplete sequence is preserved when replay finishes.
     let tail = Data([0x1b, UInt8(ascii: "["), UInt8(ascii: "3")])
-    check(ReplaySanitizer.stripQueries(from: tail) == tail,
-          "truncated CSI at frame edge kept")
-    check(ReplaySanitizer.stripQueries(from: (esc + "[c" + esc + "[>0c" + "x").data(using: .utf8)!)
+    let tailSanitizer = ReplaySanitizer()
+    check(tailSanitizer.stripQueries(from: tail).isEmpty
+          && tailSanitizer.finish() == tail,
+          "truncated CSI at end of replay kept")
+    check(ReplaySanitizer().stripQueries(from: (esc + "[c" + esc + "[>0c" + "x").data(using: .utf8)!)
           == Data("x".utf8),
           "DA1/DA2 queries removed, following text intact")
+    // A resize can divide one terminal query between replay segments.
+    // Sanitizing each SNAPSHOT independently preserves both halves; the
+    // fresh core joins them again and writes the size report into the PTY.
+    let splitQueryChunks = [
+        Data((esc + "[18").utf8),
+        Data(("t" + esc + "[14").utf8),
+        Data("tvisible".utf8),
+    ]
+    let splitSanitizer = ReplaySanitizer()
+    let independentlyCleaned = splitQueryChunks.reduce(into: Data()) {
+        $0.append(splitSanitizer.stripQueries(from: $1))
+    }
+    check(independentlyCleaned == Data("visible".utf8),
+          "queries split across replay snapshots are removed")
+    // DECSET 2048 is not a query and must remain in the rendered replay,
+    // but parsing it synchronously emits a size report. PaneHost suppresses
+    // parser writes for that replay-only interval instead of deleting state.
+    let modeSet = Data((esc + "[?2048hvisible").utf8)
+    check(ReplaySanitizer().stripQueries(from: modeSet) == modeSet,
+          "mode 2048 state survives replay sanitization")
+    check(PaneHost.shouldForwardParserWrite(isReplaying: true) == false
+          && PaneHost.shouldForwardParserWrite(isReplaying: false),
+          "parser replies are suppressed only during replay")
+    let replayFrames = [SessionOutputKind.size, SessionOutputKind.snapshot,
+                        SessionOutputKind.output, SessionOutputKind.size,
+                        SessionOutputKind.attached, SessionOutputKind.output]
+    check(PaneHost.parserWriteStates(for: replayFrames)
+          == [false, false, false, false, false, true],
+          "write gate covers snapshots, replay output and replay resizes")
 
     print("— space rows: agent-style badge + branch-only meta —")
     let badge = SidebarRowView.SpaceStatusView()
