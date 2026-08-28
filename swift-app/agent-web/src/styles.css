@@ -105,8 +105,10 @@ body {
 
 .thought {
   color: var(--fg-muted); font-size: 12px; margin: 8px 0 12px;
-  border-left: 2px solid var(--surface3); padding-left: 12px; white-space: pre-wrap;
+  border-left: 2px solid var(--surface3); padding-left: 12px;
 }
+.thought > *:first-child { margin-top: 0; }
+.thought > *:last-child { margin-bottom: 0; }
 
 /* — tool cards — */
 .tool {

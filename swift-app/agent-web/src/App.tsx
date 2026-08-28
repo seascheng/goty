@@ -280,6 +280,16 @@ function ConfigChip({ option, icon, open, onToggle, onPick }: {
   );
 }
 
+/// Untitled sessions: omp names them asynchronously, so fresh ones have
+/// no title yet — show the activity timestamp instead of a raw hex id.
+function histFallback(s: { updatedAt?: string | null }): string {
+  if (!s.updatedAt) return "未命名会话";
+  const d = new Date(s.updatedAt);
+  if (isNaN(d.getTime())) return "未命名会话";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function HistoryChip({ open, onToggle, onSelect }: {
   open: boolean; onToggle: () => void; onSelect: (sessionId: string) => void;
 }) {
@@ -296,7 +306,7 @@ function HistoryChip({ open, onToggle, onSelect }: {
           {store.sessions.map((s) => (
             <button key={s.sessionId} className="chip-opt hist"
               onClick={() => onSelect(s.sessionId)}>
-              <span className="hist-title">{s.title ?? s.sessionId.slice(0, 8)}</span>
+              <span className="hist-title">{s.title || histFallback(s)}</span>
               <span className="hist-meta">{s.messageCount != null ? `${s.messageCount} 条` : ""}</span>
             </button>
           ))}
@@ -528,7 +538,7 @@ export function App() {
             case "agent": return block.text ? (
               <div key={i} className="agent"><Markdown remarkPlugins={[remarkGfm]}
                 rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown></div>) : null;
-            case "thought": return <div key={i} className="thought">{block.text}</div>;
+            case "thought": return <div key={i} className="thought"><Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown></div>;
             case "tool": return <ToolCard key={i} id={block.call.id} />;
             case "plan": return <PlanCard key={i} entries={block.entries} />;
           }
