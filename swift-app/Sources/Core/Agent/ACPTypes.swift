@@ -110,12 +110,16 @@ struct ACPSlashCommand {
 /// One decoded inbound ACP event, already shaped for the UI layer.
 /// `toolCallUpdate` is upsert-by-id on the JS side; `permissionRequested`
 /// carries the raw JSON-RPC id so the answer routes back correctly.
+/// `rawInput` is the ACP-spec raw call arguments; `oldText` is our
+/// pre-write snapshot of the target file (edit-like calls, local panes)
+/// so the UI can render a real diff.
 enum AgentSessionEvent {
     case ready
     case messageChunk(String)
     case thoughtChunk(String)
     case toolCallUpdate(id: String, title: String?, kind: String?,
-                        status: String?, content: [ACPContent])
+                        status: String?, content: [ACPContent],
+                        rawInput: [String: Any]?, oldText: String?)
     case plan([ACPPlanEntry])
     case permissionRequested(ACPPermissionPrompt)
     case turnEnded(stopReason: String?)

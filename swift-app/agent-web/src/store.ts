@@ -7,6 +7,8 @@ export type ToolContent = { type: string; text?: string | null; path?: string | 
 export type ToolCall = {
   id: string; title?: string | null; kind?: string | null; status?: string | null;
   content: ToolContent[];
+  rawInput?: Record<string, unknown> | null;
+  oldText?: string | null;
 };
 export type PlanEntry = { content: string; priority?: string | null; status?: string | null };
 export type Permission = {
@@ -56,7 +58,6 @@ const AgentCommandSchema = z.object({
 });
 export type AgentCommand = z.infer<typeof AgentCommandSchema>;
 
-
 const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("userMessage"), text: z.string() }),
   z.object({ type: z.literal("agentChunk"), text: z.string() }),
@@ -68,6 +69,8 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
     kind: z.string().nullish(),
     status: z.string().nullish(),
     content: z.array(ToolContentSchema).nullish(),
+    rawInput: z.record(z.string(), z.unknown()).nullish(),
+    oldText: z.string().nullish(),
   }),
   z.object({ type: z.literal("plan"), entries: z.array(PlanEntrySchema).nullish() }),
   z.object({
@@ -131,7 +134,8 @@ class Store {
       case "toolCall": {
         const call: ToolCall = { id: event.id, title: event.title,
                                  kind: event.kind, status: event.status,
-                                 content: event.content ?? [] };
+                                 content: event.content ?? [],
+                                 rawInput: event.rawInput, oldText: event.oldText };
         if (!this.tools.has(event.id)) {
           this.toolOrder.push(event.id);
           this.blocks.push({ kind: "tool", call });

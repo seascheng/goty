@@ -100,10 +100,55 @@ body {
   margin: 8px 0 14px; background: var(--surface1);
   border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px;
 }
+.plan-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding-bottom: 5px; margin-bottom: 4px; border-bottom: 1px solid var(--border);
+}
+.plan-title { font-weight: 600; font-size: 12px; color: var(--accent-bright); }
+.plan-progress { color: var(--fg-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .plan-row { display: flex; gap: 8px; padding: 3px 0; align-items: baseline; }
 .plan-row.completed { color: var(--fg-muted); text-decoration: line-through; }
-.plan-mark { color: var(--accent-bright); font-size: 12px; }
+.plan-mark { color: var(--fg-extra-muted); font-size: 12px; width: 14px; flex: none; }
 .plan-row.completed .plan-mark { color: var(--accent); }
+.plan-row.in_progress .plan-mark { color: var(--accent-bright); animation: pulse 1.2s ease-in-out infinite; }
+
+/* — diff cards (omp renderDiff design) — */
+.diff { margin-top: 6px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.diff-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 5px 10px; background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.diff-path { font-family: "SF Mono", Menlo, monospace; font-size: 11.5px; color: var(--foreground); }
+.diff-stats { font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.stat-add { color: #4ec96a; }
+.stat-del { color: #e5715f; }
+.diff-body { overflow-x: auto; max-height: 420px; overflow-y: auto; }
+.diff-row { display: flex; font-family: "SF Mono", Menlo, monospace; font-size: 11.5px; line-height: 1.5; }
+.diff-row .ln {
+  flex: none; width: calc(2.2em * var(--lnw, 3)); text-align: right; padding-right: 8px;
+  color: var(--fg-extra-muted); user-select: none; background: var(--surface0);
+}
+.diff-row.ctx .tx { color: var(--fg-muted); }
+.diff-row.add { background: rgba(60, 160, 90, 0.12); }
+.diff-row.add .tx { color: #7ad39a; }
+.diff-row.del { background: rgba(198, 79, 67, 0.12); }
+.diff-row.del .tx { color: #e58e83; text-decoration: line-through; text-decoration-color: rgba(229, 113, 95, 0.5); }
+.diff-row .tx { white-space: pre-wrap; word-break: break-all; padding-right: 10px; }
+.diff-row .mark-ins { background: rgba(76, 201, 106, 0.28); border-radius: 2px; }
+.diff-row .mark-del { background: rgba(229, 113, 95, 0.28); border-radius: 2px; }
+.diff-gap {
+  display: block; width: 100%; text-align: center; padding: 2px 0;
+  background: var(--surface0); color: var(--fg-extra-muted); font-size: 11px;
+  border: 0; cursor: pointer;
+}
+.diff-gap:hover { color: var(--fg-muted); }
+
+/* — tool status icons — */
+.tool-icon { font-size: 12px; width: 15px; flex: none; color: var(--fg-extra-muted); }
+.tool-icon.in_progress { color: var(--accent-bright); animation: pulse 1.2s ease-in-out infinite; }
+.tool-icon.completed { color: var(--accent-bright); }
+.tool-icon.error { color: var(--destructive); }
+.tool.run { border-color: var(--border-accent); }
 
 /* — permission card — */
 .permission {

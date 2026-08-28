@@ -122,18 +122,15 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
             return [:]
         case .messageChunk(let text):
             return ["type": "agentChunk", "text": text]
-        case .thoughtChunk(let text):
-            return ["type": "thoughtChunk", "text": text]
-        case .toolCallUpdate(let id, let title, let kind, let status, let content):
-            let contentList: [[String: Any]] = content.map { item in
-                ["type": item.type, "text": item.text ?? NSNull(), "path": item.path ?? NSNull()]
-            }
+        case .toolCallUpdate(let id, let title, let kind, let status, _, let rawInput, let oldText):
             return ["type": "toolCall",
                     "id": id,
                     "title": title ?? NSNull(),
                     "kind": kind ?? NSNull(),
                     "status": status ?? NSNull(),
-                    "content": contentList]
+                    "content": contentList,
+                    "rawInput": rawInput ?? NSNull(),
+                    "oldText": oldText ?? NSNull()]
         case .plan(let entries):
             let entryList: [[String: Any]] = entries.map { entry in
                 ["content": entry.content,

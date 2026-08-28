@@ -213,11 +213,25 @@ final class AgentSession: AgentSessioning {
         case "tool_call", "tool_call_update":
             if let id = update["toolCallId"] as? String {
                 let content = ((update["content"] as? [[String: Any]]) ?? []).compactMap(ACPContent.init)
+                // Edit-like calls carry rawInput {path, content}: snapshot the
+                // on-disk file NOW (before the write lands) so the UI can
+                // render a real old↔new diff. Local panes only; 256 KiB cap.
+                var oldText: String?
+                let toolStatus = update["status"] as? String
+                if toolStatus == "pending", let rawInput = update["rawInput"] as? [String: Any],
+                   let path = rawInput["path"] as? String,
+                   let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                   let size = attrs[.size] as? Int, size <= 256 * 1024,
+                   let data = FileManager.default.contents(atPath: path) {
+                    oldText = String(data: data, encoding: .utf8)
+                }
                 events.append(.toolCallUpdate(id: id,
                                               title: update["title"] as? String,
                                               kind: update["kind"] as? String,
-                                              status: update["status"] as? String,
-                                              content: content))
+                                              status: toolStatus,
+                                              content: content,
+                                              rawInput: update["rawInput"] as? [String: Any],
+                                              oldText: oldText))
             }
         case "plan":
             let entries = ((update["entries"] as? [[String: Any]]) ?? []).compactMap(ACPPlanEntry.init)
