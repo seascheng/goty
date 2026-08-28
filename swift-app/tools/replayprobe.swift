@@ -177,7 +177,26 @@ enum ReplayProbe {
         _ = pump(until: { readBack != nil }, timeout: 30)
         print("STORE after one-shot:", readBack ?? "nil")
         // — empirical threshold sweep: how big may ONE push be? —
-        for bytes in [32_000, 64_000, 96_000, 128_000, 160_000, 192_000, 256_000, 512_000] {
+        // wrap push to surface any in-page exception the bridge would swallow
+        webView.evaluateJavaScript("""
+            const real = window.__goty.push.bind(window.__goty);
+            window.__perr = [];
+            window.__goty.push = (evs) => { try { real(evs); } catch (e) { window.__perr.push(String(e && e.stack || e)); } };
+            'wrapped'
+            """) { _, _ in }
+        _ = pump(until: { false }, timeout: 0.5)
+        // — how big may ONE evaluateJavaScript payload be? —
+        for bytes in [8_000, 32_000, 128_000] {
+            var donePush = false
+            webView.evaluateJavaScript("window.__s='\(String(repeating: "x", count: bytes))'; window.__s.length") { _, _ in donePush = true }
+            _ = pump(until: { donePush }, timeout: 30)
+            var len = -1
+            webView.evaluateJavaScript("window.__s ? window.__s.length : 0") { r, _ in len = (r as? Int) ?? -1 }
+            _ = pump(until: { len >= 0 }, timeout: 10)
+            print("evaluate assign \(bytes)B -> stored len:", len)
+        }
+        // — push sweep with in-page error capture —
+        for bytes in [8_000, 32_000, 128_000] {
             var evs: [[String: Any]] = []
             var total = 0
             while total < bytes {
@@ -186,16 +205,38 @@ enum ReplayProbe {
             }
             var donePush = false
             let payload2 = try! String(data: JSONSerialization.data(withJSONObject: evs), encoding: .utf8)!
-            webView.evaluateJavaScript("window.__goty.push(\(payload2))") { _, err in
-                if let err { print("SWEEP ERROR @\(bytes):", err) }
+            webView.evaluateJavaScript("window.__goty.push(\(payload2))") { r, err in
                 donePush = true
+                if let err { print("PUSH EVAL ERROR @\(bytes):", err) }
             }
             _ = pump(until: { donePush }, timeout: 30)
             pump(until: { false }, timeout: 1)
+            var out: String?
+            webView.evaluateJavaScript("JSON.stringify({blocks: window.__gotyStore.blocks.length, perr: window.__perr.slice(-2)})") { r, _ in out = r as? String }
+            _ = pump(until: { out != nil }, timeout: 10)
+            print("push \(bytes)B (evaluated source \(payload2.count)B) ->", out ?? "nil")
+        }
+        // — callAsyncJavaScript: structured args, not JS source —
+        if #available(macOS 12.0, *) {
+            var evs: [[String: Any]] = []
+            for t in 0..<300 {
+                evs.append(["type": "userMessage", "text": "Turn \(t)"])
+                for _ in 0..<6 { evs.append(["type": "agentChunk", "text": String(repeating: "x", count: 1500)]) }
+            }
+            var asyncDone = false
+            let body = """
+                for (const e of events) { try { window.__gotyStore.apply(e); } catch (err) {} }
+                return window.__gotyStore.blocks.length;
+                """
+            webView.callAsyncJavaScript(body, arguments: ["events": evs], in: nil, in: WKContentWorld.page) { result in
+                if case .failure(let e) = result { print("CALLASYNC ERROR:", e) }
+                asyncDone = true
+            }
+            _ = pump(until: { asyncDone }, timeout: 30)
             var count = -1
             webView.evaluateJavaScript("window.__gotyStore.blocks.length") { r, _ in count = (r as? Int) ?? -1 }
             _ = pump(until: { count >= 0 }, timeout: 10)
-            print("sweep \(bytes)B -> total blocks:", count)
+            print("callAsync \(evs.count) events -> blocks:", count)
         }
         session.shutdown()
         exit(0)

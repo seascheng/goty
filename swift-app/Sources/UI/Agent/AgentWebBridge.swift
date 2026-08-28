@@ -45,30 +45,59 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
             guard self.jsReady, !self.queue.isEmpty, let webView = self.webView else { return }
             let batch = self.queue
             self.queue = []
-            // WKWebView silently fails (or never returns) on multi-megabyte
-            // evaluateJavaScript payloads — a session/load replay bursts
-            // several MB in one runloop tick. Land the batch in ≤192 KB
-            // slices; each slice is an independent push on the JS side.
-            let maxBytes = 192 * 1024
+            // Structured transport: events cross as a postMessage-style
+            // argument, NOT as JS source text. evaluateJavaScript with an
+            // event array silently no-ops in some states (the replay-tail
+            // killer: no error, no effect), while callAsyncJavaScript both
+            // reports failures and has no practical size limit.
             var current: [[String: Any]] = []
             var currentBytes = 0
+            func send(_ events: [[String: Any]]) {
+                guard !events.isEmpty else { return }
+                if #available(macOS 12.0, *) {
+                    webView.callAsyncJavaScript(
+                        "window.__goty.push(events);",
+                        arguments: ["events": events],
+                        in: nil, in: WKContentWorld.page
+                    ) { result in
+                        if case .failure(let error) = result {
+                            print("goty: push of \(events.count) events failed:", error)
+                        }
+                    }
+                } else if let data = try? JSONSerialization.data(withJSONObject: events),
+                          let json = String(data: data, encoding: .utf8) {
+                    webView.evaluateJavaScript("window.__goty.push(\(json))", completionHandler: nil)
+                }
+            }
             func flushSlice() {
+                // A slice that fails to serialize is halved until the
+                // culprit stands alone; that one is dropped with a log.
+                // Never wedge the queue on one poison event.
                 guard !current.isEmpty else { return }
-                guard let data = try? JSONSerialization.data(withJSONObject: current),
-                      let json = String(data: data, encoding: .utf8) else { return }
-                webView.evaluateJavaScript("window.__goty.push(\(json))", completionHandler: nil)
+                if JSONSerialization.isValidJSONObject(current) {
+                    send(current)
+                } else if current.count > 1 {
+                    let half = current.count / 2
+                    send(Array(current[..<half]))
+                    send(Array(current[half...]))
+                } else {
+                    print("goty: dropped unserializable event:", current.first?["type"] ?? "?")
+                }
                 current = []
                 currentBytes = 0
             }
             for event in batch {
-                let size = (try? JSONSerialization.data(withJSONObject: [event]).count) ?? maxBytes
-                if currentBytes + size > maxBytes { flushSlice() }
+                let size = (try? JSONSerialization.data(withJSONObject: [event]).count) ?? 65536
+                if currentBytes + size > Self.maxSliceBytes { flushSlice() }
                 current.append(event)
                 currentBytes += size
             }
             flushSlice()
         }
     }
+
+    private static let maxSliceBytes = 512 * 1024
+
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any],
