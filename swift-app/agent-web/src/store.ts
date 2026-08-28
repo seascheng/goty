@@ -94,8 +94,8 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("turnEnded") }),
   z.object({ type: z.literal("working"), value: z.boolean() }),
   z.object({ type: z.literal("status"), text: z.string() }),
-  z.object({ type: z.literal("configOptions"), options: z.array(ConfigOptionSchema) }),
-  z.object({ type: z.literal("commands"), commands: z.array(AgentCommandSchema) }),
+  z.object({ type: z.literal("configOptions"), options: z.unknown().nullish() }),
+  z.object({ type: z.literal("commands"), commands: z.unknown().nullish() }),
   z.object({
     type: z.literal("usage"),
     used: z.number().nullish(),
@@ -103,7 +103,7 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
     costAmount: z.number().nullish(),
     costCurrency: z.string().nullish(),
   }),
-  z.object({ type: z.literal("sessions"), sessions: z.array(AgentSessionSummarySchema) }),
+  z.object({ type: z.literal("sessions"), sessions: z.unknown().nullish() }),
   z.object({ type: z.literal("clearTranscript") }),
   z.object({ type: z.literal("files"), files: z.array(z.string()) }),
 ]);
@@ -115,6 +115,16 @@ type Listener = () => void;
 function parseEvent(raw: unknown): IncomingEvent | null {
   const result = IncomingEventSchema.safeParse(raw);
   return result.success ? result.data : null;
+}
+
+/// Per-item tolerant array coercion: one malformed entry drops itself,
+/// never the whole batch.
+function coerceList<T>(raw: unknown, schema: z.ZodType<T>): T[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => schema.safeParse(item))
+    .filter((r) => r.success)
+    .map((r) => r.data);
 }
 
 class Store {
@@ -171,11 +181,11 @@ class Store {
       case "permission": this.permission = event; break;
       case "permissionResolved": this.permission = null; break;
       case "turnEnded": this.blocks.push({ kind: "agent", text: "" }); this.working = false; break;
-      case "sessions": this.sessions = event.sessions; break;
+      case "sessions": this.sessions = coerceList(event.sessions, AgentSessionSummarySchema); break;
       case "working": this.working = event.value; break;
       case "status": this.status = event.text; break;
-      case "configOptions": this.configOptions = event.options; break;
-      case "commands": this.commands = event.commands; break;
+      case "configOptions": this.configOptions = coerceList(event.options, ConfigOptionSchema); break;
+      case "commands": this.commands = coerceList(event.commands, AgentCommandSchema); break;
       case "usage": this.usage = event; break;
       case "clearTranscript":
         this.blocks = []; this.toolOrder = []; this.tools.clear();

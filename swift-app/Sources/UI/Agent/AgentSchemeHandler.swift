@@ -53,9 +53,14 @@ final class AgentSchemeHandler: NSObject, WKURLSchemeHandler {
     private func respond(_ task: WKURLSchemeTask, url: URL, data: Data, file: URL) {
         let ext = file.pathExtension.lowercased()
         let mime = Self.mimeTypes[ext] ?? "application/octet-stream"
-        let response = URLResponse(url: url, mimeType: mime,
-                                   expectedContentLength: data.count,
-                                   textEncodingName: "utf-8")
+        // no-store: the bundle changes with every app build; a cached
+        // asset would pin the pane to a stale UI across relaunches.
+        let response = HTTPURLResponse(url: url, statusCode: 200,
+                                       httpVersion: "HTTP/1.1",
+                                       headerFields: [
+                                        "Content-Type": mime + "; charset=utf-8",
+                                        "Cache-Control": "no-store, no-cache, must-revalidate",
+                                       ])!
         task.didReceive(response)
         task.didReceive(data)
         task.didFinish()

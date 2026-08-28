@@ -71,6 +71,8 @@ function wordSegments(oldLine: string, newLine: string): {
   return { del, ins };
 }
 
+const KNOB_ORDER: Record<string, number> = { model: 0, thinking: 1, mode: 2 };
+
 const CTX_COLLAPSE = 10;
 
 function renderRow(row: DiffRow, gutterWidth: number): React.ReactNode {
@@ -438,13 +440,15 @@ function Composer({ working }: { working: boolean }) {
       <div className="composer-toolbar">
         <div className="toolbar-left">
           <HistoryChip />
-          {store.configOptions.map((option) => (
+          {[...store.configOptions]
+            .sort((a, b) => (KNOB_ORDER[a.id] ?? 9) - (KNOB_ORDER[b.id] ?? 9))
+            .map((option) => (
             <ConfigChip key={option.id} option={option}
               icon={<Icon kind={option.id === "thinking" ? "thinking" : option.id === "mode" ? "mode" : "model"} />}
               open={openChip === option.id}
               onToggle={() => setOpenChip(openChip === option.id ? null : option.id)}
               onPick={(value) => pickConfig(option.id, value)} />
-          ))}
+            ))}
         </div>
         <div className="toolbar-right">
           {store.usage && (store.usage.used != null || store.usage.costAmount != null) && (

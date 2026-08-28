@@ -26,6 +26,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
         config.setURLSchemeHandler(
             AgentSchemeHandler(root: Self.webAppDirectory()),
             forURLScheme: "goty")
+        // Ephemeral store: asset caches must never outlive a build.
+        config.websiteDataStore = WKWebsiteDataStore.nonPersistent()
         webView = WKWebView(frame: .zero, configuration: config)
         // The page paints its own themed background; without this the
         // pane flashes white until first paint.
