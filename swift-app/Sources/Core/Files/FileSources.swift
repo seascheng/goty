@@ -223,7 +223,7 @@ struct RemoteFileSource: FileSource {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/scp")
             proc.arguments = ["-r"] + SshTransport.baseOptions
-                + ["\(host):\(Shell.forceQuoted(path))", dest.path]
+                + ["\(host):\(path)", dest.path]
             proc.standardOutput = FileHandle.nullDevice
             let err = Pipe()
             proc.standardError = err
