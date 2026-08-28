@@ -318,15 +318,17 @@ function Composer({ working }: { working: boolean }) {
   const [openChip, setOpenChip] = useState<string | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const [atIndex, setAtIndex] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
 
   const slashQuery = /^\/[\w-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
   const slashMatches = slashQuery == null ? [] :
     store.commands.filter((c) => c.name.toLowerCase().startsWith(slashQuery));
-  const slashOpen = slashQuery != null && slashMatches.length > 0;
+  const slashOpen = slashQuery != null && slashMatches.length > 0 && !dismissed;
 
   const atMatch = /@([\w./-]*)$/.exec(text);
-  const atOpen = atMatch != null;
+  const atOpen = atMatch != null && !dismissed;
   const atQuery = (atMatch?.[1] ?? "").toLowerCase();
   const atMatches = atOpen
     ? store.files.filter((f) => f.toLowerCase().includes(atQuery)).slice(0, 8)
@@ -337,6 +339,18 @@ function Composer({ working }: { working: boolean }) {
       window.webkit?.messageHandlers.goty.postMessage({ type: "listFiles" });
     }
   }, [atOpen]);
+
+  // Click outside the composer dismisses every popover; typing re-arms them.
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (boxRef.current && e.target instanceof Node && !boxRef.current.contains(e.target)) {
+        setOpenChip(null);
+        setDismissed(true);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, []);
 
   const pickSlash = (name: string) => {
     setText("/" + name + " ");
@@ -394,7 +408,7 @@ function Composer({ working }: { working: boolean }) {
 
   return (
     <div className="composer">
-      <div className="composer-box">
+      <div className="composer-box" ref={boxRef}>
         <textarea
           ref={ref}
           value={text}
@@ -404,9 +418,10 @@ function Composer({ working }: { working: boolean }) {
             setText(e.target.value);
             setSlashIndex(0);
             setAtIndex(0);
+            setDismissed(false);
             const el = e.target;
             el.style.height = "auto";
-            el.style.height = Math.min(el.scrollHeight, 140) + "px";
+            el.style.height = Math.min(el.scrollHeight, 160) + "px";
           }}
           onKeyDown={onComposerKeyDown}
         />
@@ -414,6 +429,7 @@ function Composer({ working }: { working: boolean }) {
           <div className="slash-pop">
             {atMatches.map((f, i) => (
               <button key={f}
+                ref={(el) => { if (i === atIndex && el) el.scrollIntoView({ block: "nearest" }); }}
                 className={"slash-opt" + (i === atIndex ? " cur" : "")}
                 onMouseEnter={() => setAtIndex(i)}
                 onClick={() => pickAt(f)}>
@@ -426,6 +442,7 @@ function Composer({ working }: { working: boolean }) {
           <div className="slash-pop">
             {slashMatches.map((c, i) => (
               <button key={c.name}
+                ref={(el) => { if (i === slashIndex && el) el.scrollIntoView({ block: "nearest" }); }}
                 className={"slash-opt" + (i === slashIndex ? " cur" : "")}
                 onMouseEnter={() => setSlashIndex(i)}
                 onClick={() => pickSlash(c.name)}>

@@ -171,7 +171,7 @@ body {
 .composer textarea {
   width: 100%; background: none; border: none; outline: none; resize: none;
   color: var(--foreground); font: inherit; line-height: 1.55;
-  padding: 12px 6px 2px; min-height: 34px; display: block;
+  padding: 12px 6px 4px; min-height: 58px; display: block;
 }
 .composer textarea::placeholder { color: var(--fg-extra-muted); }
 .composer-toolbar {
