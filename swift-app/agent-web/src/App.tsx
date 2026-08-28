@@ -466,6 +466,10 @@ function Composer({ working }: { working: boolean }) {
         )}
       <div className="composer-toolbar">
         <div className="toolbar-left">
+          {store.meta?.icon && (
+            <img className="pane-agent-icon" src={store.meta.icon}
+                 alt="" draggable={false} />
+          )}
           <HistoryChip open={histOpen}
             onToggle={() => {
               const next = !histOpen;
@@ -487,7 +491,13 @@ function Composer({ working }: { working: boolean }) {
               onToggle={() => setOpenPop(openPop === option.id ? null : option.id)}
               onPick={(value) => pickConfig(option.id, value)} />
             ))}
-        </div>
+            {store.meta?.directory && (
+              <span className="pane-meta">
+                {[store.meta.workspace, store.meta.directory].filter(Boolean).join("/")}
+                {store.meta.branch ? ` · ${store.meta.branch}` : ""}
+              </span>
+            )}
+          </div>
         <div className="toolbar-right">
           {store.usage && (store.usage.used != null || store.usage.costAmount != null) && (
             <span className="usage">

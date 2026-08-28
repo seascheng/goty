@@ -12,6 +12,22 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     /// Sidebar 状态接线（由 AppDelegate 桥到 coordinator）
     /// `@gui omp <prompt>` queued prompt: sent once the session is up.
     var initialPrompt: String?
+    /// Composer statusbar metadata (agent icon + workspace/folder ·
+    /// branch), resolved by the AppDelegate — it can see the store, the
+    /// git cache and the brand icon table.
+    var metaProvider: (() -> (workspace: String?, directory: String?,
+                              branch: String?, icon: String?))?
+
+    /// Push the current meta snapshot; re-run on git changes.
+    func pushMeta() {
+        guard let m = metaProvider?() else { return }
+        func nz(_ s: String?) -> Any { (s?.isEmpty == false) ? s! : NSNull() }
+        bridge.push(["type": "meta",
+                     "workspace": nz(m.workspace),
+                     "directory": nz(m.directory),
+                     "branch": nz(m.branch),
+                     "icon": nz(m.icon)])
+    }
     var onWorkingChange: ((Bool) -> Void)?
     var onPermissionPending: ((Bool) -> Void)?
 
@@ -52,7 +68,10 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         session.delegate = self
         // Theme first: the page's palette lands before any queued
         // transcript events (push order is preserved).
-        bridge.onReady = { [weak self] in self?.pushTheme() }
+        bridge.onReady = { [weak self] in
+            self?.pushTheme()
+            self?.pushMeta()
+        }
         bridge.onSend = { [weak self] text in
             guard let self else { return }
             self.bridge.push(["type": "working", "value": true])

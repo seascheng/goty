@@ -377,6 +377,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if case .agent(let agentKey) = pane.kind,
            let agentHost = makeAgentPaneHost(pane: pane, ws: ws, key: key, agentKey: agentKey) {
             agentHost.initialPrompt = coordinator.takeInitialPrompt(paneId: pane.id)
+        let paneCwd = coordinator.cwd(ofPane: pane.id, in: ws.id) ?? pane.cwd
+            ?? (ws.focusedTab?.panes.first(where: { $0.id == pane.id })?.cwd)
+        agentHost.metaProvider = { [weak self] in
+            guard let self else { return (nil, nil, nil, nil) }
+            let name = self.coordinator.store?.workspaces.first(where: { $0.id == ws.id })?.name
+            let dir = paneCwd.map { ($0 as NSString).lastPathComponent }
+            let branch = paneCwd.flatMap {
+                GitStatusStore.shared.summary(for: $0, host: ws.sshHost)?.branch
+            }
+            // Brand icon straight from the PNG table (already base64):
+            // the same artwork the tab strip uses, zero re-encoding.
+            let icon = agentKey.flatMap { AgentBrandIcons.pngs[$0.lowercased()]?["2"] }
+                .map { "data:image/png;base64,\($0)" }
+            return (name, dir, branch, icon)
+        }
+        if let paneCwd {
+            // Populate the git cache for the composer's branch read; the
+            // onChange pass re-pushes meta once a summary lands.
+            GitStatusStore.shared.refresh(cwds: [paneCwd], host: ws.sshHost) { [weak self] in
+                self?.gitSurfacesStale()
+            }
+        }
             hostPool[key] = agentHost
             return agentHost
         }

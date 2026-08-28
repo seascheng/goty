@@ -107,6 +107,13 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("clearTranscript") }),
   z.object({ type: z.literal("files"), files: z.array(z.string()) }),
   z.object({ type: z.literal("theme"), vars: z.record(z.string(), z.string()) }),
+  z.object({
+    type: z.literal("meta"),
+    workspace: z.string().nullish(),
+    directory: z.string().nullish(),
+    branch: z.string().nullish(),
+    icon: z.string().nullish(),
+  }),
 ]);
 
 export type IncomingEvent = z.infer<typeof IncomingEventSchema>;
@@ -141,6 +148,9 @@ class Store {
   usage: { used?: number | null; size?: number | null;
            costAmount?: number | null; costCurrency?: string | null } | null = null;
   status = "连接中…";
+  /// Composer statusbar: workspace/folder · branch (pushed by Swift).
+  meta: { workspace: string | null; directory: string | null;
+          branch: string | null; icon: string | null } | null = null;
   /// Monotonic counter — the useSyncExternalStore snapshot. Status-only
   /// updates (tool upsert) change nothing else observable.
   revision = 0;
@@ -193,6 +203,11 @@ class Store {
         this.permission = null; this.working = false;
         break;
       case "files": this.files = event.files; break;
+      case "meta":
+        this.meta = { workspace: event.workspace ?? null,
+                      directory: event.directory ?? null,
+                      branch: event.branch ?? null, icon: event.icon ?? null };
+        break;
       case "theme": {
         const root = document.documentElement;
         for (const [k, v] of Object.entries(event.vars)) {

@@ -180,6 +180,7 @@ extension AppDelegate {
         refreshSidebarSpaces()
         updateRightPanel()
         wc?.rightPanel.refreshScm()
+        for case let host as AgentPaneHost in hostPool.values { host.pushMeta() }
     }
 
     private func refreshSidebarSpaces() {
