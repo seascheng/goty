@@ -2,15 +2,21 @@
 import AppKit
 import WebKit
 
-/// Swift → JS event pump + JS → Swift message sink for one agent pane.
-/// Events are coalesced per runloop turn (requestAnimationFrame on the
-/// JS side batches paint; here we batch the evaluateJavaScript calls).
+/// Tauri-style IPC for the agent pane's webview.
+///
+/// Swift → JS: `push(_:)` coalesces events per runloop turn and lands
+/// them as one `window.__goty.push([...])` call (the JS side batches
+/// paints through requestAnimationFrame).
+/// JS → Swift: the page posts commands to the `goty` message handler —
+/// `ready`, `send`, `stop`, `permission` — routed to the closures below.
 final class AgentWebBridge: NSObject, WKScriptMessageHandler {
     private weak var webView: WKWebView?
     private var queue: [[String: Any]] = []
     private var flushScheduled = false
     private var jsReady = false
-    /// JS 审批按钮 → AgentPaneHost
+
+    var onSend: ((String) -> Void)?
+    var onStop: (() -> Void)?
     var onPermissionOption: ((String) -> Void)?
 
     init(webView: WKWebView) {
@@ -22,23 +28,6 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
     func push(_ event: [String: Any]) {
         queue.append(event)
         scheduleFlush()
-    }
-
-    func pushTheme() {
-        let theme = Chrome.theme
-        func hex(_ color: NSColor) -> String {
-            let c = color.usingColorSpace(.sRGB) ?? color
-            return String(format: "#%02x%02x%02x",
-                          Int(round(c.redComponent * 255)),
-                          Int(round(c.greenComponent * 255)),
-                          Int(round(c.blueComponent * 255)))
-        }
-        push(["type": "theme", "vars": [
-            "--goty-bg": hex(theme.background),
-            "--goty-fg": hex(theme.legibleForeground()),
-            "--goty-accent": hex(theme.accent),
-            "--goty-muted": hex(theme.accent),
-        ]])
     }
 
     private func scheduleFlush() {
@@ -58,12 +47,16 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
 
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any] else { return }
-        switch body["type"] as? String {
+        guard let body = message.body as? [String: Any],
+              let type = body["type"] as? String else { return }
+        switch type {
         case "ready":
             jsReady = true
-            pushTheme()          // ready 后先补主题，再 flush 积压事件
             scheduleFlush()
+        case "send":
+            if let text = body["text"] as? String, !text.isEmpty { onSend?(text) }
+        case "stop":
+            onStop?()
         case "permission":
             if let optionId = body["optionId"] as? String {
                 onPermissionOption?(optionId)

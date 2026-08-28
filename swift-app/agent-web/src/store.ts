@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-/// Swift → JS events (AgentWebBridge.push). Schema-parsed once at this
+/// Swift → JS events (AgentWebBridge). Schema-parsed once at this
 /// boundary; Swift fills absent optionals with NSNull(), so absent string
 /// fields arrive as `null` and stay nullable through the view layer.
 export type ToolContent = { type: string; text?: string | null; path?: string | null };
@@ -57,7 +57,8 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("permissionResolved") }),
   z.object({ type: z.literal("turnEnded") }),
-  z.object({ type: z.literal("theme"), vars: z.record(z.string(), z.string()) }),
+  z.object({ type: z.literal("working"), value: z.boolean() }),
+  z.object({ type: z.literal("status"), text: z.string() }),
 ]);
 
 export type IncomingEvent = z.infer<typeof IncomingEventSchema>;
@@ -74,6 +75,8 @@ class Store {
   toolOrder: string[] = [];
   tools = new Map<string, ToolCall>();
   permission: Permission | null = null;
+  working = false;
+  status = "连接中…";
   /// Monotonic counter — the useSyncExternalStore snapshot. Status-only
   /// updates (tool upsert) change nothing else observable.
   revision = 0;
@@ -86,11 +89,6 @@ class Store {
     const event = parseEvent(raw);
     if (!event) return;
     switch (event.type) {
-      case "theme":
-        for (const [key, value] of Object.entries(event.vars)) {
-          document.documentElement.style.setProperty(key, value);
-        }
-        return;
       case "userMessage": this.blocks.push({ kind: "user", text: event.text }); break;
       case "agentChunk":
         this.tail("agent").text += event.text; break;
@@ -110,7 +108,9 @@ class Store {
       case "plan": this.blocks.push({ kind: "plan", entries: event.entries ?? [] }); break;
       case "permission": this.permission = event; break;
       case "permissionResolved": this.permission = null; break;
-      case "turnEnded": this.blocks.push({ kind: "agent", text: "" }); break;
+      case "turnEnded": this.blocks.push({ kind: "agent", text: "" }); this.working = false; break;
+      case "working": this.working = event.value; break;
+      case "status": this.status = event.text; break;
     }
     this.revision += 1;
     this.emit();

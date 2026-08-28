@@ -2,9 +2,10 @@
 import AppKit
 import WebKit
 
-/// One GUI agent session pane: WKWebView transcript + native composer.
-/// The webview is a disposable view of AgentSession state — the process
-/// and its transcript live in sessiond (ring) / the agent (session file).
+/// One GUI agent session pane — the Tauri model. The WKWebView is the
+/// pane's entire UI (transcript, cards, composer), served from the
+/// bundled assets under `goty://`; Swift is the backend: AgentSession
+/// drives the ACP agent, the bridge shuttles commands and events.
 final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
     let hostKey: HostKey
 
@@ -15,8 +16,6 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
     private let session: AgentSession
     private let webView: WKWebView
     private let bridge: AgentWebBridge
-    private let composer = ComposerView()
-    private let statusLabel = NSTextField(labelWithString: "连接中…")
     private var pendingPrompt: ACPPermissionPrompt?
 
     init(key: HostKey, session: AgentSession) {
@@ -24,9 +23,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
         self.session = session
 
         let config = WKWebViewConfiguration()
+        config.setURLSchemeHandler(
+            AgentSchemeHandler(root: Self.webAppDirectory()),
+            forURLScheme: "goty")
         webView = WKWebView(frame: .zero, configuration: config)
-        // The page paints its own themed background (styles.css); without
-        // this the pane flashes white until first paint.
+        // The page paints its own themed background; without this the
+        // pane flashes white until first paint.
         webView.setValue(false, forKey: "drawsBackground")
         webView.underPageBackgroundColor = .clear
         bridge = AgentWebBridge(webView: webView)
@@ -35,56 +37,37 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
         wantsLayer = true
 
         webView.translatesAutoresizingMaskIntoConstraints = false
-        composer.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.font = .systemFont(ofSize: 11)
-        statusLabel.textColor = .secondaryLabelColor
         addSubview(webView)
-        addSubview(statusLabel)
-        addSubview(composer)
         NSLayoutConstraint.activate([
             webView.topAnchor.constraint(equalTo: topAnchor),
             webView.leadingAnchor.constraint(equalTo: leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            statusLabel.topAnchor.constraint(equalTo: webView.bottomAnchor, constant: 3),
-            statusLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            composer.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 3),
-            composer.leadingAnchor.constraint(equalTo: leadingAnchor),
-            composer.trailingAnchor.constraint(equalTo: trailingAnchor),
-            composer.bottomAnchor.constraint(equalTo: bottomAnchor),
-            composer.heightAnchor.constraint(greaterThanOrEqualToConstant: 52),
-            composer.heightAnchor.constraint(lessThanOrEqualToConstant: 150),
+            webView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
         session.delegate = self
+        bridge.onSend = { [weak self] text in
+            guard let self else { return }
+            self.bridge.push(["type": "working", "value": true])
+            self.session.send(text)
+        }
+        bridge.onStop = { [weak self] in self?.session.cancel() }
         bridge.onPermissionOption = { [weak self] optionId in
             guard let self, let prompt = self.pendingPrompt else { return }
             self.session.respondPermission(requestID: prompt.requestID, optionId: optionId)
             self.pendingPrompt = nil
             self.onPermissionPending?(false)
         }
-        composer.onSend = { [weak self] text in
-            guard let self else { return }
-            self.bridge.push(["type": "userMessage", "text": text])
-            self.session.send(text)
-        }
-        composer.onStop = { [weak self] in self?.session.cancel() }
 
-        loadWebApp()
+        webView.load(URLRequest(url: URL(string: "goty://app/index.html")!))
         session.connect { [weak self] ok in
             DispatchQueue.main.async {
-                self?.statusLabel.stringValue = ok ? "就绪" : "连接失败"
+                self?.bridge.push(["type": "status", "text": ok ? "就绪" : "连接失败"])
             }
         }
     }
 
     required init?(coder: NSCoder) { fatalError("unsupported") }
-
-    private func loadWebApp() {
-        let dir = Self.webAppDirectory()
-        webView.loadFileURL(dir.appendingPathComponent("index.html"),
-                            allowingReadAccessTo: dir)
-    }
 
     /// Packaged bundle first; repo fallback for run-tests/dev tools.
     static func webAppDirectory() -> URL {
@@ -117,16 +100,19 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
             guard let self else { return }
             for event in events {
                 if case .ready = event {
-                    self.statusLabel.stringValue = "就绪"
+                    self.bridge.push(["type": "status", "text": "就绪"])
                     continue
+                }
+                if case .permissionRequested(let prompt) = event {
+                    self.pendingPrompt = prompt
+                    self.onPermissionPending?(true)
                 }
                 self.bridge.push(self.jsEvent(event))
             }
         }
     }
 
-    /// One decoded ACP event → one JS event. `.ready` is UI-only and
-    /// handled above; everything else crosses the bridge.
+    /// One decoded ACP event → one JS event. `.ready` is handled above.
     private func jsEvent(_ event: AgentSessionEvent) -> [String: Any] {
         switch event {
         case .ready:
@@ -169,115 +155,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
 
     func sessionDidFail(_ session: AgentSession, reason: String) {
         DispatchQueue.main.async { [weak self] in
-            self?.statusLabel.stringValue = reason
+            self?.bridge.push(["type": "working", "value": false])
+            self?.bridge.push(["type": "status", "text": reason])
         }
     }
-}
-
-/// Native composer bar: bordered input box + 发送/停止. NSTextView keeps
-/// Chinese IME composition exactly like the rest of the app (webview
-/// textarea IME is the failure mode we avoid). The box grows with up to
-/// ~5 lines, then scrolls internally.
-final class ComposerView: NSView, NSTextViewDelegate {
-    var onSend: ((String) -> Void)?
-    var onStop: (() -> Void)?
-
-    private let inputBox = NSView()
-    private let textView = NSTextView()
-    private let placeholder = NSTextField(labelWithString: "输入消息…")
-    private let scrollView = NSScrollView()
-    private let sendButton = NSButton(title: "发送", target: nil, action: nil)
-    private let stopButton = NSButton(title: "停止", target: nil, action: nil)
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-
-        inputBox.wantsLayer = true
-        inputBox.layer?.borderColor = NSColor.separatorColor.cgColor
-        inputBox.layer?.borderWidth = 1
-        inputBox.layer?.cornerRadius = 8
-        inputBox.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
-        inputBox.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(inputBox)
-
-        textView.isRichText = false
-        textView.font = .systemFont(ofSize: 13)
-        textView.textContainerInset = NSSize(width: 2, height: 8)
-        textView.backgroundColor = .clear
-        textView.delegate = self
-        textView.autoresizingMask = [.width]
-        textView.isVerticallyResizable = true
-        textView.translatesAutoresizingMaskIntoConstraints = false
-
-        scrollView.documentView = textView
-        scrollView.hasVerticalScroller = true
-        scrollView.drawsBackground = false
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        inputBox.addSubview(scrollView)
-
-        placeholder.font = .systemFont(ofSize: 13)
-        placeholder.textColor = .placeholderTextColor
-        placeholder.translatesAutoresizingMaskIntoConstraints = false
-        placeholder.isEditable = false
-        placeholder.isSelectable = false
-        inputBox.addSubview(placeholder)
-
-        for button in [sendButton, stopButton] {
-            button.bezelStyle = .rounded
-            button.controlSize = .small
-            button.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(button)
-        }
-        sendButton.hasDestructiveAction = false
-        sendButton.keyEquivalent = "\r"
-        sendButton.keyEquivalentModifierMask = [.command]
-        sendButton.target = self; sendButton.action = #selector(didSend)
-        stopButton.target = self; stopButton.action = #selector(didStop)
-
-        NSLayoutConstraint.activate([
-            inputBox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            inputBox.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            inputBox.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-            inputBox.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -8),
-            scrollView.leadingAnchor.constraint(equalTo: inputBox.leadingAnchor, constant: 6),
-            scrollView.trailingAnchor.constraint(equalTo: inputBox.trailingAnchor, constant: -6),
-            scrollView.topAnchor.constraint(equalTo: inputBox.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: inputBox.bottomAnchor),
-            placeholder.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor, constant: 6),
-            placeholder.topAnchor.constraint(equalTo: inputBox.topAnchor, constant: 9),
-            stopButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            stopButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
-            sendButton.trailingAnchor.constraint(equalTo: stopButton.leadingAnchor, constant: -6),
-            sendButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError("unsupported") }
-
-    override var acceptsFirstResponder: Bool { true }
-    override func becomeFirstResponder() -> Bool {
-        let ok = super.becomeFirstResponder()
-        window?.makeFirstResponder(textView)
-        updatePlaceholder()
-        return ok
-    }
-
-    func textDidChange(_ notification: Notification) { updatePlaceholder() }
-
-    private func updatePlaceholder() {
-        placeholder.isHidden = !textView.string.isEmpty
-    }
-
-    @objc private func didSend() {
-        // IME composition in flight: the marked string is not what the
-        // user means to send yet.
-        guard !textView.hasMarkedText() else { return }
-        let text = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        textView.string = ""
-        updatePlaceholder()
-        onSend?(text)
-    }
-
-    @objc private func didStop() { onStop?() }
 }
