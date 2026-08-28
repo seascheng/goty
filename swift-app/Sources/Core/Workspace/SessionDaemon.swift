@@ -190,11 +190,19 @@ final class SessionDaemon {
         return shared.pingCapability()
     }
 
+    /// Agent GUI sessions need the CAPABILITY-4 daemon (no_echo +
+    /// ring_bytes). nil capability = not running — ensureRunning first.
+    static func supportsAgentSessions() -> Bool {
+        guard shared.ensureRunning() else { return false }
+        return (sharedRunningCapability() ?? 0) >= 4
+    }
+
     /// Attach-or-spawn. Attach first so the daemon's replay ring is the
     /// single screen authority on both local and remote panes; spawn only
     /// when the pane does not exist yet.
     func openPane(id: String, cwd: String?, shell: String, args: [String],
                   environment: [String: String], grid: SessionGrid,
+                  noEcho: Bool = false, ringBytes: UInt64? = nil,
                   onFrame: @escaping (UInt8, Data) -> Void,
                   onDisconnect: @escaping () -> Void) -> PaneSession? {
         guard ensureRunning() else { return nil }
@@ -211,18 +219,10 @@ final class SessionDaemon {
             Darwin.close(fd)
             fd = Self.connect(path: socketPath)
             guard fd >= 0 else { return nil }
-            let request: [String: Any] = [
-                "pane_id": id,
-                "cwd": cwd ?? NSNull(),
-                "shell": shell,
-                "args": args,
-                "env": environment.map { [$0.key, $0.value] },
-                "size": [
-                    "cols": grid.columns, "rows": grid.rows,
-                    "cell_w": grid.cellWidth, "cell_h": grid.cellHeight,
-                ],
-                "replay": true,
-            ]
+            var request = Self.agentSpawnPayload(
+                cwd: cwd, shell: shell, args: args, environment: environment,
+                grid: grid, noEcho: noEcho, ringBytes: ringBytes)
+            request["pane_id"] = id
             guard let data = try? JSONSerialization.data(withJSONObject: request),
                   Self.writeFrame(fd: fd, kind: SessionFrame.spawn, payload: data),
                   let spawned = Self.readFrame(fd: fd), spawned.0 == SessionFrame.spawned
@@ -232,6 +232,29 @@ final class SessionDaemon {
 
         return PaneSession(fd: fd, initial: initial,
                            onFrame: onFrame, onDisconnect: onDisconnect)
+    }
+
+    /// SpawnRequest JSON (sessiond protocol.rs). noEcho/ringBytes require
+    /// CAPABILITY 4; older daemons ignore them via serde defaults — callers
+    /// gate on supportsAgentSessions() instead of relying on that.
+    static func agentSpawnPayload(cwd: String?, shell: String, args: [String],
+                                  environment: [String: String], grid: SessionGrid,
+                                  noEcho: Bool, ringBytes: UInt64?) -> [String: Any] {
+        var request: [String: Any] = [
+            "pane_id": "", // caller overwrites; kept for a single shape
+            "cwd": cwd ?? NSNull(),
+            "shell": shell,
+            "args": args,
+            "env": environment.map { [$0.key, $0.value] },
+            "size": [
+                "cols": grid.columns, "rows": grid.rows,
+                "cell_w": grid.cellWidth, "cell_h": grid.cellHeight,
+            ],
+            "replay": true,
+        ]
+        if noEcho { request["no_echo"] = true }
+        if let ringBytes { request["ring_bytes"] = ringBytes }
+        return request
     }
 
     struct PaneInfo {

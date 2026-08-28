@@ -109,3 +109,29 @@ enum AgentCatalog {
         return aliases[normalized]
     }
 }
+
+// MARK: - ACP (Agent Client Protocol) launches
+
+/// GUI agent sessions' spawn shapes. Separate from AgentCatalog (passive
+/// TUI detection): an ACP manifest means "spawn this over a PTY and speak
+/// JSON-RPC", not "recognize this TUI on screen".
+enum AgentManifests {
+    /// One GUI agent session's spawn shape. V1: omp only — `omp acp` is
+    /// native ACP; claude/codex/pi arrive via adapters in M3.
+    struct ACPLaunch {
+        let command: String
+        let args: [String]
+        /// Agent transcripts outgrow the 8 MiB default replay ring
+        /// (spec: single tool results reach hundreds of KB).
+        let ringBytes: UInt64
+    }
+
+    static func acpLaunch(for key: String) -> ACPLaunch? {
+        guard key == "omp" else { return nil }
+        return ACPLaunch(command: "omp", args: ["acp"],
+                         ringBytes: 67_108_864)
+    }
+
+    /// Ordered entries for the "New Agent Session" submenu.
+    static let acpPickerOrder: [(key: String, label: String)] = [("omp", "omp (GUI)")]
+}
