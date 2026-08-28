@@ -386,10 +386,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let branch = paneCwd.flatMap {
                 GitStatusStore.shared.summary(for: $0, host: ws.sshHost)?.branch
             }
-            // Brand icon straight from the PNG table (already base64):
-            // the same artwork the tab strip uses, zero re-encoding.
-            let icon = AgentBrandIcons.pngs[agentKey.lowercased()]?[2]
-                .map { "data:image/png;base64,\($0)" }
+            // Brand icon with the sidebar's template treatment, tinted
+            // to the live theme (re-pushed on every theme flip).
+            let icon = AgentBrandIcons.tintedDataURL(for: agentKey,
+                                                     color: Chrome.theme.iconTint)
             return (name, dir, branch, icon)
         }
         if let paneCwd {

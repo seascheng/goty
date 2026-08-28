@@ -134,6 +134,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
 
     func retheme() {
         pushTheme()
+        pushMeta()   // the icon tint is theme-derived
     }
 
     required init?(coder: NSCoder) { fatalError("unsupported") }
