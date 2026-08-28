@@ -59,6 +59,52 @@ enum AgentTest {
         check(notifications.count == 1 && notifications[0].0 == "session/update",
               "notification routed")
 
+        print("— AgentSession.interpret —")
+        var events: [AgentSessionEvent] = []
+        let daemon = SessionDaemon(socketPath: "/nonexistent-\(UUID().uuidString)")
+        let session = AgentSession(paneId: "p1", cwd: nil, grid: grid,
+                                   environment: [:],
+                                   launch: AgentManifests.ACPLaunch(
+                                       command: "omp", args: ["acp"],
+                                       ringBytes: 67_108_864),
+                                   daemon: daemon, delegate: nil)
+        events += session.interpret(["method": "session/update", "params": [
+            "sessionId": "s1",
+            "update": ["sessionUpdate": "agent_message_chunk",
+                       "content": ["type": "text", "text": "hello"]],
+        ]])
+        events += session.interpret(["method": "session/update", "params": [
+            "sessionId": "s1",
+            "update": ["sessionUpdate": "tool_call", "toolCallId": "t1",
+                       "title": "Read file", "kind": "read", "status": "completed",
+                       "content": [["type": "text", "text": "src/main.rs"]]],
+        ]])
+        events += session.interpret(["method": "session/update", "params": [
+            "sessionId": "s1",
+            "update": ["sessionUpdate": "plan",
+                       "entries": [["content": "step 1", "priority": "high", "status": "pending"]]],
+        ]])
+        events += session.interpret(["id": 7, "method": "session/request_permission", "params": [
+            "sessionId": "s1", "toolCall": ["title": "bash"],
+            "options": [["optionId": "allow", "name": "Allow", "kind": "allow_once"]],
+        ]])
+        check(events.count == 4, "four events interpreted")
+        if case .messageChunk(let text)? = events.first, text == "hello" {} else { failures += 1; print("FAIL  messageChunk payload") }
+        if case .toolCallUpdate(let id, _, _, let status, let content)? = events.dropFirst().first,
+           id == "t1", status == "completed", content.count == 1 {} else { failures += 1; print("FAIL  toolCallUpdate payload") }
+        if case .plan(let entries)? = events.dropFirst(2).first, entries.count == 1,
+           entries[0].content == "step 1" {} else { failures += 1; print("FAIL  plan payload") }
+        if case .permissionRequested(let prompt)? = events.last, prompt.requestID == 7,
+           prompt.toolCallTitle == "bash",
+           prompt.options.first?.optionId == "allow" {} else { failures += 1; print("FAIL  permission prompt") }
+
+        print("— manifest —")
+        let launch = AgentManifests.acpLaunch(for: "omp")
+        check(launch?.command == "omp" && launch?.args == ["acp"], "omp acp launch")
+        check(launch?.ringBytes == 67_108_864, "omp uses the 64 MiB ring")
+        check(AgentManifests.acpLaunch(for: "claude") == nil, "v1 is omp-only")
+        check(AgentManifests.acpPickerOrder.first?.key == "omp", "picker order leads with omp")
+
         if failures > 0 { exit(1) }
         print("agenttest: all passed")
     }
