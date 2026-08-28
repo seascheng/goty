@@ -103,9 +103,11 @@ final class AgentSession {
     func send(_ text: String) {
         guard let sessionId, !isWorking else { return }
         isWorking = true
+        // omp 18.0.8 names the field `prompt` (spec drift: ACP v1 says
+        // `content`); M3 adapters translate back per agent.
         client.request("session/prompt", [
             "sessionId": sessionId,
-            "content": [["type": "text", "text": text]],
+            "prompt": [["type": "text", "text": text]],
         ]) { [weak self] result in
             guard let self else { return }
             self.isWorking = false
