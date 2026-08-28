@@ -167,7 +167,7 @@ function ToolCard({ id }: { id: string }) {
       <button className="tool-head" onClick={() => setOpen(!open)}>
         <span className={"chevron" + (open ? " up" : "")}>▸</span>
         <span className={"tool-icon " + (call.status ?? "")}>{icon}</span>
-        <span className="tool-title">{call.title ?? call.id}</span>
+        <span className="tool-title">{toolDisplayTitle(call)}</span>
         <span className={"tool-status" + (running ? " running" : "")}>{statusLabel}</span>
       </button>
       {open && (
@@ -211,16 +211,54 @@ function fmtTokens(n?: number | null): string {
 /// One clickable config knob (mode / model / thinking …) with its option
 /// popover. Selection posts `setConfig`; the OK response re-syncs the
 /// whole knob list, so this component is stateless about current values.
-function ConfigChip({ option, open, onToggle, onPick }: {
+/// Minimal 24px stroke icons (lucide-style geometry, no dependency).
+function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking" | "stop" | "send" }) {
+  const common = { width: 13, height: 13, viewBox: "0 0 24 24", fill: "none",
+                   stroke: "currentColor", strokeWidth: 2,
+                   strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  switch (kind) {
+    case "history":
+      return <svg {...common}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></svg>;
+    case "model":
+      return <svg {...common}><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z" /></svg>;
+    case "mode":
+      return <svg {...common}><circle cx="12" cy="12" r="9" /><path d="M15.5 8.5 10 10l-1.5 5.5L14 13.5z" /></svg>;
+    case "thinking":
+      return <svg {...common}><path d="M3 12h4l3-8 4 16 3-8h4" /></svg>;
+    case "stop":
+      return <svg {...common}><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" /></svg>;
+    case "send":
+      return <svg {...common}><path d="M12 19V5" /><path d="M5 12l7-7 7 7" /></svg>;
+  }
+}
+
+/// What the tool row shows as its title. Agent titles win (omp's "占位"
+/// placeholder does not); otherwise derive from kind + rawInput path.
+function toolDisplayTitle(call: ToolCall): string {
+  if (call.title && call.title !== "占位") return call.title;
+  const path = typeof call.rawInput?.path === "string" ? call.rawInput.path : null;
+  const base = path ? path.split("/").pop() : null;
+  const kindLabel = call.kind === "read" ? "Read"
+    : call.kind === "search" ? "Search"
+    : call.kind === "edit" || call.kind === "write" ? "Edit"
+    : call.kind === "execute" || call.kind === "bash" ? "Run"
+    : call.kind;
+  if (kindLabel) return base ? `${kindLabel} ${base}` : kindLabel;
+  if (base) return base;
+  return call.id;
+}
+
+function ConfigChip({ option, icon, open, onToggle, onPick }: {
   option: { id: string; name: string; currentValue?: string | null;
             options: { value: string; name: string }[] };
+  icon: React.ReactNode;
   open: boolean; onToggle: () => void; onPick: (value: string) => void;
 }) {
   const current = option.options.find((o) => o.value === option.currentValue);
   return (
     <div className="chip-wrap">
-      <button className={"chip" + (open ? " open" : "")} onClick={onToggle}>
-        <span className="chip-name">{option.name}</span>
+      <button className={"chip" + (open ? " open" : "")} onClick={onToggle} title={option.name}>
+        {icon}
         <span className="chip-value">{current?.name ?? option.currentValue ?? "—"}</span>
         <span className="chip-caret">▾</span>
       </button>
@@ -244,12 +282,13 @@ function HistoryChip() {
   const [open, setOpen] = useState(false);
   return (
     <div className="chip-wrap">
-      <button className={"chip" + (open ? " open" : "")}
+      <button className={"chip" + (open ? " open" : "")} title="历史会话"
         onClick={() => {
           setOpen(!open);
           if (!open) window.webkit?.messageHandlers.goty.postMessage({ type: "listSessions" });
         }}>
-        <span className="chip-name">历史</span>
+        <Icon kind="history" />
+        <span className="chip-value">历史</span>
         <span className="chip-caret">▾</span>
       </button>
       {open && (
@@ -332,6 +371,11 @@ function Composer({ working }: { working: boolean }) {
       }
       if (e.key === "Escape") { e.preventDefault(); setText(""); return; }
     }
+    if (e.key === "Escape" && working && !slashOpen && atMatches.length === 0) {
+      e.preventDefault();
+      window.webkit?.messageHandlers.goty.postMessage({ type: "stop" });
+      return;
+    }
     if (slashOpen) {
       if (e.key === "ArrowDown") { e.preventDefault(); setSlashIndex((i) => (i + 1) % slashMatches.length); return; }
       if (e.key === "ArrowUp") { e.preventDefault(); setSlashIndex((i) => (i - 1 + slashMatches.length) % slashMatches.length); return; }
@@ -353,7 +397,7 @@ function Composer({ working }: { working: boolean }) {
           ref={ref}
           value={text}
           rows={1}
-          placeholder="Message the agent…  (Enter 发送，Shift+Enter 换行，/ 指令，@ 引用文件)"
+          placeholder="Message the agent…  (Enter 发送，/ 指令，@ 引用文件)"
           onChange={(e) => {
             setText(e.target.value);
             setSlashIndex(0);
@@ -391,17 +435,18 @@ function Composer({ working }: { working: boolean }) {
           </div>
         )}
       </div>
-      <div className="composer-bar">
-        <div className="statusbar-left">
+      <div className="composer-toolbar">
+        <div className="toolbar-left">
           <HistoryChip />
           {store.configOptions.map((option) => (
             <ConfigChip key={option.id} option={option}
+              icon={<Icon kind={option.id === "thinking" ? "thinking" : option.id === "mode" ? "mode" : "model"} />}
               open={openChip === option.id}
               onToggle={() => setOpenChip(openChip === option.id ? null : option.id)}
               onPick={(value) => pickConfig(option.id, value)} />
           ))}
         </div>
-        <div className="statusbar-right">
+        <div className="toolbar-right">
           {store.usage && (store.usage.used != null || store.usage.costAmount != null) && (
             <span className="usage">
               {store.usage.used != null && <>↑{fmtTokens(store.usage.used)}</>}
@@ -410,15 +455,14 @@ function Composer({ working }: { working: boolean }) {
             </span>
           )}
           <span className={"status-dot " + (working ? "working" : "")} />
-          <span className="status-text">{working ? "运行中…" : store.status}</span>
-          {working && (
-            <button className="btn stop" onClick={() =>
-              window.webkit?.messageHandlers.goty.postMessage({ type: "stop" })}>
-              停止
-            </button>
-          )}
-          <button className="btn send" disabled={!text.trim() || working} onClick={submit}>
-            发送
+          <button
+            className={"action-btn " + (working ? "stop" : "send")}
+            disabled={!working && !text.trim()}
+            title={working ? "停止 (Esc)" : "发送 (Enter)"}
+            onClick={() => working
+              ? window.webkit?.messageHandlers.goty.postMessage({ type: "stop" })
+              : submit()}>
+            <Icon kind={working ? "stop" : "send"} />
           </button>
         </div>
       </div>

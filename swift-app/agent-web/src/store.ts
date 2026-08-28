@@ -148,10 +148,18 @@ class Store {
       case "thoughtChunk":
         this.tail("thought").text += event.text; break;
       case "toolCall": {
-        const call: ToolCall = { id: event.id, title: event.title,
-                                 kind: event.kind, status: event.status,
-                                 content: event.content ?? [],
-                                 rawInput: event.rawInput, oldText: event.oldText };
+        // tool_call_update omits title/kind/rawInput — merge over the
+        // initial tool_call instead of clobbering them with null.
+        const prev = this.tools.get(event.id);
+        const call: ToolCall = {
+          id: event.id,
+          title: event.title ?? prev?.title,
+          kind: event.kind ?? prev?.kind,
+          status: event.status ?? prev?.status,
+          content: (event.content ?? []).length > 0 ? (event.content as ToolContent[]) : prev?.content ?? [],
+          rawInput: event.rawInput ?? prev?.rawInput ?? null,
+          oldText: event.oldText ?? prev?.oldText ?? null,
+        };
         if (!this.tools.has(event.id)) {
           this.toolOrder.push(event.id);
           this.blocks.push({ kind: "tool", call });

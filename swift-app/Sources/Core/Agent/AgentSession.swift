@@ -158,6 +158,24 @@ final class AgentSession: AgentSessioning {
                        result: ["outcome": ["outcome": "selected", "optionId": optionId]])
     }
 
+    /// Persisted-session directory (session/list) filtered to the pane cwd.
+    /// Zero-message entries are creation placeholders — drop them; newest
+    /// activity sorts first.
+    func listSessions(completion: @escaping ([ACPSessionSummary]) -> Void) {
+        var params: [String: Any] = [:]
+        if let cwd { params["cwd"] = cwd }
+        client.request("session/list", params) { result in
+            guard case .success(let value) = result else {
+                completion([])
+                return
+            }
+            let summaries = ACPSessionSummary.list(value["sessions"])
+                .filter { ($0.messageCount ?? 0) > 0 }
+                .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
+            completion(summaries)
+        }
+    }
+
     /// Flip one config knob (mode / model / thinking …). The OK response
     /// carries the full updated knob list — that is the new state, apply
     /// it wholesale.
@@ -171,19 +189,6 @@ final class AgentSession: AgentSessioning {
             guard !configs.isEmpty else { return }
             self.configOptions = configs
             self.emit([.configChanged(configs)])
-        }
-    }
-
-    /// Persisted-session directory (session/list) filtered to the pane cwd.
-    func listSessions(completion: @escaping ([ACPSessionSummary]) -> Void) {
-        var params: [String: Any] = [:]
-        if let cwd { params["cwd"] = cwd }
-        client.request("session/list", params) { result in
-            guard case .success(let value) = result else {
-                completion([])
-                return
-            }
-            completion(ACPSessionSummary.list(value["sessions"]))
         }
     }
 

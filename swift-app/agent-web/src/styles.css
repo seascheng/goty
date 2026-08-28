@@ -163,21 +163,50 @@ body {
 .composer { padding: 8px 20px 12px; }
 .composer-box {
   background: var(--surface1); border: 1px solid var(--border-accent);
-  border-radius: 12px; padding: 2px 12px;
+  border-radius: 12px; padding: 2px 12px 6px;
   transition: border-color 0.12s;
 }
 .composer-box:focus-within { border-color: var(--accent); }
 .composer textarea {
   width: 100%; background: none; border: none; outline: none; resize: none;
   color: var(--foreground); font: inherit; line-height: 1.55;
-  padding: 9px 0; min-height: 36px; display: block;
+  padding: 9px 0 2px; min-height: 34px; display: block;
 }
 .composer textarea::placeholder { color: var(--fg-extra-muted); }
-.composer-bar { display: flex; align-items: center; gap: 8px; padding: 0 4px; margin-top: 6px; }
+.composer-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 0 3px; border-top: 1px solid var(--border);
+}
+.toolbar-left { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.toolbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.chip {
+  display: inline-flex; gap: 4px; align-items: center;
+  background: none; border: 1px solid transparent; color: var(--fg-muted);
+  border-radius: 6px; padding: 2px 6px; font-size: 11.5px; cursor: pointer;
+}
+.chip:hover, .chip.open { background: var(--surface2); border-color: var(--border-accent); color: var(--foreground); }
+.chip svg { color: var(--fg-extra-muted); }
+.chip:hover svg, .chip.open svg { color: var(--accent-bright); }
+.chip-value { font-weight: 500; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon-btn { padding: 3px 7px; display: inline-flex; align-items: center; }
+.icon-btn svg { width: 11px; height: 11px; }
 
 .chip-opt.hist { display: grid; grid-template-columns: 1fr auto; row-gap: 2px; }
 .hist-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .hist-meta { color: var(--fg-extra-muted); font-size: 11px; align-self: center; }
+
+/* — dual-state action button (paseo style) — */
+.action-btn {
+  flex: none; width: 26px; height: 26px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; cursor: pointer; padding: 0;
+}
+.action-btn.send { background: var(--accent); color: #fff; }
+.action-btn.send:hover:not(:disabled) { background: var(--accent-bright); }
+.action-btn.send:disabled { background: var(--surface3); color: var(--fg-extra-muted); cursor: default; }
+.action-btn.stop { background: var(--destructive); color: #fff; animation: pulse 1.2s ease-in-out infinite; }
+.action-btn.stop:hover { background: #d96558; }
+
 /* — statusbar: config chips left, usage/state right — */
 .statusbar-left { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .statusbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
@@ -193,7 +222,7 @@ body {
 .chip-caret { color: var(--fg-extra-muted); font-size: 9px; }
 .chip-pop {
   position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 20;
-  min-width: 200px; max-height: 260px; overflow-y: auto;
+  min-width: 200px; max-height: 260px; overflow-y: auto; overscroll-behavior: contain;
   background: var(--surface1); border: 1px solid var(--border-accent); border-radius: var(--radius);
   padding: 4px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
@@ -211,7 +240,7 @@ body {
 .composer-box { position: relative; }
 .slash-pop {
   position: absolute; bottom: calc(100% + 6px); left: 0; right: 0; z-index: 30;
-  max-height: 240px; overflow-y: auto;
+  max-height: 240px; overflow-y: auto; overscroll-behavior: contain;
   background: var(--surface1); border: 1px solid var(--border-accent); border-radius: var(--radius);
   padding: 4px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
