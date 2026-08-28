@@ -6,6 +6,9 @@
 // readline emulation beyond that: text the shell re-edits via arrows can
 // still desync — ctrl-u always clears both sides, so the worst case is a
 // wrong request string, never a stale executed command.
+// Bracketed pastes (ESC[200~ … ESC[201~) forward verbatim: bytes between
+// the markers are readline content, so an inner CR/LF is NOT an enter and
+// the closing marker is part of the paste, not the chunk's end.
 import Foundation
 
 final class LineTrigger {
@@ -21,13 +24,24 @@ final class LineTrigger {
     /// Escape-sequence parser state: inside CSI / inside SS3.
     private var inCsi = false
     private var inSs3 = false
+    /// Inside a bracketed paste (200~ seen, 201~ pending): every byte
+    /// forwards verbatim — no line accumulation, no enter/backspace/
+    /// control interpretation. Readline holds the bytes literally.
+    private var inPaste = false
+    /// The current CSI's bytes from '[' onward, kept only to match the
+    /// two bracketed-paste markers exactly.
+    private var csi: [UInt8] = []
+    /// ESC[200~ / ESC[201~ with the leading ESC dropped — compared
+    /// against `csi`, which starts at '['.
+    private static let bracketedPasteOn: [UInt8] = Array("[200~".utf8)
+    private static let bracketedPasteOff: [UInt8] = Array("[201~".utf8)
     /// This line involved zle editing (arrow keys, ctrl-r search):
     /// the accumulator no longer mirrors the shell's line, so an
     /// enter on it defers to the screen check instead of raw bytes.
     private var zleEdit = false
 
     func filter(_ bytes: [UInt8]) -> [UInt8] {
-        guard armed else { line = []; inCsi = false; inSs3 = false; zleEdit = false; return bytes }
+        guard armed else { line = []; inCsi = false; inSs3 = false; zleEdit = false; inPaste = false; csi = []; return bytes }
         var out: [UInt8] = []
         var i = 0
         while i < bytes.count {
@@ -40,20 +54,52 @@ final class LineTrigger {
                 continue
             }
             if inCsi {
-                if b >= 0x40 && b <= 0x7E { inCsi = false }  // final byte
+                csi.append(b)
+                if b >= 0x40 && b <= 0x7E {  // final byte
+                    inCsi = false
+                    // The bracketed-paste boundaries are ordinary CSI to
+                    // the shell but not to this tracker: between them the
+                    // bytes are pasted content (verbatim below), and both
+                    // markers move the line's truth to the screen — the
+                    // first enter after a paste defers to the cursor-row
+                    // check like any other re-edited line.
+                    if csi == Self.bracketedPasteOn { inPaste = true; zleEdit = true }
+                    else if csi == Self.bracketedPasteOff { inPaste = false; zleEdit = true }
+                    else { zleEdit = true }
+                    csi = []
+                }
+                out.append(b)
+                i += 1
+                continue
+            }
+            // '[' / 'O' right after ESC opens CSI / SS3 — checked before
+            // the paste guard so the closing ESC[201~ is recognized even
+            // mid-paste.
+            if i > 0 && bytes[i - 1] == 0x1B {
+                if b == 0x5B {
+                    inCsi = true; csi = [b]; zleEdit = true
+                    out.append(b)
+                    i += 1
+                    continue
+                }
+                if b == 0x4F {
+                    inSs3 = true; zleEdit = true
+                    out.append(b)
+                    i += 1
+                    continue
+                }
+            }
+            // Pasted content forwards verbatim. The inner CR/LF used to
+            // fall into the enter logic with zleEdit set (the 200~ marker
+            // had tripped it), which returned early and dropped the rest
+            // of the chunk: every armed multi-line paste arrived as line
+            // one only, 201~ closer missing, shell stuck in paste mode.
+            if inPaste {
                 out.append(b)
                 i += 1
                 continue
             }
             switch b {
-            case 0x5B where i > 0 && bytes[i - 1] == 0x1B:
-                inCsi = true  // '[' right after ESC opens CSI
-                zleEdit = true
-                out.append(b)
-            case 0x4F where i > 0 && bytes[i - 1] == 0x1B:
-                inSs3 = true  // 'O' right after ESC opens SS3
-                zleEdit = true
-                out.append(b)
             case 0x0D, 0x0A:
                 // Paired-symbol IMEs emit '@' as '@@' and may drop the
                 // space after the prefix — match the LAST @ai occurrence
@@ -119,7 +165,7 @@ final class LineTrigger {
         return out
     }
 
-    func reset() { line = []; inCsi = false; inSs3 = false; zleEdit = false }
+    func reset() { line = []; inCsi = false; inSs3 = false; zleEdit = false; inPaste = false; csi = [] }
 
     /// Index just after the @ai prefix at the START of the line,
     /// tolerating paired-symbol IMEs that emit '@' as '@@' (each extra

@@ -162,6 +162,33 @@ import Foundation
         check(fired.last == "测试好",
               "backspace removes whole CJK chars (no dangling UTF-8 lead)")
 
+        // Bracketed paste: the chokepoint sees ESC[200~ … ESC[201~ with
+        // inner newlines as readline CONTENT, not enters. The first CR
+        // used to hit the zle branch and return early, dropping the rest
+        // of the chunk — every armed multi-line paste arrived truncated
+        // to line one with the 201~ closer missing (shell stuck in paste
+        // mode) and the async screen check added the felt lag.
+        let firedAtPaste = fired.count, pendingAtPaste = pending
+        let paste = "\u{1b}[200~line one\nline two\u{1b}[201~"
+        let through = lt.filter(Array(paste.utf8))
+        check(through == Array(paste.utf8),
+              "bracketed paste forwards byte-identical (closer included)")
+        check(fired.count == firedAtPaste && pending == pendingAtPaste,
+              "paste content runs no enter logic")
+        _ = lt.filter([0x0D])   // the user's own enter AFTER the paste
+        check(pending == pendingAtPaste + 1,
+              "enter after a paste defers to the screen check")
+        // Split across onWrite chunks: paste state must carry.
+        let head = "\u{1b}[200~first ", pasteTail = "second\nthird\u{1b}[201~"
+        let h1 = lt.filter(Array(head.utf8)), h2 = lt.filter(Array(pasteTail.utf8))
+        check(h1 + h2 == Array((head + pasteTail).utf8),
+              "paste split across chunks forwards intact")
+        type("plain\r")
+        check(pending == pendingAtPaste + 2, "enter after the split paste defers too (201~ marks the line screen-truth)")
+        _ = lt.filter([0x15])   // ctrl-u: fresh line, no paste residue
+        type("@ai after paste\r")
+        check(fired.last == "after paste", "typed trigger works normally after pastes")
+
         print("— Screen-row matcher —")
         check(LineTrigger.requestFromScreenRow("➜  goty git:(main) ✗ @ai 测试一下") == "测试一下",
               "prompt + recalled @ai extracts request")
