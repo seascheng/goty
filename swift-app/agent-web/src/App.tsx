@@ -326,6 +326,8 @@ function Composer({ working }: { working: boolean }) {
   const [slashIndex, setSlashIndex] = useState(0);
   const [atIndex, setAtIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
+  const [hist, setHist] = useState<string[]>([]);
+  const histIdx = useRef<number | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
 
@@ -384,19 +386,47 @@ function Composer({ working }: { working: boolean }) {
     if (!trimmed || working) return;
     window.webkit?.messageHandlers.goty.postMessage({ type: "send", text: trimmed });
     store.apply({ type: "userMessage", text: trimmed });
+    setHist((h) => (h[h.length - 1] === trimmed ? h : [...h, trimmed]));
+    histIdx.current = null;
     setText("");
     ref.current?.style.setProperty("height", "auto");
   };
 
   const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.nativeEvent.isComposing) return;
-    if (atOpen && atMatches.length > 0) {
+    // TUI-style input recall: empty composer + ↑/↓ walks the history
+    // of sent inputs (↑ = older; ↓ past the newest clears back to empty).
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && hist.length > 0
+        && (text === "" || histIdx.current != null)) {
+      e.preventDefault();
+      const last = hist.length - 1;
+      if (e.key === "ArrowUp") {
+        histIdx.current = histIdx.current == null ? last : Math.max(0, histIdx.current - 1);
+      } else if (histIdx.current == null) {
+        return;
+      } else if (histIdx.current >= last) {
+        histIdx.current = null;
+        setText("");
+        return;
+      } else {
+        histIdx.current += 1;
+      }
+      const recalled = hist[histIdx.current];
+      setText(recalled);
+      requestAnimationFrame(() => {
+        const el = ref.current;
+        if (el) el.setSelectionRange(el.value.length, el.value.length);
+      });
+      return;
+    }
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      if (atOpen) {
       if (e.key === "ArrowDown") { e.preventDefault(); setAtIndex((i) => (i + 1) % atMatches.length); return; }
       if (e.key === "ArrowUp") { e.preventDefault(); setAtIndex((i) => (i - 1 + atMatches.length) % atMatches.length); return; }
       if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault(); pickAt(atMatches[atIndex]); return;
       }
       if (e.key === "Escape") { e.preventDefault(); setText(""); return; }
+      }
     }
     if (e.key === "Escape") {
       if (openPop != null || histOpen) { setOpenPop(null); setHistOpen(false); return; }
@@ -433,6 +463,7 @@ function Composer({ working }: { working: boolean }) {
             setSlashIndex(0);
             setAtIndex(0);
             setDismissed(false);
+            histIdx.current = null;
             const el = e.target;
             el.style.height = "auto";
             el.style.height = Math.min(el.scrollHeight, 160) + "px";
