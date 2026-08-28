@@ -6,7 +6,7 @@ import WebKit
 /// pane's entire UI (transcript, cards, composer), served from the
 /// bundled assets under `goty://`; Swift is the backend: AgentSession
 /// drives the ACP agent, the bridge shuttles commands and events.
-final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
+final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefreshable {
     let hostKey: HostKey
 
     /// Sidebar 状态接线（由 AppDelegate 桥到 coordinator）
@@ -48,6 +48,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
         ])
 
         session.delegate = self
+        // Theme first: the page's palette lands before any queued
+        // transcript events (push order is preserved).
+        bridge.onReady = { [weak self] in self?.pushTheme() }
         bridge.onSend = { [weak self] text in
             guard let self else { return }
             self.bridge.push(["type": "working", "value": true])
@@ -94,6 +97,16 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
                 self?.bridge.push(["type": "status", "text": ok ? "就绪" : "连接失败"])
             }
         }
+    }
+
+    /// The webview joins the app-wide theme fan-out: ThemeRefreshable
+    /// walk → fresh CSS vars → live restyle, no rebuild.
+    func pushTheme() {
+        AgentTheme.push(to: bridge)
+    }
+
+    func retheme() {
+        pushTheme()
     }
 
     required init?(coder: NSCoder) { fatalError("unsupported") }

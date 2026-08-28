@@ -106,6 +106,7 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("sessions"), sessions: z.unknown().nullish() }),
   z.object({ type: z.literal("clearTranscript") }),
   z.object({ type: z.literal("files"), files: z.array(z.string()) }),
+  z.object({ type: z.literal("theme"), vars: z.record(z.string(), z.string()) }),
 ]);
 
 export type IncomingEvent = z.infer<typeof IncomingEventSchema>;
@@ -192,6 +193,14 @@ class Store {
         this.permission = null; this.working = false;
         break;
       case "files": this.files = event.files; break;
+      case "theme": {
+        const root = document.documentElement;
+        for (const [k, v] of Object.entries(event.vars)) {
+          if (k === "mode") root.dataset.theme = v;
+          else root.style.setProperty(`--${k}`, v);
+        }
+        break;
+      }
     }
     this.revision += 1;
     this.emit();

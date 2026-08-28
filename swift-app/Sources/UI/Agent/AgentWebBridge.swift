@@ -15,6 +15,7 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
     private var flushScheduled = false
     private var jsReady = false
 
+    var onReady: (() -> Void)?
     var onSend: ((String) -> Void)?
     var onStop: (() -> Void)?
     var onSetConfig: ((String, String) -> Void)?
@@ -57,6 +58,7 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
         switch type {
         case "ready":
             jsReady = true
+            onReady?()
             scheduleFlush()
         case "send":
             if let text = body["text"] as? String, !text.isEmpty { onSend?(text) }
