@@ -97,6 +97,17 @@ cp CGhostty/lib/libghostty.dylib \
 cp -R vendor-sparkle/Sparkle.framework "$APP/Contents/Frameworks/"
 # App icon (Ghostty-theme ghost, source: Assets/app-logo.png).
 cp Assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+
+# Agent transcript web app: built by npm at packaging time only; the
+# bundle ships the static dist (no network at runtime).
+if [ -d agent-web/node_modules ] || command -v npm >/dev/null 2>&1; then
+    ( cd agent-web && npm install --no-fund --no-audit && npm run build )
+    mkdir -p "$APP/Contents/Resources/agent-web"
+    cp -R agent-web/dist/ "$APP/Contents/Resources/agent-web/"
+else
+    echo "agent-web: npm not found — Agent GUI sessions will not render" >&2
+    exit 1
+fi
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
