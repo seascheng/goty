@@ -23,7 +23,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
         self.hostKey = key
         self.session = session
 
-        webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let config = WKWebViewConfiguration()
+        webView = WKWebView(frame: .zero, configuration: config)
+        // The page paints its own themed background (styles.css); without
+        // this the pane flashes white until first paint.
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.underPageBackgroundColor = .clear
         bridge = AgentWebBridge(webView: webView)
 
         super.init(frame: .zero)
@@ -32,6 +37,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
         webView.translatesAutoresizingMaskIntoConstraints = false
         composer.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.textColor = .secondaryLabelColor
         addSubview(webView)
         addSubview(statusLabel)
         addSubview(composer)
@@ -39,13 +46,14 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
             webView.topAnchor.constraint(equalTo: topAnchor),
             webView.leadingAnchor.constraint(equalTo: leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            statusLabel.topAnchor.constraint(equalTo: webView.bottomAnchor, constant: 4),
-            statusLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            composer.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 4),
+            statusLabel.topAnchor.constraint(equalTo: webView.bottomAnchor, constant: 3),
+            statusLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            composer.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 3),
             composer.leadingAnchor.constraint(equalTo: leadingAnchor),
             composer.trailingAnchor.constraint(equalTo: trailingAnchor),
             composer.bottomAnchor.constraint(equalTo: bottomAnchor),
-            composer.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+            composer.heightAnchor.constraint(greaterThanOrEqualToConstant: 52),
+            composer.heightAnchor.constraint(lessThanOrEqualToConstant: 150),
         ])
 
         session.delegate = self
@@ -166,43 +174,81 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate {
     }
 }
 
-/// One-line native composer: Enter 发送留给 M2（需要子类化 NSTextView 拦截
-/// insertNewline:）；M1 用「发送 / 停止」按钮。NSTextView keeps Chinese
-/// IME composition exactly like the rest of the app (webview textarea
-/// IME is the failure mode we avoid).
-final class ComposerView: NSView {
+/// Native composer bar: bordered input box + 发送/停止. NSTextView keeps
+/// Chinese IME composition exactly like the rest of the app (webview
+/// textarea IME is the failure mode we avoid). The box grows with up to
+/// ~5 lines, then scrolls internally.
+final class ComposerView: NSView, NSTextViewDelegate {
     var onSend: ((String) -> Void)?
     var onStop: (() -> Void)?
 
+    private let inputBox = NSView()
     private let textView = NSTextView()
+    private let placeholder = NSTextField(labelWithString: "输入消息…")
+    private let scrollView = NSScrollView()
     private let sendButton = NSButton(title: "发送", target: nil, action: nil)
     private let stopButton = NSButton(title: "停止", target: nil, action: nil)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
-        for button in [sendButton, stopButton] {
-            button.bezelStyle = .rounded
-            button.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(button)
-        }
-        sendButton.target = self; sendButton.action = #selector(didSend)
-        stopButton.target = self; stopButton.action = #selector(didStop)
+
+        inputBox.wantsLayer = true
+        inputBox.layer?.borderColor = NSColor.separatorColor.cgColor
+        inputBox.layer?.borderWidth = 1
+        inputBox.layer?.cornerRadius = 8
+        inputBox.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        inputBox.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(inputBox)
 
         textView.isRichText = false
         textView.font = .systemFont(ofSize: 13)
+        textView.textContainerInset = NSSize(width: 2, height: 8)
+        textView.backgroundColor = .clear
+        textView.delegate = self
+        textView.autoresizingMask = [.width]
+        textView.isVerticallyResizable = true
         textView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(textView)
+
+        scrollView.documentView = textView
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        inputBox.addSubview(scrollView)
+
+        placeholder.font = .systemFont(ofSize: 13)
+        placeholder.textColor = .placeholderTextColor
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+        placeholder.isEditable = false
+        placeholder.isSelectable = false
+        inputBox.addSubview(placeholder)
+
+        for button in [sendButton, stopButton] {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(button)
+        }
+        sendButton.hasDestructiveAction = false
+        sendButton.keyEquivalent = "\r"
+        sendButton.keyEquivalentModifierMask = [.command]
+        sendButton.target = self; sendButton.action = #selector(didSend)
+        stopButton.target = self; stopButton.action = #selector(didStop)
+
         NSLayoutConstraint.activate([
-            textView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            textView.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            textView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-            textView.widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
-            textView.trailingAnchor.constraint(equalTo: stopButton.leadingAnchor, constant: -8),
-            sendButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            sendButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            stopButton.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -6),
-            stopButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            inputBox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            inputBox.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            inputBox.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            inputBox.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -8),
+            scrollView.leadingAnchor.constraint(equalTo: inputBox.leadingAnchor, constant: 6),
+            scrollView.trailingAnchor.constraint(equalTo: inputBox.trailingAnchor, constant: -6),
+            scrollView.topAnchor.constraint(equalTo: inputBox.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: inputBox.bottomAnchor),
+            placeholder.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor, constant: 6),
+            placeholder.topAnchor.constraint(equalTo: inputBox.topAnchor, constant: 9),
+            stopButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            stopButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            sendButton.trailingAnchor.constraint(equalTo: stopButton.leadingAnchor, constant: -6),
+            sendButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
         ])
     }
 
@@ -212,13 +258,24 @@ final class ComposerView: NSView {
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
         window?.makeFirstResponder(textView)
+        updatePlaceholder()
         return ok
     }
 
+    func textDidChange(_ notification: Notification) { updatePlaceholder() }
+
+    private func updatePlaceholder() {
+        placeholder.isHidden = !textView.string.isEmpty
+    }
+
     @objc private func didSend() {
+        // IME composition in flight: the marked string is not what the
+        // user means to send yet.
+        guard !textView.hasMarkedText() else { return }
         let text = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         textView.string = ""
+        updatePlaceholder()
         onSend?(text)
     }
 

@@ -96,11 +96,26 @@ extension AppDelegate {
 
     @objc private func menuNewAgentSessionFrom(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
-        guard SessionDaemon.supportsAgentSessions() else {
-            let alert = NSAlert()
-            alert.messageText = "Agent GUI Session 需要 newer sessiond"
-            alert.informativeText = "本机 sessiond 版本过旧（CAPABILITY < 4）。重启 Goty 会自动换用随包 sessiond；SSH 远程主机需更新其 goty-sessiond。"
-            alert.runModal()
+        if SessionDaemon.supportsAgentSessions() {
+            coordinator.newAgentSessionTab(agent: key)
+            return
+        }
+        // Stale singleton daemon (it outlives the GUI by design, so a
+        // GUI restart never replaces it). Offer the upgrade right here —
+        // killing it ends the sessions it hosts, an explicit choice.
+        let alert = NSAlert()
+        alert.messageText = "升级本机 sessiond？"
+        alert.informativeText = "本机 sessiond 是旧版（CAPABILITY < 4），不支持 Agent GUI Session。重启它几秒即可，其托管的现有会话会一并结束。"
+        alert.addButton(withTitle: "重启 Daemon")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        SessionDaemon.terminateSharedForUpgrade()
+        guard SessionDaemon.shared.ensureRunning(),
+              SessionDaemon.supportsAgentSessions() else {
+            let fail = NSAlert()
+            fail.messageText = "sessiond 升级未完成"
+            fail.informativeText = "重启后仍不可用。请确认正在运行的 Goty.app 内的 goty-sessiond 为本次构建，再重试。"
+            fail.runModal()
             return
         }
         coordinator.newAgentSessionTab(agent: key)
