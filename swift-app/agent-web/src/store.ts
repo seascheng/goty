@@ -194,15 +194,16 @@ class Store {
 
   /// Same merge discipline as `tail`, for replayed user prompts
   /// (`user_message_chunk`): consecutive chunks fuse into one block.
-  private userTail(): { kind: "user"; text: string } {
+  /// Empty chunks must not open a block — an empty user bubble renders
+  /// as a stray gray bar at the transcript tail.
+  private userTail(text: string): void {
     const last = this.blocks[this.blocks.length - 1];
     if (last && last.kind === "user") {
-      const merged = { kind: "user" as const, id: last.id, text: last.text };
-      this.blocks[this.blocks.length - 1] = merged;
-      return merged;
+      this.blocks[this.blocks.length - 1] = { kind: "user" as const, id: last.id, text: last.text + text };
+      return;
     }
-    const block = this.push({ kind: "user", text: "" }) as { kind: "user"; text: string };
-    return block;
+    if (!text) return;
+    this.push({ kind: "user", text });
   }
   apply(raw: unknown) {
     const event = parseEvent(raw);
@@ -210,11 +211,11 @@ class Store {
     switch (event.type) {
       case "userMessage": this.push({ kind: "user", text: event.text }); break;
       case "userChunk":
-        this.userTail().text += event.text; break;
+        this.userTail(event.text); break;
       case "agentChunk":
-        this.tail("agent").text += event.text; break;
+        if (event.text) this.tail("agent").text += event.text; break;
       case "thoughtChunk":
-        this.tail("thought").text += event.text; break;
+        if (event.text) this.tail("thought").text += event.text; break;
       case "toolCall": {
         // tool_call_update omits title/kind/rawInput — merge over the
         // initial tool_call instead of clobbering them with null.

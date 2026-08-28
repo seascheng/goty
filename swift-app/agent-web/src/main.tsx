@@ -11,18 +11,16 @@ declare global {
   }
 }
 
-let queued: unknown[] = [];
-let flushScheduled = false;
-
+// Synchronous apply: React 18 batches the subscriber notifications per
+// tick, so the old requestAnimationFrame queue bought nothing — and it
+// actively stalled: rAF is suspended for occluded webviews, leaving
+// events stranded in the queue (the lost-replay-tail bug).
 window.__goty = {
   push(events: unknown[]) {
-    queued.push(...events);
-    if (flushScheduled) return;
-    flushScheduled = true;
-    requestAnimationFrame(() => {
-      flushScheduled = false;
-      for (const event of queued.splice(0)) store.apply(event);
-    });
+    for (const event of events) {
+      try { store.apply(event); }
+      catch (err) { console.error("goty: dropped event", err); }
+    }
   },
 };
 
