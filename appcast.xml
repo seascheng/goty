@@ -5,6 +5,18 @@
     <description>Most recent changes to Goty.</description>
     <language>en</language>
   <item>
+    <title>Version 0.1.1 (Build 2)</title>
+    <pubDate>Fri, 28 Aug 2026 08:11:49 +0000</pubDate>
+    <sparkle:version>2</sparkle:version>
+    <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+    <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+    <description><![CDATA[<ul><li>Bracketed paste: multi-line pastes no longer truncate at the first newline or leave the shell stuck in paste mode.</li><li>Remote workspaces: quitting no longer orphans forwarded ssh processes; a dropped forward auto-reconnects and panes re-attach with full replay.</li><li>Replay: query stripping preserves output split across snapshot chunks; parser replies stay suppressed through the entire replay (no more mode-2048 size reports leaking into the PTY).</li><li>Remote file download fixed — scp was receiving shell-quoted paths.</li></ul>]]></description>
+    <enclosure url="https://github.com/seascheng/goty/releases/download/v0.1.1/Goty-0.1.1-arm64.dmg"
+               type="application/octet-stream"
+               sparkle:edSignature="Yc4dmXkn9HEITl3ym6xl0u3yK/3DfyfcrUH/DqnGFziNpcfuF1I0VXDL0f8WqH222n7S28QjTH7i8JCf3FX6Aw=="
+               length="12901708" />
+  </item>
+  <item>
     <title>Version 0.1.0 (Build 1)</title>
     <pubDate>Thu, 27 Aug 2026 07:21:55 +0000</pubDate>
     <sparkle:version>1</sparkle:version>
