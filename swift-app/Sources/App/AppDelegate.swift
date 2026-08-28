@@ -388,7 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             // Brand icon straight from the PNG table (already base64):
             // the same artwork the tab strip uses, zero re-encoding.
-            let icon = agentKey.flatMap { AgentBrandIcons.pngs[$0.lowercased()]?["2"] }
+            let icon = AgentBrandIcons.pngs[agentKey.lowercased()]?[2]
                 .map { "data:image/png;base64,\($0)" }
             return (name, dir, branch, icon)
         }
