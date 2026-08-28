@@ -75,6 +75,7 @@ export type AgentCommand = z.infer<typeof AgentCommandSchema>;
 
 const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("userMessage"), text: z.string() }),
+  z.object({ type: z.literal("userChunk"), text: z.string() }),
   z.object({ type: z.literal("agentChunk"), text: z.string() }),
   z.object({ type: z.literal("thoughtChunk"), text: z.string() }),
   z.object({
@@ -190,11 +191,26 @@ class Store {
     const block = this.push({ kind, text: "" }) as { kind: "agent" | "thought"; text: string };
     return block;
   }
+
+  /// Same merge discipline as `tail`, for replayed user prompts
+  /// (`user_message_chunk`): consecutive chunks fuse into one block.
+  private userTail(): { kind: "user"; text: string } {
+    const last = this.blocks[this.blocks.length - 1];
+    if (last && last.kind === "user") {
+      const merged = { kind: "user" as const, id: last.id, text: last.text };
+      this.blocks[this.blocks.length - 1] = merged;
+      return merged;
+    }
+    const block = this.push({ kind: "user", text: "" }) as { kind: "user"; text: string };
+    return block;
+  }
   apply(raw: unknown) {
     const event = parseEvent(raw);
     if (!event) return;
     switch (event.type) {
       case "userMessage": this.push({ kind: "user", text: event.text }); break;
+      case "userChunk":
+        this.userTail().text += event.text; break;
       case "agentChunk":
         this.tail("agent").text += event.text; break;
       case "thoughtChunk":

@@ -191,6 +191,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         switch event {
         case .ready:
             return [:]
+        case .userChunk(let text):
+            return ["type": "userChunk", "text": text]
         case .messageChunk(let text):
             return ["type": "agentChunk", "text": text]
         case .thoughtChunk(let text):

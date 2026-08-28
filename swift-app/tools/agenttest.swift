@@ -100,6 +100,31 @@ enum AgentTest {
            let editPath = editInput?["path"] as? String, editPath == samplePath,
            oldText == "old content" {} else { failures += 1; print("FAIL  edit oldText snapshot") }
 
+        // Replayed history echoes the user's prompts as user_message_chunk;
+        // dropping them erased every user turn from resumed transcripts.
+        events += session.interpret(["method": "session/update", "params": [
+            "sessionId": "s1",
+            "update": ["sessionUpdate": "user_message_chunk",
+                       "content": ["type": "text", "text": "我看当前已经有了"]],
+        ]])
+        if case .userChunk(let userText)? = events.last, userText == "我看当前已经有了" {} else {
+            failures += 1; print("FAIL  user_message_chunk replay")
+        }
+        // Oversized tool payloads get capped so one event can never blow
+        // the webview's evaluateJavaScript budget.
+        events += session.interpret(["method": "session/update", "params": [
+            "sessionId": "s1",
+            "update": ["sessionUpdate": "tool_call", "toolCallId": "big",
+                       "title": "Read", "kind": "read", "status": "completed",
+                       "content": [["type": "content", "text": String(repeating: "x", count: 100_000)]]],
+        ]])
+        if case .toolCallUpdate(_, _, _, _, let bigContent, _, _)? = events.last,
+           let capped = bigContent.first?.text,
+           capped.hasPrefix(String(repeating: "x", count: 64_000)),
+           capped.hasSuffix("… [截断，完整输出见终端]") {} else {
+            failures += 1; print("FAIL  tool content cap")
+        }
+
         events += session.interpret(["method": "session/update", "params": [
             "sessionId": "s1",
             "update": ["sessionUpdate": "plan",

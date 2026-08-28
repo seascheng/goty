@@ -138,6 +138,10 @@ struct ACPSessionSummary {
 /// so the UI can render a real diff.
 enum AgentSessionEvent {
     case ready
+    /// `user_message_chunk` — replayed history echoes the user's own
+    /// prompts; live turns echo locally instead, so this only fires on
+    /// session/load.
+    case userChunk(String)
     case messageChunk(String)
     case thoughtChunk(String)
     case toolCallUpdate(id: String, title: String?, kind: String?,

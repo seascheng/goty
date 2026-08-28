@@ -45,12 +45,30 @@ final class AgentWebBridge: NSObject, WKScriptMessageHandler {
             guard self.jsReady, !self.queue.isEmpty, let webView = self.webView else { return }
             let batch = self.queue
             self.queue = []
-            guard let data = try? JSONSerialization.data(withJSONObject: batch),
-                  let json = String(data: data, encoding: .utf8) else { return }
-            webView.evaluateJavaScript("window.__goty.push(\(json))", completionHandler: nil)
+            // WKWebView silently fails (or never returns) on multi-megabyte
+            // evaluateJavaScript payloads — a session/load replay bursts
+            // several MB in one runloop tick. Land the batch in ≤192 KB
+            // slices; each slice is an independent push on the JS side.
+            let maxBytes = 192 * 1024
+            var current: [[String: Any]] = []
+            var currentBytes = 0
+            func flushSlice() {
+                guard !current.isEmpty else { return }
+                guard let data = try? JSONSerialization.data(withJSONObject: current),
+                      let json = String(data: data, encoding: .utf8) else { return }
+                webView.evaluateJavaScript("window.__goty.push(\(json))", completionHandler: nil)
+                current = []
+                currentBytes = 0
+            }
+            for event in batch {
+                let size = (try? JSONSerialization.data(withJSONObject: [event]).count) ?? maxBytes
+                if currentBytes + size > maxBytes { flushSlice() }
+                current.append(event)
+                currentBytes += size
+            }
+            flushSlice()
         }
     }
-
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any],

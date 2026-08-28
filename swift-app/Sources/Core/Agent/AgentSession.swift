@@ -245,6 +245,11 @@ final class AgentSession: AgentSessioning {
             return events
         }
         switch kind {
+        case "user_message_chunk":
+            if let content = (update["content"] as? [String: Any]).flatMap(ACPContent.init),
+               let text = content.text {
+                events.append(.userChunk(text))
+            }
         case "agent_message_chunk":
             if let content = (update["content"] as? [String: Any]).flatMap(ACPContent.init),
                let text = content.text {
@@ -257,7 +262,18 @@ final class AgentSession: AgentSessioning {
             }
         case "tool_call", "tool_call_update":
             if let id = update["toolCallId"] as? String {
-                let content = ((update["content"] as? [[String: Any]]) ?? []).compactMap(ACPContent.init)
+                // Cap each content item: replayed sessions carry whole-file
+                // tool payloads, and a single multi-hundred-KB event would
+                // blow the webview's evaluateJavaScript budget even chunked.
+                let content = ((update["content"] as? [[String: Any]]) ?? [])
+                    .map { item -> [String: Any] in
+                        var item = item
+                        if let text = item["text"] as? String, text.count > 64_000 {
+                            item["text"] = String(text.prefix(64_000)) + "\n… [截断，完整输出见终端]"
+                        }
+                        return item
+                    }
+                    .compactMap(ACPContent.init)
                 // Edit-like calls carry rawInput {path, content}: snapshot the
                 // on-disk file NOW (before the write lands) so the UI can
                 // render a real old↔new diff. Local panes only; 256 KiB cap.
