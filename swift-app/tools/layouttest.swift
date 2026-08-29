@@ -1414,6 +1414,8 @@ func run() {
     // ghost agent pane after closing its tab).
     print("— pane grid: closed pane's view leaves the hierarchy —")
     final class StubPaneHost: NSView, PaneHosting {
+    func focusAsPane() {}  // stub pane — keyboard never targets it
+
         let hostKey: HostKey
         var retired = false
         init(_ key: HostKey) { self.hostKey = key; super.init(frame: .zero) }

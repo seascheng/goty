@@ -22,13 +22,22 @@ protocol PaneHosting: NSView {
     func setVisible(_ visible: Bool)
     func syncCoreVisibility()
     func retire()
+    /// Make this pane the keyboard target. Terminal panes focus their
+    /// ghostty surface; agent panes focus the WKWebView (it forwards
+    /// keys to the page). Without this the agent pane rendered fully
+    /// but its composer ignored the keyboard until a tab round-trip.
+    func focusAsPane()
     /// Terminal panes arm their ghostty surface lazily; agent panes are
     /// always live. Called from the grid's layout pass.
     func createSurfaceIfNeeded()
     var windowVisible: Bool { get set }
 }
+
 extension PaneHost: PaneHosting {
     func setVisible(_ visible: Bool) { isHidden = !visible }
+    func focusAsPane() {
+        window?.makeFirstResponder(surfaceView)
+    }
 }
 
 /// One terminal pane: a libghostty EXEC surface fed by a sessiond stream.

@@ -275,6 +275,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     // MARK: PaneHosting
 
     func setVisible(_ visible: Bool) { isHidden = !visible }
+    func focusAsPane() {
+        window?.makeFirstResponder(webView)
+    }
     func syncCoreVisibility() {} // webview 自管生命周期，无需 occlusion 联动
     func createSurfaceIfNeeded() {}
     var windowVisible = true

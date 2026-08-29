@@ -397,6 +397,11 @@ enum AgentTest {
             return false
         }), "pi replay carries assembled assistant text")
 
+        // pi store: real session files on this machine (probe cwd).
+        let piSummaries = PiSessionStore.summaries(cwd: "/private/tmp/probe-cwd")
+        check(piSummaries.contains { $0.title?.contains("HELLO_PI") == true },
+              "pi session title derives from first user message")
+
         try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }
         print("agenttest: all passed")

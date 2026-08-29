@@ -36,7 +36,7 @@ enum PiSessionStore {
                     ?? timestamp(record["timestamp"]) ?? 0
                 out.append(AgentSessionSummary(
                     sessionId: sid, cwd: sessionCwd,
-                    title: (record["name"] as? String),
+                    title: (record["name"] as? String) ?? firstUserTitle(reader),
                     updatedAt: String(Int(updated)),
                     messageCount: nil))
             }
@@ -82,5 +82,28 @@ enum PiSessionStore {
         guard let iso = raw as? String else { return 0 }
         let formatter = ISO8601DateFormatter()
         return formatter.date(from: iso)?.timeIntervalSince1970 ?? 0
+    }
+
+    /// Session files rarely carry a name; the first user message is
+    /// the title users recognize. Reads a bounded window of lines (the
+    /// message stream starts right after the session/model records).
+    private static func firstUserTitle(_ reader: BufferedLineReader) -> String? {
+        var reader = reader
+        for _ in 0..<24 {
+            guard let line = reader.nextLine(),
+                  let data = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data),
+                  let record = json as? [String: Any],
+                  record["type"] as? String == "message" else { continue }
+            guard let message = record["message"] as? [String: Any],
+                  message["role"] as? String == "user" else { continue }
+            let content = message["content"] as? [[String: Any]] ?? []
+            let text = content.compactMap { $0["text"] as? String }.joined()
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return String(trimmed.prefix(60))
+            }
+        }
+        return nil
     }
 }

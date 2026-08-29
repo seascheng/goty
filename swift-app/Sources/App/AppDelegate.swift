@@ -231,13 +231,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, let window = self.window, event.window === window else { return event }
             let location = event.locationInWindow
             if let host = self.wc?.terminalArea.paneGrid.visibleHosts
-                .compactMap({ $0 as? PaneHost })
                 .first(where: {
                     $0.frame.contains($0.superview?.convert(location, from: nil) ?? .zero)
                 }) {
-                window.makeFirstResponder(host.surfaceView)
+                host.focusAsPane()
                 self.coordinator.focusPane(wsId: host.hostKey.workspace,
-                                           paneId: host.paneId)
+                                           paneId: host.hostKey.pane)
             }
             return event
         }
@@ -278,6 +277,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeGhosttyNotifications()
 
         NSApp.activate(ignoringOtherApps: true)
+        // Boot focus: the active pane takes the keyboard from the start
+        // (agent panes otherwise sit deaf until a tab round-trip).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.wc?.terminalArea.paneGrid.visibleHosts.first?.focusAsPane()
+        }
 
     }
 
@@ -298,9 +302,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 area.dismissOverlay(kind: .editor)
                 // Back to the terminal — the user just left the editor.
-                if let first = area.paneGrid.visibleHosts.compactMap({ $0 as? PaneHost }).first,
-                   let window {
-                    window.makeFirstResponder(first.surfaceView)
+                if let first = area.paneGrid.visibleHosts.first {
+                    first.focusAsPane()
                 }
             }
         }
