@@ -62,12 +62,15 @@ extension AppDelegate {
         agentItem.submenu = agentMenu
         shellMenu.addItem(agentItem)
         let sessionMenu = NSMenu()
-        for (key, label) in AgentManifests.acpPickerOrder {
-            let item = NSMenuItem(title: label,
+        let path = UserShellEnv.asDictionary["PATH"] ?? ""
+        for entry in AgentRegistry.pickerEntries(path: path) {
+            let item = NSMenuItem(title: entry.label,
                                   action: #selector(menuNewAgentSessionFrom(_:)),
                                   keyEquivalent: "")
             item.target = self
-            item.representedObject = key
+            item.representedObject = entry.key
+            item.isEnabled = entry.available
+            if !entry.available { item.toolTip = "\(entry.key) 不在 PATH" }
             sessionMenu.addItem(item)
         }
         let sessionItem = NSMenuItem(title: "New Agent Session", action: nil, keyEquivalent: "")

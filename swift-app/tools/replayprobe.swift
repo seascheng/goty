@@ -87,7 +87,7 @@ enum ReplayProbe {
             cwd: "/Users/seascheng/Downloads/ai_project/goty-agent-gui",
             grid: SessionGrid(columns: 120, rows: 40, cellWidth: 7, cellHeight: 17),
             environment: ProcessInfo.processInfo.environment.filter { $0.key != "GOTY_AUTOLOAD_SESSION" },
-            launch: AgentManifests.acpLaunch(for: "omp")!,
+            spawn: AgentRegistry.ompSpawn,
             daemon: .shared,
             delegate: delegate)
 
@@ -114,7 +114,7 @@ enum ReplayProbe {
         session.connect { ok in connectOk = ok }
         guard pump(until: { connectOk }, timeout: 30) else { print("FATAL: connect"); exit(1) }
 
-        var listed: [ACPSessionSummary]?
+        var listed: [AgentSessionSummary]?
         session.listSessions { list in listed = list }
         guard pump(until: { listed != nil }, timeout: 30), let sid = listed?.first?.sessionId else {
             print("FATAL: no sessions"); exit(1)

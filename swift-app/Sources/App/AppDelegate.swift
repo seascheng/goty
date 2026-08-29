@@ -463,11 +463,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Persistent host for one GUI agent session pane (ACP over sessiond).
     func makeAgentPaneHost(pane: PaneState, ws: WorkspaceState,
                            key: HostKey, agentKey: String) -> AgentPaneHost? {
-        guard let launch = AgentManifests.acpLaunch(for: agentKey),
-              let target = agentPaneTarget(wsId: ws.id, launch: launch) else { return nil }
-        let session = AgentSession(paneId: key.runtimeId, cwd: pane.cwd,
-                                   grid: AgentSession.fixedGrid, environment: target.environment,
-                                   launch: launch, daemon: target.daemon)
+        guard let descriptor = AgentRegistry.descriptor(for: agentKey),
+              let environment = agentEnvironment(wsId: ws.id) else { return nil }
+        let session = descriptor.make(AgentPaneParams(paneId: key.runtimeId,
+                                                      cwd: pane.cwd,
+                                                      environment: environment,
+                                                      daemon: .shared))
         let host = AgentPaneHost(key: key, session: session)
         host.onWorkingChange = { [weak self] working in
             self?.coordinator.agentStateUpdated(wsId: ws.id, paneId: pane.id,

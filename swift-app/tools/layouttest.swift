@@ -1375,7 +1375,7 @@ func run() {
 
     // Sidebar "+" menu: built pure, fired like the host picker.
     // Flat shape: terminal + worktree + separator + one entry per ACP
-    // agent (AgentManifests.acpPickerOrder).
+    // agent (AgentRegistry).
     var plusDirs: [String?] = []
     var wtDirs: [String?] = []
     var agentDirs: [(key: String, dir: String?)] = []
@@ -1383,7 +1383,7 @@ func run() {
     wc.sidebar.onNewWorktreeInDir = { wtDirs.append($0) }
     wc.sidebar.onNewAgentSessionInDir = { agentDirs.append(($0, $1)) }
     let plusMenu = wc.sidebar.spacePlusMenu(dir: repoDir)
-    let agentCount = AgentManifests.acpPickerOrder.count
+    let agentCount = AgentRegistry.descriptors.count
     check(plusMenu.items.count == 3 + agentCount
           && plusMenu.items[0].title == "New Terminal"
           && plusMenu.items[1].title == "New Worktree…",

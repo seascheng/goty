@@ -10,8 +10,10 @@ protocol AgentSessioning: AnyObject {
     var delegate: AgentSessionDelegate? { get set }
     var sessionId: String? { get }
     var isWorking: Bool { get }
-    var configOptions: [ACPConfigOption] { get }
-    var commands: [ACPSlashCommand] { get }
+    var configOptions: [AgentConfigOption] { get }
+    var commands: [AgentSlashCommand] { get }
+    /// Working directory — file index and session-store filters.
+    var cwd: String? { get }
 
     func connect(completion: ((Bool) -> Void)?)
     func send(_ text: String)
@@ -19,12 +21,20 @@ protocol AgentSessioning: AnyObject {
     func respondPermission(requestID: Int, optionId: String)
     func setConfigOption(id: String, value: String)
     /// Persisted-session directory (session/list) filtered to the pane cwd.
-    func listSessions(completion: @escaping ([ACPSessionSummary]) -> Void)
+    func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void)
     /// Resume a persisted agent session on this connection; replayed
     /// history arrives as normal session/update events.
     func load(sessionId: String, completion: ((Bool) -> Void)?)
     func shutdown()
 }
+
+extension AgentSessioning {
+    /// Ring-replay diagnostics — omp (ACP) is the only adapter with a
+    /// ring to measure; others report zeros.
+    var debugReplayBytes: Int { 0 }
+    var debugReplayFrames: Int { 0 }
+}
+
 
 /// One GUI agent session: an ACP-speaking agent process hosted by
 /// sessiond (attach-or-spawn), driven over the shared frame channel.
@@ -36,26 +46,26 @@ final class AgentSession: AgentSessioning {
     let cwd: String?
     private let paneId: String
     private let environment: [String: String]
-    private let launch: AgentManifests.ACPLaunch
+    private let spawn: AgentSpawn
     private let daemon: SessionDaemon
     private let grid: SessionGrid
     private var pane: PaneSession?
     private let client = JSONRPCChannel()
     private(set) var sessionId: String?
     private(set) var isWorking = false
-    private(set) var configOptions: [ACPConfigOption] = []
-    private(set) var commands: [ACPSlashCommand] = []
+    private(set) var configOptions: [AgentConfigOption] = []
+    private(set) var commands: [AgentSlashCommand] = []
     private var connected = false
 
     init(paneId: String, cwd: String?, grid: SessionGrid,
          environment: [String: String],
-         launch: AgentManifests.ACPLaunch, daemon: SessionDaemon,
+         spawn: AgentSpawn, daemon: SessionDaemon,
          delegate: AgentSessionDelegate? = nil) {
         self.paneId = paneId
         self.cwd = cwd
         self.grid = grid
         self.environment = environment
-        self.launch = launch
+        self.spawn = spawn
         self.daemon = daemon
         self.delegate = delegate
         client.onOutbound = { [weak self] in self?.pane?.sendInput($0) }
@@ -79,9 +89,9 @@ final class AgentSession: AgentSessioning {
         }
         connected = true
         pane = daemon.openPane(
-            id: paneId, cwd: cwd, shell: launch.command, args: launch.args,
+            id: paneId, cwd: cwd, shell: spawn.command, args: spawn.args,
             environment: environment, grid: grid,
-            noEcho: true, ringBytes: launch.ringBytes,
+            noEcho: true, ringBytes: spawn.ringBytes,
             onFrame: { [weak self] kind, data in
                 self?.handleFrame(kind: kind, data: data)
             },
@@ -125,7 +135,7 @@ final class AgentSession: AgentSessioning {
                     return
                 }
                 self.sessionId = sessionId
-                let configs = ACPConfigOption.list(value["configOptions"])
+                let configs = AgentConfigOption.list(value["configOptions"])
                 self.configOptions = configs
                 self.emit(configs.isEmpty ? [.ready] : [.configChanged(configs), .ready])
                 completion?(true)
@@ -248,7 +258,7 @@ final class AgentSession: AgentSessioning {
     /// Persisted-session directory (session/list) filtered to the pane cwd.
     /// Zero-message entries are creation placeholders — drop them; newest
     /// activity sorts first.
-    func listSessions(completion: @escaping ([ACPSessionSummary]) -> Void) {
+    func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void) {
         var params: [String: Any] = [:]
         if let cwd { params["cwd"] = cwd }
         client.request("session/list", params) { result in
@@ -256,7 +266,7 @@ final class AgentSession: AgentSessioning {
                 completion([])
                 return
             }
-            let summaries = ACPSessionSummary.list(value["sessions"])
+            let summaries = AgentSessionSummary.list(value["sessions"])
                 .filter { ($0.messageCount ?? 0) > 0 }
                 .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
             completion(summaries)
@@ -272,7 +282,7 @@ final class AgentSession: AgentSessioning {
             "sessionId": sessionId, "configId": id, "value": value,
         ]) { [weak self] result in
             guard let self, case .success(let response) = result else { return }
-            let configs = ACPConfigOption.list(response["configOptions"])
+            let configs = AgentConfigOption.list(response["configOptions"])
             guard !configs.isEmpty else { return }
             self.configOptions = configs
             self.emit([.configChanged(configs)])
@@ -297,7 +307,7 @@ final class AgentSession: AgentSessioning {
             }
             self.sessionId = id
             self.isWorking = false
-            let configs = ACPConfigOption.list(value["configOptions"])
+            let configs = AgentConfigOption.list(value["configOptions"])
             self.configOptions = configs
             var events: [AgentSessionEvent] = []
             if !configs.isEmpty { events.append(.configChanged(configs)) }
@@ -332,7 +342,7 @@ final class AgentSession: AgentSessioning {
                     .compactMap { ACPOption(raw: $0) }
                 let title = (params["toolCall"] as? [String: Any])?["title"] as? String
                 events.append(.permissionRequested(
-                    ACPPermissionPrompt(requestID: id, toolCallTitle: title, options: options)))
+                    AgentPermissionPrompt(requestID: id, toolCallTitle: title, options: options)))
             }
             emit(events)
             return events
@@ -389,7 +399,7 @@ final class AgentSession: AgentSessioning {
                 events.append(.plan(entries))
             }
         case "available_commands_update":
-            let list = ACPSlashCommand.list(update["availableCommands"])
+            let list = AgentSlashCommand.list(update["availableCommands"])
             commands = list
             events.append(.commandsChanged(list))
         case "usage_update":

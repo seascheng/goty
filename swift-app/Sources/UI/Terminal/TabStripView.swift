@@ -15,7 +15,7 @@ final class TabStripView: NSView {
     var onTabSelected: ((Int) -> Void)?
     var onCloseTab: ((Int) -> Void)?
     var onNewTab: (() -> Void)?
-    /// Flat + menu's agent items (AgentManifests.acpPickerOrder).
+    /// Flat + menu's agent items (AgentRegistry).
     var onNewAgentSession: ((String) -> Void)?
     /// "Rename…" — the strip has no inline field; the owner prompts.
     var onRenameTab: ((Int) -> Void)?
@@ -114,12 +114,15 @@ final class TabStripView: NSView {
                              accessibilityDescription: nil)
         menu.addItem(term)
         menu.addItem(.separator())
-        for (key, label) in AgentManifests.acpPickerOrder {
-            let item = NSMenuItem(title: label, action: #selector(plusAgentAction(_:)),
+        let path = UserShellEnv.asDictionary["PATH"] ?? ""
+        for entry in AgentRegistry.pickerEntries(path: path) {
+            let item = NSMenuItem(title: entry.label, action: #selector(plusAgentAction(_:)),
                                   keyEquivalent: "")
             item.target = self
-            item.representedObject = key
-            item.image = AgentBrandIcons.image(for: key)
+            item.representedObject = entry.key
+            item.isEnabled = entry.available
+            if !entry.available { item.toolTip = "\(entry.key) 不在 PATH" }
+            item.image = AgentBrandIcons.image(for: entry.key)
             menu.addItem(item)
         }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.maxY + 4),

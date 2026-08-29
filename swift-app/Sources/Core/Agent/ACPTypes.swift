@@ -58,7 +58,7 @@ struct ACPOption {
     }
 }
 
-struct ACPPermissionPrompt {
+struct AgentPermissionPrompt {
     let requestID: Int
     let toolCallTitle: String?
     let options: [ACPOption]
@@ -80,7 +80,7 @@ struct ACPConfigChoice {
     }
 }
 
-struct ACPConfigOption {
+struct AgentConfigOption {
     let id: String
     let name: String
     let category: String?
@@ -98,14 +98,14 @@ struct ACPConfigOption {
             .compactMap { ACPConfigChoice(raw: $0) }
     }
 
-    static func list(_ raw: Any?) -> [ACPConfigOption] {
-        (raw as? [[String: Any]] ?? []).compactMap { ACPConfigOption(raw: $0) }
+    static func list(_ raw: Any?) -> [AgentConfigOption] {
+        (raw as? [[String: Any]] ?? []).compactMap { AgentConfigOption(raw: $0) }
     }
 }
 
 /// One agent slash command from `available_commands_update`. Invoked by
 /// prompting with `/{name} …` — the plain prompt path, no extra RPC.
-struct ACPSlashCommand {
+struct AgentSlashCommand {
     let name: String
     let description: String?
     let inputHint: String?
@@ -117,13 +117,13 @@ struct ACPSlashCommand {
         self.inputHint = (raw["input"] as? [String: Any])?["hint"] as? String
     }
 
-    static func list(_ raw: Any?) -> [ACPSlashCommand] {
-        (raw as? [[String: Any]] ?? []).compactMap { ACPSlashCommand(raw: $0) }
+    static func list(_ raw: Any?) -> [AgentSlashCommand] {
+        (raw as? [[String: Any]] ?? []).compactMap { AgentSlashCommand(raw: $0) }
     }
 }
 
 /// One persisted agent session from `session/list`.
-struct ACPSessionSummary {
+struct AgentSessionSummary {
     let sessionId: String
     let cwd: String?
     let title: String?
@@ -140,8 +140,8 @@ struct ACPSessionSummary {
         self.messageCount = meta?["messageCount"] as? Int
     }
 
-    static func list(_ raw: Any?) -> [ACPSessionSummary] {
-        (raw as? [[String: Any]] ?? []).compactMap { ACPSessionSummary(raw: $0) }
+    static func list(_ raw: Any?) -> [AgentSessionSummary] {
+        (raw as? [[String: Any]] ?? []).compactMap { AgentSessionSummary(raw: $0) }
     }
 }
 
@@ -167,12 +167,12 @@ enum AgentSessionEvent {
                         output: [ACPContent],
                         rawInput: [String: Any]?, oldText: String?)
     case plan([ACPPlanEntry])
-    case permissionRequested(ACPPermissionPrompt)
+    case permissionRequested(AgentPermissionPrompt)
     case turnEnded(stopReason: String?)
     /// Full config knob list (session/new + every set_config_option OK).
-    case configChanged([ACPConfigOption])
+    case configChanged([AgentConfigOption])
     /// Agent slash-command directory (available_commands_update).
-    case commandsChanged([ACPSlashCommand])
+    case commandsChanged([AgentSlashCommand])
     /// Token/cost meter (usage_update; omp carries size/used/cost).
     /// input/output token splits are part of the display contract for
     /// future agents — nil segments hide in the composer statusbar.

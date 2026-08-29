@@ -115,15 +115,15 @@ extension AppDelegate {
                                 environment: [:])
     }
 
-    /// Agent session spawn shape: the ACP command via the user's real
-    /// login environment (version managers), no ghostty surface.
+    /// Agent sessions run the user's real login environment (version
+    /// managers), no ghostty surface. The spawn shape itself comes from
+    /// AgentRegistry; only the environment is workspace-dependent.
     /// M1 is local-daemon only — SSH agent sessions are M2 (spec).
-    func agentPaneTarget(wsId: UUID, launch: AgentManifests.ACPLaunch) -> PaneDaemonTarget? {
+    func agentEnvironment(wsId: UUID) -> [String: String]? {
         guard let store = coordinator.store,
               let ws = store.workspaces.first(where: { $0.id == wsId }) else { return nil }
         guard !ws.isRemote else { return nil }
-        return PaneDaemonTarget(daemon: .shared, shell: launch.command, args: launch.args,
-                                environment: UserShellEnv.asDictionary)
+        return UserShellEnv.asDictionary
     }
 
     func startRemoteLink(_ workspace: WorkspaceState) {

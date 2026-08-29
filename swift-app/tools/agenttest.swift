@@ -68,7 +68,7 @@ enum AgentTest {
         let daemon = SessionDaemon(socketPath: "/nonexistent-\(UUID().uuidString)")
         let session = AgentSession(paneId: "p1", cwd: nil, grid: grid,
                                    environment: [:],
-                                   launch: AgentManifests.ACPLaunch(
+                                   spawn: AgentSpawn(
                                        command: "omp", args: ["acp"],
                                        ringBytes: 67_108_864),
                                    daemon: daemon, delegate: nil)
@@ -237,12 +237,14 @@ enum AgentTest {
               "captured PATH resolves the user toolchain")
         check(UserShellEnv.asDictionary["HOME"] != nil, "HOME present in merged env")
 
-        print("— manifest —")
-        let launch = AgentManifests.acpLaunch(for: "omp")
-        check(launch?.command == "omp" && launch?.args == ["acp"], "omp acp launch")
-        check(launch?.ringBytes == 67_108_864, "omp uses the 64 MiB ring")
-        check(AgentManifests.acpLaunch(for: "claude") == nil, "v1 is omp-only")
-        check(AgentManifests.acpPickerOrder.first?.key == "omp", "picker order leads with omp")
+        print("— registry —")
+        let omp = AgentRegistry.descriptor(for: "omp")
+        check(omp?.spawn.command == "omp" && omp?.spawn.args == ["acp"], "omp acp spawn")
+        check(omp?.spawn.ringBytes == 67_108_864, "omp uses the 64 MiB ring")
+        check(AgentRegistry.descriptors.first?.key == "omp", "picker order leads with omp")
+        let path = UserShellEnv.asDictionary["PATH"] ?? ""
+        check(omp?.isAvailable(path: path) == true, "omp resolves in captured PATH")
+        check(omp?.isAvailable(path: "/nonexistent-dir-only") == false, "availability misses on absent PATH")
 
         try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }

@@ -31,12 +31,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     var onWorkingChange: ((Bool) -> Void)?
     var onPermissionPending: ((Bool) -> Void)?
 
-    private let session: AgentSession
+    private let session: any AgentSessioning
     private let webView: WKWebView
     private let bridge: AgentWebBridge
-    private var pendingPrompt: ACPPermissionPrompt?
+    private var pendingPrompt: AgentPermissionPrompt?
 
-    init(key: HostKey, session: AgentSession) {
+    init(key: HostKey, session: any AgentSessioning) {
         self.hostKey = key
         self.session = session
 

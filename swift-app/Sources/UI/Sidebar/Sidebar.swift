@@ -313,12 +313,15 @@ final class SidebarView: NSView {
         menu.addItem(term)
         menu.addItem(worktree)
         menu.addItem(.separator())
-        for (key, label) in AgentManifests.acpPickerOrder {
-            let item = NSMenuItem(title: label, action: #selector(spacePlusAgentAction(_:)),
+        let path = UserShellEnv.asDictionary["PATH"] ?? ""
+        for entry in AgentRegistry.pickerEntries(path: path) {
+            let item = NSMenuItem(title: entry.label, action: #selector(spacePlusAgentAction(_:)),
                                   keyEquivalent: "")
             item.target = self
-            item.representedObject = [key, dir]
-            item.image = AgentBrandIcons.image(for: key)
+            item.isEnabled = entry.available
+            if !entry.available { item.toolTip = "\(entry.key) 不在 PATH" }
+            item.representedObject = [entry.key, dir]
+            item.image = AgentBrandIcons.image(for: entry.key)
             menu.addItem(item)
         }
         return menu
