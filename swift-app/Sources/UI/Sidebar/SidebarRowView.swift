@@ -78,15 +78,18 @@ final class SidebarRowView: NSView {
             case .working: return "arrow.triangle.2.circlepath"
             case .blocked: return "hand.raised.fill"
             case .idle: return s.seen ? "moon.zzz.fill" : "checkmark.circle.fill"
+            case .error: return "exclamationmark.triangle.fill"
             case .unknown: return "questionmark.circle"
             }
         }
+
 
         static func color(for s: SpaceStatus) -> NSColor {
             let dark = Chrome.theme.isDark
             switch s.activity {
             case .working: return dark ? AgentSpec.statusWorking : AgentSpec.statusWorkingLight
             case .blocked: return dark ? AgentSpec.statusWaiting : AgentSpec.statusWaitingLight
+            case .error: return Chrome.theme.gitRemoved
             case .idle: return s.seen
                 ? (dark ? AgentSpec.statusIdle : AgentSpec.statusIdleLight)
                 : (dark ? AgentSpec.statusDone : AgentSpec.statusDoneLight)
@@ -100,9 +103,11 @@ final class SidebarRowView: NSView {
             case .working: return "working"
             case .blocked: return "blocked"
             case .idle: return s.seen ? "idle" : "done"
+            case .error: return "error"
             case .unknown: return "unknown"
             }
         }
+
 
         private func refresh() {
             guard let s = status else {

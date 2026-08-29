@@ -55,12 +55,21 @@ final class PiSession: AgentSessioning {
         openPane(resume: resumeSessionId, completion: completion)
     }
 
+    func reconnect(completion: ((Bool) -> Void)? = nil) {
+        pane?.close()
+        pane = nil
+        connected = true
+        // A fresh spawn resumes the agent's own session natively
+        // (--session); an attach re-syncs state over the live process.
+        openPane(resume: lastSessionId ?? resumeSessionId, completion: completion)
+    }
+
     private func openPane(resume: String?, completion: ((Bool) -> Void)?) {
         var args = ["--mode", "rpc"]
         if let resume {
             args += ["--session", resume]
         }
-        pane = daemon.openPane(
+        guard let opened = daemon.openPaneWithAttachment(
             id: paneId, cwd: cwd, shell: "pi", args: args,
             environment: environment, grid: grid,
             noEcho: true, ringBytes: 16_777_216,
@@ -70,16 +79,19 @@ final class PiSession: AgentSessioning {
             onDisconnect: { [weak self] in
                 guard let self else { return }
                 self.connected = false
-                self.delegate?.sessionDidFail(self, reason: "daemon 连接断开")
+                self.delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
             })
-        guard pane != nil else {
+        else {
             connected = false
             delegate?.sessionDidFail(self, reason: "sessiond 不可用")
             completion?(false)
             return
         }
-        pane?.start()
+        opened.session.start()
+        pane = opened.session
         // Ready = get_state answered: model known, session id captured.
+        // Also the attach path's state sync — get_state is a query, safe
+        // against the live process we just reattached to.
         request("get_state") { [weak self] response in
             guard let self else { return }
             guard response["success"] as? Bool == true,

@@ -118,11 +118,16 @@ extension AppDelegate {
     /// Agent sessions run the user's real login environment (version
     /// managers), no ghostty surface. The spawn shape itself comes from
     /// AgentRegistry; only the environment is workspace-dependent.
-    /// M1 is local-daemon only — SSH agent sessions are M2 (spec).
     func agentEnvironment(wsId: UUID) -> [String: String]? {
         guard let store = coordinator.store,
               let ws = store.workspaces.first(where: { $0.id == wsId }) else { return nil }
-        guard !ws.isRemote else { return nil }
+        // M2: a remote workspace's agent panes spawn the CLI directly in
+        // the remote daemon — their env is the HOST's captured login env,
+        // never the Mac's. nil (link down) = no host, not a degraded one.
+        if ws.isRemote {
+            guard let link = remoteLinks[ws.id], link.state == .ready else { return nil }
+            return link.remoteEnvironment.isEmpty ? nil : link.remoteEnvironment
+        }
         return UserShellEnv.asDictionary
     }
 

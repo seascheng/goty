@@ -326,7 +326,8 @@ function HistoryChip({ open, onToggle, onSelect }: {
   );
 }
 
-function Composer({ working }: { working: boolean }) {
+function Composer({ working, phase }: { working: boolean;
+  phase: "thinking" | "executing" | "awaitingPermission" | null }) {
   const [text, setText] = useState("");
   const [openPop, setOpenPop] = useState<string | null>(null);
   const [histOpen, setHistOpen] = useState(false);
@@ -540,10 +541,44 @@ function Composer({ working }: { working: boolean }) {
               store.apply({ type: "clearTranscript" });
               setHistOpen(false);
             }} />
-          {store.starting && (
+          {store.reconnecting && (
+            <span className="chip starting" title="连接断开，正在自动重连；远端进程仍在运行">
+              <span className="spin" />
+              <span className="chip-value">重连中…</span>
+            </span>
+          )}
+          {store.starting && !store.reconnecting && (
             <span className="chip starting" title="agent 进程已启动，握手完成前模型/思考等控件不可用">
               <span className="spin" />
               <span className="chip-value">正在启动 {store.starting}…</span>
+            </span>
+          )}
+          {store.phase === "thinking" && (
+            <span className="chip phase" title="模型思考中">
+              <span className="spin" />
+              <span className="chip-value">思考中…</span>
+            </span>
+          )}
+          {store.phase === "executing" && (
+            <span className="chip phase" title="工具执行中">
+              <span className="spin" />
+              <span className="chip-value">执行中…</span>
+            </span>
+          )}
+          {store.phase === "awaitingPermission" && (
+            <span className="chip phase awaiting" title="等待你在下方授权">
+              <span className="chip-value">等待授权</span>
+            </span>
+          )}
+          {store.justFinished && (
+            <span className="chip done">已完成 ✓</span>
+          )}
+          {store.error != null && (
+            <span className="chip error" title={store.error}>
+              <span className="chip-value">{store.error}</span>
+              <button className="chip-retry"
+                onClick={() => window.webkit?.messageHandlers.goty.postMessage(
+                  { type: "reconnect" })}>重试</button>
             </span>
           )}
           {[...store.configOptions]
@@ -583,7 +618,8 @@ function Composer({ working }: { working: boolean }) {
             return <span className="usage">{parts.join(" · ")}</span>;
           })()}
           <button
-            className={"action-btn " + (working ? "stop" : "send")}
+            className={"action-btn " + (working ? "stop" : "send")
+              + (phase === "awaitingPermission" ? " awaiting" : "")}
             disabled={!working && !text.trim()}
             title={working ? "停止 (Esc)" : "发送 (Enter)"}
             onClick={() => working
@@ -698,7 +734,7 @@ export function App() {
           </div>
         </div>
       )}
-      <Composer working={store.working} />
+      <Composer working={store.working} phase={store.phase} />
     </div>
   );
 }

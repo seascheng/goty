@@ -302,6 +302,24 @@ body {
   animation: chipspin 0.9s linear infinite;
 }
 @keyframes chipspin { to { transform: rotate(360deg); } }
+.chip.phase { cursor: default; color: var(--fg-muted); }
+.chip.phase:hover { background: none; border-color: transparent; color: var(--fg-muted); }
+.chip.phase.awaiting { color: var(--accent-bright); }
+.chip.done { cursor: default; color: var(--accent-bright); animation: chipfade 2.5s ease forwards; }
+.chip.done:hover { background: none; border-color: transparent; }
+.chip.error { cursor: default; color: var(--destructive); border-color: var(--destructive); flex-wrap: wrap; }
+.chip.error .chip-value { color: var(--destructive); white-space: normal; max-width: 260px; }
+.chip-retry {
+  background: var(--destructive); color: #fff; border: 0; border-radius: 4px;
+  padding: 1px 7px; font-size: 11px; cursor: pointer;
+}
+.chip-retry:hover { filter: brightness(1.15); }
+@keyframes chipfade { 0%, 70% { opacity: 1; } 100% { opacity: 0; } }
+.action-btn.awaiting { animation: awaitingpulse 1.1s ease-in-out infinite; }
+@keyframes awaitingpulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-bright) 55%, transparent); }
+  50% { box-shadow: 0 0 0 5px transparent; }
+}
 .pane-agent-icon {
   width: 15px; height: 15px; flex: none; margin-left: 2px;
 }

@@ -9,7 +9,6 @@ import WebKit
 final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefreshable {
     let hostKey: HostKey
 
-    /// Sidebar 状态接线（由 AppDelegate 桥到 coordinator）
     /// `@gui omp <prompt>` queued prompt: sent once the session is up.
     var initialPrompt: String?
     /// Composer statusbar metadata (agent icon + workspace/folder ·
@@ -28,8 +27,92 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                      "branch": nz(m.branch),
                      "icon": nz(m.icon)])
     }
-    var onWorkingChange: ((Bool) -> Void)?
-    var onPermissionPending: ((Bool) -> Void)?
+
+    /// The turn lifecycle as THIS pane sees it. Derived in
+    /// session(_:didEmit:) — adapters stay dialect-shaped, the host owns
+    /// the machine (paseo's rule: one derivation serves live and replay).
+    private(set) var turnState: AgentTurnState = .starting
+    /// Sidebar 状态接线（由 AppDelegate 桥到 coordinator）。Every turn
+    /// transition funnels through here — the sidebar badge, the composer
+    /// chips and the dock attention are all downstream of one source.
+    var onTurnState: ((AgentTurnState) -> Void)?
+    /// True while the reconnect backoff runs (didDisconnect → success).
+    private var isReconnecting = false
+    private var reconnectAttempt = 0
+    private var reconnectWorkItem: DispatchWorkItem?
+
+    private func setTurnState(_ state: AgentTurnState) {
+        turnState = state
+        switch state {
+        case .starting:
+            break // pushed explicitly at init, before the page exists
+        case .idle:
+            bridge.push(["type": "working", "value": false])
+            bridge.push(["type": "phase", "value": NSNull()])
+        case .thinking:
+            bridge.push(["type": "working", "value": true])
+            bridge.push(["type": "phase", "value": "thinking"])
+        case .executing:
+            bridge.push(["type": "working", "value": true])
+            bridge.push(["type": "phase", "value": "executing"])
+        case .awaitingPermission:
+            bridge.push(["type": "working", "value": true])
+            bridge.push(["type": "phase", "value": "awaitingPermission"])
+        case .errored(let reason):
+            bridge.push(["type": "working", "value": false])
+            bridge.push(["type": "phase", "value": NSNull()])
+            bridge.push(["type": "error", "text": reason])
+        }
+        onTurnState?(state)
+    }
+
+    /// Transport dropped: the process may still be mid-turn (the daemon
+    /// keeps it) — show reconnecting and ride the backoff until the
+    /// transport reattaches, then let the ring replay rebuild the page.
+    func session(_ session: AgentSessioning, didDisconnectBecause reason: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isReconnecting else { return }
+            self.setReconnecting()
+        }
+    }
+
+    private func setReconnecting() {
+        isReconnecting = true
+        bridge.push(["type": "working", "value": false])
+        bridge.push(["type": "phase", "value": NSNull()])
+        bridge.push(["type": "reconnecting", "value": true])
+        onTurnState?(.starting) // sidebar stays neutral while retrying
+        scheduleReconnect()
+    }
+
+    /// Backoff 1→2→4→8→10s cap with ±20% jitter (happier's supervisor
+    /// shape): fast on a blip, patient on a down host, never a storm.
+    private func scheduleReconnect() {
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.session.reconnect { [weak self] ok in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    guard ok else {
+                        self.scheduleReconnect()
+                        return
+                    }
+                    self.reconnectAttempt = 0
+                    self.isReconnecting = false
+                    self.bridge.push(["type": "reconnecting", "value": false])
+                    // Replay rebuilds the transcript; the page must start
+                    // empty or the ring would duplicate every block.
+                    self.bridge.push(["type": "clearTranscript"])
+                    self.setTurnState(.idle)
+                }
+            }
+        }
+        reconnectWorkItem = item
+        let base = min(pow(2.0, Double(reconnectAttempt)), 10)
+        let delay = base * (0.8 + Double.random(in: 0...0.4))
+        reconnectAttempt += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
 
     private let session: any AgentSessioning
     private let webView: WKWebView
@@ -38,6 +121,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     /// Registry label ("Claude Code", "omp (GUI)" …) for the starting
     /// chip and timeout diagnostics.
     private let agentLabel: String
+    /// Composer `@` file index: nil = the Mac; an ssh host routes the
+    /// listing through the remote transport. Set by makeAgentPaneHost.
+    var fileIndexHost: String?
     /// Flips on the first handshake-complete signal (configChanged /
     /// ready / transcript events). Until then the composer shows an
     /// explicit starting chip — a hung MCP server must read as
@@ -128,11 +214,32 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         }
         bridge.onSend = { [weak self] text in
             guard let self else { return }
-            self.bridge.push(["type": "working", "value": true])
-            self.onWorkingChange?(true)
+            self.setTurnState(.thinking)
             self.session.send(text)
+            // An adapter with no live session id (attach replay rotated
+            // past the handshake) refuses send() — never leave the
+            // composer stuck on "working" for a turn that never started.
+            if !self.session.isWorking {
+                self.setTurnState(.errored("未关联到 agent 会话 — 请点重试"))
+            }
         }
         bridge.onStop = { [weak self] in self?.session.cancel() }
+        bridge.onReconnect = { [weak self] in
+            guard let self, !self.isReconnecting else { return }
+            // User-invoked (重试 after an errored pane): run the same
+            // attach-or-respawn path the automatic loop uses.
+            self.session.reconnect { [weak self] ok in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if ok {
+                        self.bridge.push(["type": "clearTranscript"])
+                        self.setTurnState(.idle)
+                    } else {
+                        self.setTurnState(.errored("重连失败"))
+                    }
+                }
+            }
+        }
         bridge.onSetConfig = { [weak self] configId, value in
             self?.session.setConfigOption(id: configId, value: value)
         }
@@ -151,12 +258,16 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             }
         }
         bridge.onLoadSession = { [weak self] sessionId in
-            self?.session.load(sessionId: sessionId) { _ in }
+            guard let self else { return }
+            // A load swaps the conversation under the pane: the page
+            // starts from the replayed history alone.
+            self.bridge.push(["type": "clearTranscript"])
+            self.session.load(sessionId: sessionId) { _ in }
         }
         bridge.onListFiles = { [weak self] reply in
             guard let self, let cwd = self.session.cwd else { return reply([]) }
             DispatchQueue.global(qos: .userInitiated).async {
-                let files = AgentFileIndex.list(root: cwd)
+                let files = AgentFileIndex.list(root: cwd, host: self.fileIndexHost)
                 DispatchQueue.main.async { reply(files) }
             }
         }
@@ -164,7 +275,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             guard let self, let prompt = self.pendingPrompt else { return }
             self.session.respondPermission(requestID: prompt.requestID, optionId: optionId)
             self.pendingPrompt = nil
-            self.onPermissionPending?(false)
+            // The tool that asked is about to run; the next transcript
+            // event re-derives from there.
+            self.setTurnState(.executing)
         }
 
         webView.load(URLRequest(url: URL(string: "goty://app/index.html")!))
@@ -179,11 +292,10 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         // must surface as an explicit timeout, not silent nothing.
         DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self] in
             guard let self, !self.handshakeDone else { return }
-            self.bridge.push(["type": "status",
-                              "text": "\\(self.agentLabel) 启动超时（90 秒未完成握手）。"
-                                   + "常见原因：该 agent 的 MCP/hooks 启动慢（项目索引、网络拉取）。"
-                                   + "面板已保留，可关闭后重开重试。"])
-            self.bridge.push(["type": "working", "value": false])
+            self.setTurnState(.errored(
+                "\(self.agentLabel) 启动超时（90 秒未完成握手）。"
+                + "常见原因：该 agent 的 MCP/hooks 启动慢（项目索引、网络拉取）。"
+                + "面板已保留，可重试或关闭后重开。"))
         }
         session.connect { [weak self] ok in
             if ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil {
@@ -196,11 +308,11 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                 // .ready event (status "就绪"), which also clears the
                 // starting chip — the two must not race apart.
                 if !ok {
-                    self.bridge.push(["type": "status", "text": "连接失败"])
+                    self.setTurnState(.errored("连接失败"))
                 }
                 if ok, let prompt = self.initialPrompt {
                     self.initialPrompt = nil
-                    self.bridge.push(["type": "working", "value": true])
+                    self.setTurnState(.thinking)
                     self.session.send(prompt)
                 }
                 // GOTY_AUTOLOAD_SESSION=newest|<sessionId>: diagnostic —
@@ -310,6 +422,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     func createSurfaceIfNeeded() {}
     var windowVisible = true
     func retire() {
+        reconnectWorkItem?.cancel()
         session.shutdown()
         webView.stopLoading()
         // Contract parity with PaneHost.retire: a retired host leaves
@@ -333,27 +446,41 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         }
     }
 
+    /// Turn-state derivation — the ONE place wire events become lifecycle.
+    /// Replay traffic derives identically to live (the store is cleared
+    /// first, so a rebuild lands on the right state by construction).
     func session(_ session: AgentSessioning, didEmit events: [AgentSessionEvent]) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             for event in events {
                 switch event {
-                case .ready, .configChanged, .userChunk, .messageChunk:
+                case .ready, .configChanged, .userChunk, .messageChunk, .toolCallUpdate:
                     // First handshake-complete signal cancels the
                     // watchdog (configChanged arrives even when an
                     // adapter omits ready).
                     self.handshakeDone = true
-                    if case .ready = event { self.onWorkingChange?(false) }
-                case .turnEnded:
-                    // Sidebar status follows the turn lifecycle — the
-                    // sessiond agent integration only reports omp.
-                    self.onWorkingChange?(false)
-                default:
+                case .turnEnded, .plan, .commandsChanged, .usageUpdate,
+                     .permissionRequested, .thoughtChunk, .starting:
                     break
                 }
-                if case .permissionRequested(let prompt) = event {
+                switch event {
+                case .ready:
+                    self.setTurnState(.idle)
+                case .messageChunk, .thoughtChunk:
+                    self.setTurnState(.thinking)
+                case .toolCallUpdate(_, _, _, let status, _, _, _, _):
+                    // pending/in_progress = a tool runs; a settled tool
+                    // hands the floor back to the model (until turn end).
+                    self.setTurnState(
+                        (status == "pending" || status == "in_progress")
+                        ? .executing : .thinking)
+                case .turnEnded:
+                    self.setTurnState(.idle)
+                case .permissionRequested(let prompt):
                     self.pendingPrompt = prompt
-                    self.onPermissionPending?(true)
+                    self.setTurnState(.awaitingPermission)
+                default:
+                    break
                 }
                 self.bridge.push(event.jsRepresentation)
             }
@@ -362,9 +489,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
 
     func sessionDidFail(_ session: AgentSessioning, reason: String) {
         DispatchQueue.main.async { [weak self] in
-            self?.bridge.push(["type": "working", "value": false])
-            self?.bridge.push(["type": "status", "text": reason])
-            self?.onWorkingChange?(false)
+            guard let self else { return }
+            // A failure inside the reconnect loop (handshake against a
+            // half-up daemon…) must not fight the loop — it already
+            // schedules the next attempt.
+            guard !self.isReconnecting else { return }
+            self.setTurnState(.errored(reason))
         }
     }
 }

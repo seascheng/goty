@@ -15,7 +15,7 @@ enum AgentProbe {
     static func main() {
         let args = CommandLine.arguments
         guard args.count >= 3 else {
-            print("usage: agentprobe <omp|claude|codex|pi> live|resume [sid marker]")
+            print("usage: agentprobe <omp|claude|codex|pi> live|reattach|resume [sid marker]")
             exit(2)
         }
         let key = args[1]
@@ -88,7 +88,8 @@ enum AgentProbe {
             let deadline = Date().addingTimeInterval(seconds)
             while Date() < deadline {
                 RunLoop.current.run(until: Date().addingTimeInterval(0.2))
-                if mode == "live", collector.turnsEnded > 0 || collector.failure != nil {
+                if mode == "live" || mode == "reattach",
+                   collector.turnsEnded > 0 || collector.failure != nil {
                     break
                 }
             }
@@ -100,10 +101,30 @@ enum AgentProbe {
         session.connect { ok in
             DispatchQueue.main.async {
                 print("PROBE  connect ok=\(ok)")
-                guard ok else { return }
                 switch mode {
                 case "live":
                     session.send(prompt)
+                case "reattach":
+                    // The keep/recover contract, end to end: detach the
+                    // transport (the daemon keeps the pane + its live
+                    // process), reattach, adopt the session from the ring
+                    // replay, then keep working on the SAME session.
+                    let sessionBefore = session.sessionId
+                    session.reconnect { ok2 in
+                        DispatchQueue.main.async {
+                            print("PROBE  reconnect ok=\(ok2)")
+                            check(ok2, "reattach reopens the transport")
+                            // sessionId is re-learned from the replayed
+                            // orphan response — wait for the ring bytes.
+                            let deadline = Date().addingTimeInterval(15)
+                            while session.sessionId == nil, Date() < deadline {
+                                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                            }
+                            check(session.sessionId == sessionBefore,
+                                  "reattach adopts the SAME live session id (before=\(sessionBefore ?? "nil") after=\(session.sessionId ?? "nil"))")
+                            session.send(prompt)
+                        }
+                    }
                 case "resume" where args.count >= 5:
                     let sid = args[3]
                     let marker = args[4]
@@ -126,7 +147,7 @@ enum AgentProbe {
             }
         }
 
-        if mode == "live" {
+        if mode == "live" || mode == "reattach" {
             pump(200)
             check(collector.ready, "\(key) reached ready")
             check(collector.turnsEnded > 0 || collector.failure != nil,

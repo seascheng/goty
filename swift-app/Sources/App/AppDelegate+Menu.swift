@@ -117,7 +117,37 @@ extension AppDelegate {
     /// sidebar space + and the @gui trigger all land here.
     func openAgentSession(agent: String, cwd: String? = nil,
                           initialPrompt: String? = nil) {
-        if !SessionDaemon.supportsAgentSessions() {
+        // Workspace-aware gate: the focused workspace decides WHICH daemon
+        // hosts the pane, and the remote checks run BEFORE the tab lands
+        // (menus bake local availability at launch; this is authoritative).
+        if let store = coordinator.store, let ws = store.focused, ws.isRemote {
+            guard let link = remoteLinks[ws.id], link.daemon != nil,
+                  link.state == .ready else {
+                let alert = NSAlert()
+                alert.messageText = "无法在 \(ws.sshHost ?? "?") 上打开 agent"
+                alert.informativeText = "到该主机的连接未就绪。等连接恢复（侧栏变绿）后重试。"
+                alert.runModal()
+                return
+            }
+            guard link.isAgentAvailable(key: agent) else {
+                let alert = NSAlert()
+                alert.messageText = "\(agent) 未安装在该主机上"
+                alert.informativeText = "\(ws.sshHost ?? "?") 的 PATH 里找不到 \(agent) CLI。先在主机上安装，再重连工作区以刷新探测。"
+                alert.runModal()
+                return
+            }
+            guard (link.reportedCapability ?? 0) >= SessionDaemon.expectedCapability else {
+                let alert = NSAlert()
+                alert.messageText = "远端 sessiond 需要升级"
+                alert.informativeText = "\(ws.sshHost ?? "?") 上的 sessiond 版本过旧，不支持 Agent GUI Session。升级会结束其托管的现有会话。"
+                alert.addButton(withTitle: "升级远端 Daemon")
+                alert.addButton(withTitle: "取消")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    link.upgradeDaemon()
+                }
+                return
+            }
+        } else if !SessionDaemon.supportsAgentSessions() {
             // Stale singleton daemon (it outlives the GUI by design, so a
             // GUI restart never replaces it). Offer the upgrade right here —
             // killing it ends the sessions it hosts, an explicit choice.

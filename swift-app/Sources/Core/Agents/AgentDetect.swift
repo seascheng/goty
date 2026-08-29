@@ -17,6 +17,10 @@ enum AgentActivity: Equatable {
     case idle
     case working
     case blocked
+    /// GUI agent panes only: the session died / never attached. The
+    /// screen detector never emits it — a terminal running an agent CLI
+    /// has no trustworthy "error" signal on glass.
+    case error
     case unknown
 
     var label: String {
@@ -24,6 +28,7 @@ enum AgentActivity: Equatable {
         case .idle: return "idle"
         case .working: return "working"
         case .blocked: return "needs input"
+        case .error: return "error"
         case .unknown: return "—"
         }
     }

@@ -264,6 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ? self?.remoteLinks[workspace.id]?.daemon
                 : SessionDaemon.shared
         }
+        wireAgentAttention()
         // Files tab "Send Path to Terminal" (and anything else that
         // types into a pane): route to the focused pane's host. Was
         // declared but never wired — the menu verb did nothing.
@@ -399,8 +400,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let key = HostKey(workspace: ws.id, pane: pane.id)
         if let existing = hostPool[key] { return existing }
         print("GOTY_DEBUG: makePaneHost kind=\(pane.kind)")
-        if case .agent(let agentKey) = pane.kind,
-           let agentHost = makeAgentPaneHost(pane: pane, ws: ws, key: key, agentKey: agentKey) {
+        if case .agent(let agentKey) = pane.kind {
+            guard let agentHost = makeAgentPaneHost(pane: pane, ws: ws, key: key, agentKey: agentKey) else {
+                // No daemon/env for this agent pane (remote link down,
+                // unknown agent key): NO host beats a wrong host — a
+                // plain shell here was the M1 "silent degradation". The
+                // layout retries on link-ready; a disconnected remote
+                // shows the server overlay instead.
+                return nil
+            }
             agentHost.initialPrompt = coordinator.takeInitialPrompt(paneId: pane.id)
         let paneCwd = coordinator.cwd(ofPane: pane.id, in: ws.id) ?? pane.cwd
             ?? (ws.focusedTab?.panes.first(where: { $0.id == pane.id })?.cwd)
@@ -476,20 +484,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                            key: HostKey, agentKey: String) -> AgentPaneHost? {
         guard let descriptor = AgentRegistry.descriptor(for: agentKey),
               let environment = agentEnvironment(wsId: ws.id) else { return nil }
+        // M2: the pane lives in the workspace's daemon — the ssh-forwarded
+        // one for remote workspaces, the local singleton otherwise. A nil
+        // remote daemon (link down) means NO host: the layout retries on
+        // link-ready, and the server overlay covers the pane meanwhile.
+        let daemon: SessionDaemon
+        if ws.isRemote {
+            guard let link = remoteLinks[ws.id], let forwarded = link.daemon else {
+                return nil
+            }
+            daemon = forwarded
+        } else {
+            daemon = .shared
+        }
         let session = descriptor.make(AgentPaneParams(paneId: key.runtimeId,
                                                       cwd: pane.cwd,
                                                       environment: environment,
-                                                      daemon: .shared))
+                                                      daemon: daemon))
         let host = AgentPaneHost(key: key, session: session, agentLabel: descriptor.label)
-        host.onWorkingChange = { [weak self] working in
-            self?.coordinator.agentStateUpdated(wsId: ws.id, paneId: pane.id,
-                                                state: working ? .working : .idle)
-        }
-        host.onPermissionPending = { [weak self] (pending: Bool) in
-            guard pending else { return }
-            self?.coordinator.agentStateUpdated(wsId: ws.id, paneId: pane.id, state: .blocked)
+        host.fileIndexHost = ws.sshHost
+        host.onTurnState = { [weak self] state in
+            guard let self else { return }
+            let activity: AgentActivity
+            switch state {
+            case .thinking, .executing: activity = .working
+            case .awaitingPermission: activity = .blocked
+            case .errored: activity = .error
+            case .starting, .idle: activity = .idle
+            }
+            self.coordinator.agentStateUpdated(wsId: ws.id, paneId: pane.id,
+                                               state: activity)
         }
         return host
+    }
+
+    /// A turn finished where nobody was looking: bounce the dock when
+    /// the app is inactive (never while the user IS in the app).
+    private func wireAgentAttention() {
+        coordinator.turnCompletedUnseen = { [weak self] _, _ in
+            guard self != nil, !NSApp.isActive else { return }
+            NSApp.requestUserAttention(.informationalRequest)
+        }
     }
 
     func updateRightPanel() {

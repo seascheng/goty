@@ -100,6 +100,9 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
     options: z.array(PermissionOptionSchema),
   }),
   z.object({ type: z.literal("permissionResolved") }),
+  z.object({ type: z.literal("phase"), value: z.string().nullish() }),
+  z.object({ type: z.literal("error"), text: z.string() }),
+  z.object({ type: z.literal("reconnecting"), value: z.boolean() }),
   z.object({ type: z.literal("turnEnded") }),
   z.object({ type: z.literal("working"), value: z.boolean() }),
   z.object({ type: z.literal("starting"), agent: z.string() }),
@@ -161,10 +164,22 @@ class Store {
   starting: string | null = null;
   configOptions: ConfigOption[] = [];
   commands: AgentCommand[] = [];
+  /// Turn phase from the Swift state machine: thinking / executing /
+  /// awaitingPermission — null when idle. `working` mirrors phase != null
+  /// (kept as its own field: the composer's send/stop flip predates it).
+  phase: "thinking" | "executing" | "awaitingPermission" | null = null;
+  /// Terminal pane failure (process exit, connect failure). Cleared when
+  /// a new turn starts or the pane reconnects.
+  error: string | null = null;
+  /// The transport is down and Swift is riding the reconnect backoff.
+  reconnecting = false;
+  /// Transient 「已完成」 flash: true for ~2.5s after a clean turnEnded.
+  justFinished = false;
+  status = "连接中…";
+  private flashTimer: number | null = null;
   usage: { used?: number | null; size?: number | null;
            input?: number | null; output?: number | null;
            costAmount?: number | null; costCurrency?: string | null } | null = null;
-  status = "连接中…";
   /// Composer statusbar: workspace/folder · branch (pushed by Swift).
   meta: { workspace: string | null; directory: string | null;
           branch: string | null; icon: string | null } | null = null;
@@ -292,9 +307,35 @@ class Store {
       case "plan": this.push({ kind: "plan", entries: event.entries ?? [] }); break;
       case "permission": this.permission = event; break;
       case "permissionResolved": this.permission = null; break;
-      case "turnEnded": this.push({ kind: "agent", text: "" }); this.working = false; break;
+      case "turnEnded":
+        this.push({ kind: "agent", text: "" });
+        this.working = false;
+        this.phase = null;
+        this.justFinished = true;
+        if (this.flashTimer !== null) clearTimeout(this.flashTimer);
+        this.flashTimer = window.setTimeout(() => {
+          this.justFinished = false;
+          this.emit();
+        }, 2500);
+        break;
       case "sessions": this.sessions = coerceList(event.sessions, AgentSessionSummarySchema); break;
-      case "working": this.working = event.value; break;
+      case "working":
+        this.working = event.value;
+        if (event.value) this.error = null;
+        else this.phase = null;
+        break;
+      case "phase":
+        this.phase = (event.value === "thinking" || event.value === "executing"
+          || event.value === "awaitingPermission") ? event.value : null;
+        if (this.phase) this.error = null;
+        break;
+      case "error":
+        this.error = event.text;
+        break;
+      case "reconnecting":
+        this.reconnecting = event.value;
+        if (event.value) this.error = null;
+        break;
       case "starting": this.starting = event.agent; break;
       case "status": this.status = event.text; break;
       case "configOptions": this.configOptions = coerceList(event.options, ConfigOptionSchema); break;
@@ -303,6 +344,8 @@ class Store {
       case "clearTranscript":
         this.blocks = []; this.toolOrder = []; this.tools.clear();
         this.permission = null; this.working = false;
+        this.phase = null; this.error = null; this.reconnecting = false;
+        this.justFinished = false;
         this.generation += 1;
         break;
       case "files": this.files = event.files; break;

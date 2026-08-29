@@ -237,6 +237,28 @@ enum AgentTest {
         check(liveDone && liveResult?["sessionId"] as? String == "fresh",
               "live response completes after replay")
 
+        print("— JSONRPCChannel orphan-result capture (attach adoption) —")
+        let oc = JSONRPCChannel()
+        var orphans: [[String: Any]] = []
+        oc.onOrphanResult = { orphans.append($0) }
+        // The ring re-streams the pane's FIRST client's session/new
+        // response; a reattaching adapter re-learns the live sessionId
+        // from exactly this orphan — never re-running the handshake.
+        oc.feed(Array("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"live-s1\",\"configOptions\":[]}}\n".utf8), replay: true)
+        check(orphans.count == 1 && orphans[0]["sessionId"] as? String == "live-s1",
+              "replayed response surfaces as orphan result")
+        // Live traffic can orphan too (a response outliving its request).
+        oc.feed(Array("{\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{\"threadId\":\"t1\"}}\n".utf8))
+        check(orphans.count == 2 && orphans[1]["threadId"] as? String == "t1",
+              "live unknown-id response surfaces as orphan result")
+        // Responses WITH a pending waiter never route to the orphan hook.
+        var pendingDone = false
+        let oc2 = JSONRPCChannel()
+        let pendingID = oc2.request("initialize", [:]) { _ in pendingDone = true }
+        oc2.feed(Array("{\"jsonrpc\":\"2.0\",\"id\":\(pendingID),\"result\":{}}\n".utf8))
+        check(pendingDone && orphans.count == 2,
+              "matched response completes pending, skips orphan hook")
+
         print("— integrity counters —")
         check(session.bytesFed == 0 && session.eventsEmitted > 0,
               "events counted without frames fed")

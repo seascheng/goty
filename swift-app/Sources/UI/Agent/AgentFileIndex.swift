@@ -18,11 +18,31 @@ enum AgentFileIndex {
         "__pycache__", ".venv", "venv", "Pods",
     ]
 
-    static func list(root: String) -> [String] {
-        if let cached = cache[root] { return cached }
-        let files = gitLSFiles(root: root) ?? bfs(root: root)
-        cache[root] = files
+    /// Remote roots ride the ssh transport (same ControlMaster mux as
+    /// every other remote exec). Non-git remote roots return nothing —
+    /// a capped BFS over ssh per keystroke is not a trade worth making.
+    static func list(root: String, host: String? = nil) -> [String] {
+        let key = (host ?? "") + "::" + root
+        if let cached = cache[key] { return cached }
+        let files: [String]
+        if let host {
+            files = remoteGitLSFiles(root: root, host: host) ?? []
+        } else {
+            files = gitLSFiles(root: root) ?? bfs(root: root)
+        }
+        cache[key] = files
         return files
+    }
+
+    private static func remoteGitLSFiles(root: String, host: String) -> [String]? {
+        let result = Shell.exec(
+            "git -C \(Shell.forceQuoted(root)) ls-files -co --exclude-standard",
+            host: host)
+        guard result.code == 0 else { return nil }
+        return String(decoding: result.stdout, as: UTF8.self)
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { !$0.isEmpty }
     }
 
     private static func gitLSFiles(root: String) -> [String]? {

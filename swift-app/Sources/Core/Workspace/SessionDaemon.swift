@@ -197,24 +197,41 @@ final class SessionDaemon {
         return (sharedRunningCapability() ?? 0) >= 4
     }
 
-    /// Attach-or-spawn. Attach first so the daemon's replay ring is the
-    /// single screen authority on both local and remote panes; spawn only
-    /// when the pane does not exist yet.
-    func openPane(id: String, cwd: String?, shell: String, args: [String],
-                  environment: [String: String], grid: SessionGrid,
-                  noEcho: Bool = false, ringBytes: UInt64? = nil,
-                  onFrame: @escaping (UInt8, Data) -> Void,
-                  onDisconnect: @escaping () -> Void) -> PaneSession? {
+    /// Whether `openPaneWithAttachment` attached to a daemon pane that
+    /// already existed (and replayed its ring) instead of spawning.
+    struct OpenPaneResult {
+        let session: PaneSession
+        /// true = the pane already lived in this daemon: its process is
+        /// mid-history and the ring replay IS the transcript. Callers
+        /// must NOT re-run a protocol handshake (a second session/new
+        /// would orphan the live turn and leak a zombie session).
+        let attachedExisting: Bool
+    }
+
+    /// `openPane` plus the attach/spawn outcome — agent sessions need it
+    /// (see OpenPaneResult.attachedExisting); terminal panes ignore it.
+    func openPaneWithAttachment(id: String, cwd: String?, shell: String,
+                                args: [String], environment: [String: String],
+                                grid: SessionGrid, noEcho: Bool = false,
+                                ringBytes: UInt64? = nil,
+                                onFrame: @escaping (UInt8, Data) -> Void,
+                                onDisconnect: @escaping () -> Void) -> OpenPaneResult? {
         guard ensureRunning() else { return nil }
 
         var fd = Self.connect(path: socketPath)
         guard fd >= 0 else { return nil }
         var initial: (UInt8, Data)?
+        var attachedExisting = false
         let attach = ["pane_id": id]
         if let data = try? JSONSerialization.data(withJSONObject: attach),
            Self.writeFrame(fd: fd, kind: SessionFrame.attach, payload: data),
            let first = Self.readFrame(fd: fd), first.0 != SessionFrame.error {
             initial = first
+            // Attach-vs-spawn by opening frame: a SPAWN always answers
+            // SPAWNED first; an ATTACH answers with the pane's stream
+            // start — SIZE (old daemons), SNAPSHOT/ATTACHED (new ones).
+            // First-frame-kind is the only daemon-version-proof signal.
+            attachedExisting = first.0 != SessionFrame.spawned
         } else {
             Darwin.close(fd)
             fd = Self.connect(path: socketPath)
@@ -230,8 +247,24 @@ final class SessionDaemon {
         }
 
 
-        return PaneSession(fd: fd, initial: initial,
-                           onFrame: onFrame, onDisconnect: onDisconnect)
+        return OpenPaneResult(
+            session: PaneSession(fd: fd, initial: initial,
+                                 onFrame: onFrame, onDisconnect: onDisconnect),
+            attachedExisting: attachedExisting)
+    }
+
+    /// Attach-or-spawn. Attach first so the daemon's replay ring is the
+    /// single screen authority on both local and remote panes; spawn only
+    /// when the pane does not exist yet.
+    func openPane(id: String, cwd: String?, shell: String, args: [String],
+                  environment: [String: String], grid: SessionGrid,
+                  noEcho: Bool = false, ringBytes: UInt64? = nil,
+                  onFrame: @escaping (UInt8, Data) -> Void,
+                  onDisconnect: @escaping () -> Void) -> PaneSession? {
+        openPaneWithAttachment(id: id, cwd: cwd, shell: shell, args: args,
+                               environment: environment, grid: grid,
+                               noEcho: noEcho, ringBytes: ringBytes,
+                               onFrame: onFrame, onDisconnect: onDisconnect)?.session
     }
 
     /// SpawnRequest JSON (sessiond protocol.rs). noEcho/ringBytes require

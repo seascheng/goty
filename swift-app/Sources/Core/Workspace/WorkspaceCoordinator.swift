@@ -112,6 +112,11 @@ final class WorkspaceCoordinator {
             next.seen = true
         } else if previous.state == .working || previous.state == .blocked {
             next.seen = isPaneFocused(wsId: wsId, paneId: paneId)
+            // The turn finished where nobody was looking — the app-level
+            // hook decides (dock bounce when inactive). Core stays AppKit-free.
+            if next.seen == false, previous.seen {
+                turnCompletedUnseen?(wsId, paneId)
+            }
         }
         guard next != previous else { return }
         runtime[wsId]!.agents[paneId] = next
@@ -272,6 +277,11 @@ final class WorkspaceCoordinator {
     /// (pane, fg command) pairs whose identity changed — the delegate
     /// layer forwards them to the owning PaneHosts.
     var onForegroundChange: (([(HostKey, String?)]) -> Void)?
+
+    /// A turn finished in an UNFOCUSED pane (seen=false transition) —
+    /// the app layer decides what attention means (dock bounce when
+    /// inactive). Fired at most once per completion.
+    var turnCompletedUnseen: ((UUID, String) -> Void)?
 
     /// True when this pane belongs to the tab the user is looking at.
     private func isPaneFocused(wsId: UUID, paneId: String) -> Bool {

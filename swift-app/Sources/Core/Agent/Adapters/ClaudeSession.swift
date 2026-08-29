@@ -99,10 +99,19 @@ final class ClaudeSession: AgentSessioning {
         openPane(resume: resumeSessionId, completion: completion)
     }
 
+    func reconnect(completion: ((Bool) -> Void)? = nil) {
+        pane?.close()
+        pane = nil
+        connected = true
+        // claude has no handshake — but a fresh spawn must carry --resume
+        // or the conversation context is gone with the old process.
+        openPane(resume: lastSessionId ?? resumeSessionId, completion: completion)
+    }
+
     private func openPane(resume: String?, completion: ((Bool) -> Void)?) {
         let (shell, shellArgs) = ClaudeSession.shellCommand(model: modelOverride,
                                                              resume: resume)
-        pane = daemon.openPane(
+        guard let opened = daemon.openPaneWithAttachment(
             id: paneId, cwd: cwd, shell: shell, args: shellArgs,
             environment: environment, grid: grid,
             noEcho: true, ringBytes: 16_777_216,
@@ -113,15 +122,16 @@ final class ClaudeSession: AgentSessioning {
                 guard let self else { return }
                 self.connected = false
                 self.processAlive = false
-                self.delegate?.sessionDidFail(self, reason: "daemon 连接断开")
+                self.delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
             })
-        guard pane != nil else {
+        else {
             connected = false
             delegate?.sessionDidFail(self, reason: "sessiond 不可用")
             completion?(false)
             return
         }
-        pane?.start()
+        opened.session.start()
+        pane = opened.session
         processAlive = true
         completion?(true)
     }

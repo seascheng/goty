@@ -40,6 +40,14 @@ final class OmpSession: AgentSessioning {
             guard method == "session/request_permission" else { return }
             self?.interpret(["id": id, "method": method, "params": params])
         }
+        // Attach adoption: the ring re-streams the pane's original
+        // session/new response; that orphan result is where the live
+        // sessionId lives (the process owns it — we never re-handshake).
+        client.onOrphanResult = { [weak self] result in
+            guard let self, self.sessionId == nil,
+                  let id = result["sessionId"] as? String else { return }
+            self.sessionId = id
+        }
     }
 
     func connect(completion: ((Bool) -> Void)? = nil) {
@@ -48,7 +56,29 @@ final class OmpSession: AgentSessioning {
             return
         }
         connected = true
-        pane = daemon.openPane(
+        guard let opened = openTransport() else {
+            connected = false
+            delegate?.sessionDidFail(self, reason: "sessiond 不可用")
+            completion?(false)
+            return
+        }
+        if debugFramesEnabled {
+            print("GOTY_DEBUG omp openTransport attached=\(opened.attachedExisting)")
+        }
+        if opened.attachedExisting {
+            // The pane's process already owns a session; its ring replay
+            // rebuilds the transcript and the orphan-result hook re-learns
+            // the sessionId. A fresh handshake here would create a SECOND
+            // omp session and orphan the live turn.
+            emit([.ready])
+            completion?(true)
+            return
+        }
+        handshake(completion)
+    }
+
+    private func openTransport() -> SessionDaemon.OpenPaneResult? {
+        guard let opened = daemon.openPaneWithAttachment(
             id: paneId, cwd: cwd, shell: spawn.command, args: spawn.args,
             environment: environment, grid: grid,
             noEcho: true, ringBytes: spawn.ringBytes,
@@ -58,15 +88,22 @@ final class OmpSession: AgentSessioning {
             onDisconnect: { [weak self] in
                 guard let self else { return }
                 self.connected = false
-                self.delegate?.sessionDidFail(self, reason: "daemon 连接断开")
+                self.delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
             })
-        guard pane != nil else {
-            connected = false
-            delegate?.sessionDidFail(self, reason: "sessiond 不可用")
-            completion?(false)
-            return
+        else { return nil }
+        // onOutbound writes through this property — a nil pane silently
+        // eats every request (initialize included).
+        pane = opened.session
+        // The reader thread pumps attach replies, ring replay and live
+        // frames — without it the handshake hangs forever.
+        opened.session.start()
+        return opened
+    }
+
+    private func handshake(_ completion: ((Bool) -> Void)?) {
+        if debugFramesEnabled {
+            print("GOTY_DEBUG omp handshake: sending initialize")
         }
-        pane?.start()
         client.request("initialize", [
             "protocolVersion": 1,
             "clientCapabilities": ["fs": ["readTextFile": false, "writeTextFile": false]],
@@ -92,6 +129,31 @@ final class OmpSession: AgentSessioning {
         }
     }
 
+    func reconnect(completion: ((Bool) -> Void)? = nil) {
+        pane?.close()
+        pane = nil
+        connected = true
+        guard let opened = openTransport() else {
+            connected = false
+            completion?(false)
+            return
+        }
+        if opened.attachedExisting {
+            emit([.ready])
+            completion?(true)
+            return
+        }
+        // Fresh process: the old session id is gone from the wire; the
+        // caller restores the conversation via load(lastSessionId).
+        handshake { [weak self] ok in
+            guard let self, ok, let restore = self.lastSessionId else {
+                completion?(ok)
+                return
+            }
+            self.load(sessionId: restore) { _ in completion?(true) }
+        }
+    }
+
     /// Handshake failure path: report and settle the connect completion.
     /// (The old `sessionDidFail(self!)` crashed when the weak self had
     /// already gone — argument evaluation runs before optional chaining.)
@@ -112,8 +174,10 @@ final class OmpSession: AgentSessioning {
         }
         switch kind {
         case SessionOutputKind.output:
+            if debugFramesEnabled { print("GOTY_DEBUG omp frame OUTPUT \(data.count)B: \(String(decoding: data.prefix(120), as: UTF8.self))") }
             client.feed([UInt8](data))
         case SessionOutputKind.snapshot:
+            if debugFramesEnabled { print("GOTY_DEBUG omp frame SNAPSHOT \(data.count)B") }
             // Ring replay (reattach to a live pane): the history bytes ARE
             // the transcript. Replayed responses never complete the fresh
             // handshake — ACPClient drops those in replay mode — while the
@@ -184,6 +248,9 @@ final class OmpSession: AgentSessioning {
     var unparseableLines: Int { client.unparseableLines }
 
     func send(_ text: String) {
+        if debugFramesEnabled {
+            print("GOTY_DEBUG omp send: sessionId=\(sessionId ?? "nil") working=\(isWorking) pane=\(pane != nil)")
+        }
         guard let sessionId, !isWorking else { return }
         isWorking = true
         // omp 18.0.8 names the field `prompt` (spec drift: ACP v1 says

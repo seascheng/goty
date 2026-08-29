@@ -11,9 +11,10 @@ final class AgentWebBridge: WebBridge {
     var onSetConfig: ((String, String) -> Void)?
     var onListSessions: (() -> Void)?
     var onLoadSession: ((String) -> Void)?
-    /// `@` references: enumerate workspace files, reply via push.
     var onListFiles: ((@escaping ([String]) -> Void) -> Void)?
     var onPermissionOption: ((String) -> Void)?
+    /// 重试 after an errored pane: attach-or-respawn from the user's hand.
+    var onReconnect: (() -> Void)?
 
     override func route(_ message: [String: Any]) {
         guard let type = message["type"] as? String else { return }
@@ -38,6 +39,8 @@ final class AgentWebBridge: WebBridge {
                 onPermissionOption?(optionId)
                 push(["type": "permissionResolved"])
             }
+        case "reconnect":
+            onReconnect?()
         case "listFiles":
             onListFiles? { [weak self] files in
                 self?.push(["type": "files", "files": files])

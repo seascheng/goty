@@ -38,6 +38,13 @@ final class JSONRPCChannel {
     /// server→client request (session/request_permission)
     var onRequest: ((Int, String, [String: Any]) -> Void)?
     var onOutbound: (([UInt8]) -> Void)?
+    /// A replayed response nobody is waiting for — the ring re-streamed
+    /// the handshake of the pane's FIRST client. Its result is the only
+    /// place a reattaching adapter can re-learn the live ids (omp's
+    /// sessionId from the original session/new, codex's thread_id from
+    /// thread/start) without re-running a handshake against a process
+    /// that already owns them.
+    var onOrphanResult: (([String: Any]) -> Void)?
 
     private let lock = NSLock()
     private var nextID = 1
@@ -62,6 +69,7 @@ final class JSONRPCChannel {
         var routed: [(Int, String, [String: Any])] = []
         var notified: [(String, [String: Any])] = []
         var unparseable: [String] = []
+        var orphanResults: [[String: Any]] = []
         lock.lock()
         for line in splitter.feed(bytes) {
             if recentOut.contains(line) { continue }
@@ -82,9 +90,23 @@ final class JSONRPCChannel {
                 }
                 continue
             }
-            // A response. Replayed history never completes fresh requests.
-            guard !replay, let id = message["id"] as? Int,
-                  let completion = pending.removeValue(forKey: id) else { continue }
+            // A response. Replayed history never completes fresh requests —
+            // it surfaces to onOrphanResult instead (live id re-capture).
+            if replay {
+                if let result = message["result"] as? [String: Any] {
+                    orphanResults.append(result)
+                }
+                continue
+            }
+            guard let id = message["id"] as? Int,
+                  let completion = pending.removeValue(forKey: id) else {
+                // Live traffic can also orphan a response — a request we
+                // already timed out of. Same hook, same reason.
+                if let result = message["result"] as? [String: Any] {
+                    orphanResults.append(result)
+                }
+                continue
+            }
             if let error = message["error"] as? [String: Any],
                let text = error["message"] as? String {
                 fired.append((.failure(.message(text)), completion))
@@ -98,6 +120,7 @@ final class JSONRPCChannel {
         for line in unparseable { onUnparseable?(line) }
         for (method, params) in notified { onNotification?(method, params) }
         for (id, method, params) in routed { onRequest?(id, method, params) }
+        for result in orphanResults { onOrphanResult?(result) }
         for (result, completion) in fired { completion(result) }
     }
 

@@ -28,6 +28,14 @@ final class RemoteDaemonLink {
     /// not re-run the boot pipeline.
     private(set) var daemon: SessionDaemon?
     private(set) var remoteShell: String = "/bin/bash"
+    /// Login-shell environment of the remote host, captured once per
+    /// boot. Agent panes spawn the CLI DIRECTLY (no login shell), so the
+    /// process env comes from THIS dictionary — the daemon's own env is
+    /// a non-login ssh default whose PATH never sees ~/.local/bin, nvm…
+    private(set) var remoteEnvironment: [String: String] = [:]
+    /// Which agent CLIs exist on the host, probed once per boot with one
+    /// ssh exec (AgentRegistry binaries). Menus and openAgentSession read it.
+    private(set) var agentAvailability: [String: Bool] = [:]
     /// Capability the remote daemon reported at handshake. Owners use
     /// it to remember per-host upgrade declines (one nag per build).
     private(set) var reportedCapability: Int?
@@ -159,10 +167,40 @@ final class RemoteDaemonLink {
            shell.hasPrefix("/") {
             remoteShell = String(shell.trimmingCharacters(in: .whitespaces))
         }
+        captureHostProfile()
         retryDelay = 1
         self.daemon = daemon
         state = .ready
-        NSLog("remote-link %@: ready (shell %@)", host, remoteShell)
+        NSLog("remote-link %@: ready (shell %@, agents %@)", host, remoteShell,
+              agentAvailability.filter { $0.value }.keys.sorted().joined(separator: ","))
+    }
+
+    /// One ssh exec pair: the login-shell env (agent panes spawn the CLI
+    /// directly, so THIS becomes the process env) and which agent CLIs
+    /// exist on the host. Blocking ssh — the boot queue is the right
+    /// place; ready is only reported once the profile is known.
+    private func captureHostProfile() {
+        let envOut = ssh("\(Shell.forceQuoted(remoteShell)) -l -c env 2>/dev/null || env")
+        var parsed: [String: String] = [:]
+        for line in envOut.split(separator: "\n") {
+            guard let eq = line.firstIndex(of: "=") else { continue }
+            parsed[String(line[line.startIndex..<eq])] = String(line[line.index(after: eq)...])
+        }
+        if !parsed.isEmpty { remoteEnvironment = parsed }
+
+        let binaries = AgentRegistry.descriptors.map(\.binary).joined(separator: " ")
+        let probe = ssh("command -v -- \(binaries) 2>/dev/null; true")
+        let found = Set(probe.split(separator: "\n").map(String.init))
+        for descriptor in AgentRegistry.descriptors {
+            agentAvailability[descriptor.key] =
+                found.contains { $0.hasSuffix("/" + descriptor.binary) }
+        }
+    }
+
+    /// Menu/picker gating for a REMOTE agent key. Local availability is
+    /// the caller's business (AgentRegistry + local PATH).
+    func isAgentAvailable(key: String) -> Bool {
+        agentAvailability[key] ?? false
     }
 
     /// Waiting for a retry IS the failed state: the sidebar shows red and a

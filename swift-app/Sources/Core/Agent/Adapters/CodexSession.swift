@@ -53,6 +53,15 @@ final class CodexSession: AgentSessioning {
         client.onRequest = { [weak self] id, method, params in
             self?.handleServerRequest(id: id, method: method, params: params)
         }
+        // Attach adoption: the ring re-streams the original thread/start
+        // response — the only wire record of the live thread id.
+        client.onOrphanResult = { [weak self] result in
+            guard let self, self.threadId == nil,
+                  let thread = result["thread"] as? [String: Any],
+                  let id = thread["id"] as? String else { return }
+            self.threadId = id
+            self.sessionId = id
+        }
     }
 
     // MARK: - AgentSessioning
@@ -63,7 +72,24 @@ final class CodexSession: AgentSessioning {
             return
         }
         connected = true
-        pane = daemon.openPane(
+        guard let opened = openTransport() else {
+            connected = false
+            delegate?.sessionDidFail(self, reason: "sessiond 不可用")
+            completion?(false)
+            return
+        }
+        if opened.attachedExisting {
+            // Live thread on the far side of the ring — adopting, never
+            // re-starting (thread/start would fork the conversation).
+            emit([.ready])
+            completion?(true)
+            return
+        }
+        handshake(completion)
+    }
+
+    private func openTransport() -> SessionDaemon.OpenPaneResult? {
+        daemon.openPaneWithAttachment(
             id: paneId, cwd: cwd, shell: "codex", args: ["app-server"],
             environment: environment, grid: grid,
             noEcho: true, ringBytes: 16_777_216,
@@ -73,22 +99,19 @@ final class CodexSession: AgentSessioning {
             onDisconnect: { [weak self] in
                 guard let self else { return }
                 self.connected = false
-                self.delegate?.sessionDidFail(self, reason: "daemon 连接断开")
+                self.delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
             })
-        guard pane != nil else {
-            connected = false
-            delegate?.sessionDidFail(self, reason: "sessiond 不可用")
-            completion?(false)
-            return
-        }
-        pane?.start()
+    }
+
+    private func handshake(_ completion: ((Bool) -> Void)?) {
         client.request("initialize",
                        ["clientInfo": ["name": "goty", "version": "1"]]) { [weak self] result in
             if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
                 print("CODEX initialize result: \(result)")
             }
-            guard let self, case .success = result else {
-                self?.delegate?.sessionDidFail(self!, reason: "codex initialize 失败")
+            guard let self else { completion?(false); return }
+            guard case .success = result else {
+                self.delegate?.sessionDidFail(self, reason: "codex initialize 失败")
                 completion?(false)
                 return
             }
@@ -97,6 +120,35 @@ final class CodexSession: AgentSessioning {
         }
     }
 
+    func reconnect(completion: ((Bool) -> Void)? = nil) {
+        pane?.close()
+        pane = nil
+        connected = true
+        guard let opened = openTransport() else {
+            connected = false
+            completion?(false)
+            return
+        }
+        if opened.attachedExisting {
+            emit([.ready])
+            completion?(true)
+            return
+        }
+        // Fresh process: re-adopt via thread/resume on the last live id.
+        handshake { [weak self] ok in
+            guard let self, ok else {
+                completion?(ok)
+                return
+            }
+            if let restore = self.lastSessionId {
+                self.load(sessionId: restore) { _ in completion?(true) }
+            } else {
+                completion?(true)
+            }
+        }
+    }
+
+
     private func startThread(completion: ((Bool) -> Void)?) {
         var params: [String: Any] = ["cwd": cwd ?? NSHomeDirectory()]
         if let modelOverride { params["model"] = modelOverride }
@@ -104,10 +156,11 @@ final class CodexSession: AgentSessioning {
             if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
                 print("CODEX thread/start result: \(result)")
             }
-            guard let self, case .success(let value) = result,
+            guard let self else { completion?(false); return }
+            guard case .success(let value) = result,
                   let thread = value["thread"] as? [String: Any],
                   let id = thread["id"] as? String else {
-                self?.delegate?.sessionDidFail(self!, reason: "codex thread/start 失败")
+                self.delegate?.sessionDidFail(self, reason: "codex thread/start 失败")
                 completion?(false)
                 return
             }
