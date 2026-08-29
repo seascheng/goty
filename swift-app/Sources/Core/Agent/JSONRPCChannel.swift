@@ -3,14 +3,14 @@ import Foundation
 
 /// JSON-RPC `error.message` carrier. String itself is not an Error
 /// (SE-0192 removed the implicit conformance).
-enum ACPFailure: Error {
+enum RPCFailure: Error {
     case message(String)
 }
 
-/// JSON-RPC 2.0 over ndjson for one agent pane. Inbound traffic is
-/// loosely typed ([String: Any]) on purpose: the M1 ACP subset is small
-/// and the schema is still moving (v1/v2); AgentSession owns the typed
-/// extraction. Outbound goes through onOutbound → PaneSession.sendInput.
+/// JSON-RPC 2.0 over ndjson for one agent pane — protocol-agnostic
+/// (omp speaks ACP on it, codex speaks app-server). Inbound traffic is
+/// loosely typed ([String: Any]) on purpose; the session adapter owns
+/// the typed extraction. Outbound goes through onOutbound → PaneSession.sendInput.
 ///
 /// Concurrency: frames arrive on the pane's reader thread while requests
 /// are sent from the main thread — all mutable state (pending map, ids,
@@ -30,7 +30,7 @@ enum ACPFailure: Error {
 /// bind wrong session ids. Replayed responses therefore never complete
 /// pending requests; notifications and server→client requests still
 /// route (transcript rebuild + permission revival).
-final class ACPClient {
+final class JSONRPCChannel {
     var onNotification: ((String, [String: Any]) -> Void)?
     /// server→client request (session/request_permission)
     var onRequest: ((Int, String, [String: Any]) -> Void)?
@@ -38,7 +38,7 @@ final class ACPClient {
 
     private let lock = NSLock()
     private var nextID = 1
-    private var pending: [Int: (Result<[String: Any], ACPFailure>) -> Void] = [:]
+    private var pending: [Int: (Result<[String: Any], RPCFailure>) -> Void] = [:]
     private var recentOut: [String] = []
     private var splitter = NdjsonSplitter()
     private static let echoRing = 32
@@ -49,8 +49,8 @@ final class ACPClient {
 
     /// `replay`: consuming ring history — see the replay-mode notes above.
     func feed(_ bytes: [UInt8], replay: Bool = false) {
-        var fired: [(Result<[String: Any], ACPFailure>,
-                     (Result<[String: Any], ACPFailure>) -> Void)] = []
+        var fired: [(Result<[String: Any], RPCFailure>,
+                     (Result<[String: Any], RPCFailure>) -> Void)] = []
         lock.lock()
         for line in splitter.feed(bytes) {
             if recentOut.contains(line) { continue }
@@ -91,7 +91,7 @@ final class ACPClient {
 
     @discardableResult
     func request(_ method: String, _ params: [String: Any],
-                 completion: @escaping (Result<[String: Any], ACPFailure>) -> Void) -> Int {
+                 completion: @escaping (Result<[String: Any], RPCFailure>) -> Void) -> Int {
         lock.lock()
         let id = nextID
         nextID += 1

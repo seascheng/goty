@@ -572,7 +572,7 @@ fn unwrap_runtime_argv(argv: &[String]) -> Option<String> {
 /// Agent panes need ECHO off (agent CLIs never manage termios). Rather
 /// than reaching for the master fd, run the command under `sh -c`: stty
 /// executes inside the pty itself, then exec replaces the shell. The
-/// client's echo filter (ACPClient.recentOut) tolerates the µs window
+/// client's echo filter (JSONRPCChannel.recentOut) tolerates the µs window
 /// before stty lands.
 fn echo_off_wrapper(shell: &str, args: &[String]) -> (String, Vec<String>) {
     fn quote(token: &str) -> String {

@@ -37,13 +37,13 @@ enum AgentTest {
               "split across chunks")
         check(splitter.feed(Array("x\r\ny\n".utf8)) == ["x", "y"], "CRLF trimmed")
 
-        print("— ACPClient echo filter + routing —")
-        let client = ACPClient()
+        print("— JSONRPCChannel echo filter + routing —")
+        let client = JSONRPCChannel()
         var notifications: [(String, [String: Any])] = []
         client.onNotification = { notifications.append(($0, $1)) }
         var outbound: [[UInt8]] = []
         client.onOutbound = { outbound.append($0) }
-        var got: Result<[String: Any], ACPFailure>?
+        var got: Result<[String: Any], RPCFailure>?
         client.request("initialize", ["protocolVersion": 1]) { got = $0 }
         let sentLine = String(decoding: outbound[0], as: UTF8.self)
         // stty 竞态窗口的回显：逐字节原样回来，必须被丢弃且不影响 pending
@@ -203,8 +203,8 @@ enum AgentTest {
         check(collected.count == 1 && collected[0].count == huge.count - 1,
               "2MB line survives chunked feed byte-exact")
 
-        print("— ACPClient replay suppression —")
-        let rc = ACPClient()
+        print("— JSONRPCChannel replay suppression —")
+        let rc = JSONRPCChannel()
         var replayed: [(String, [String: Any])] = []
         var liveResult: [String: Any]?
         var liveDone = false

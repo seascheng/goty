@@ -1,5 +1,5 @@
 // goty — see CLAUDE.md for the working principles.
-// End-to-end diagnostic: real Core chain (sessiond + PTY + ACPClient +
+// End-to-end diagnostic: real Core chain (sessiond + PTY + JSONRPCChannel +
 // AgentSession) → real AgentWebBridge → real WKWebView running the real
 // dist bundle. Runs session/load on the newest persisted omp session and
 // reads the store back. If blocks land short of the delegate event count,

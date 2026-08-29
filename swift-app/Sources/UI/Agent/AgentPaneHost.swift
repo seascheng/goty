@@ -219,7 +219,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
 
     // MARK: AgentSessionDelegate（Core 回调，切主线程再碰 UI）
 
-    func session(_ session: AgentSession, didEmit events: [AgentSessionEvent]) {
+    func session(_ session: AgentSessioning, didEmit events: [AgentSessionEvent]) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             for event in events {
@@ -232,7 +232,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         }
     }
 
-    func sessionDidFail(_ session: AgentSession, reason: String) {
+    func sessionDidFail(_ session: AgentSessioning, reason: String) {
         DispatchQueue.main.async { [weak self] in
             self?.bridge.push(["type": "working", "value": false])
             self?.bridge.push(["type": "status", "text": reason])

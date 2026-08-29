@@ -248,7 +248,8 @@ extension AgentSessionEvent {
     }
 }
 
+/// Dialect-neutral: the delegate never learns which adapter runs.
 protocol AgentSessionDelegate: AnyObject {
-    func session(_ session: AgentSession, didEmit events: [AgentSessionEvent])
-    func sessionDidFail(_ session: AgentSession, reason: String)
+    func session(_ session: AgentSessioning, didEmit events: [AgentSessionEvent])
+    func sessionDidFail(_ session: AgentSessioning, reason: String)
 }

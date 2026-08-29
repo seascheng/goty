@@ -40,7 +40,7 @@ final class AgentSession: AgentSessioning {
     private let daemon: SessionDaemon
     private let grid: SessionGrid
     private var pane: PaneSession?
-    private let client = ACPClient()
+    private let client = JSONRPCChannel()
     private(set) var sessionId: String?
     private(set) var isWorking = false
     private(set) var configOptions: [ACPConfigOption] = []
