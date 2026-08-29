@@ -260,21 +260,58 @@ final class WorkspaceStore {
 
 // MARK: - User shell environment
 
-/// The user's login-shell environment, captured once at first use. A GUI
-/// launched from launchd/automation inherits a minimal env; the user's zshrc
-/// (oh-my-zsh, prompts, version managers) misbehaves or hangs without the
-/// real PATH. Without this, shells hang mid-init and never print a prompt.
+/// The user's REAL shell environment, captured once. A GUI launched from
+/// Finder/launchd inherits a minimal environment — and the user's
+/// toolchain (homebrew, version managers) lives in `.zshrc`, which a
+/// NON-interactive `zsh -l -c` never sources. The old capture therefore
+/// returned the inherited ~20 vars on Finder launches and spawned agent
+/// CLIs with a PATH that could not find them: `omp: not found`, the pane
+/// process died instantly, and everything downstream (connect, history,
+/// resume) silently broke. Dev launches from a full shell masked this
+/// for the entire M1 development period.
+///
+/// Two countermeasures, both required:
+/// - capture INTERACTIVELY (`-l -i`): sources `.zshrc`, where the real
+///   PATH is set up;
+/// - capture from a CLEAN parent environment: what the GUI happens to
+///   inherit must not leak into (or be mistaken for) the user's setup.
+/// The result overrides the process environment per key, so basics like
+/// TMPDIR survive even when the capture comes up short.
 enum UserShellEnv {
-    static let cached: [String] = {
-        String(data: Shell.exec("/bin/zsh -l -c env").stdout, encoding: .utf8)?
-            .split(separator: "\n")
-            .map(String.init) ?? []
+    /// Fallback when the interactive capture fails (exotic setups):
+    /// the old non-interactive capture, then the inherited environment.
+    private static let captured: [String] = {
+        let home = ProcessInfo.processInfo.environment["HOME"]
+            ?? NSHomeDirectory()
+        let base = "HOME=\(Shell.forceQuoted(home)) USER=\(NSUserName()) "
+            + "LOGNAME=\(NSUserName()) SHELL=/bin/zsh TERM=xterm-256color"
+        for command in ["/bin/zsh -l -i -c env", "/bin/zsh -l -c env"] {
+            let result = Shell.exec("/usr/bin/env -i \(base) " + command)
+            let lines = String(data: result.stdout, encoding: .utf8)?
+                .split(separator: "\n")
+                .map(String.init) ?? []
+            // A working interactive capture always yields the real
+            // toolchain; a wedged .zshrc yields a handful of lines.
+            if lines.count >= 20 { return lines }
+        }
+        return []
     }()
 
-    /// KEY=VALUE lines parsed into a dictionary for SurfaceConfiguration.
-    static let asDictionary: [String: String] = Dictionary(uniqueKeysWithValues: cached.compactMap {
-        let parts = $0.split(separator: "=", maxSplits: 1)
-        guard parts.count == 2 else { return nil }
-        return (String(parts[0]), String(parts[1]))
-    })
+    /// Captured user env layered over the process environment. Values
+    /// with `=` survive (maxSplits 1); junk lines without `=` drop.
+    static let asDictionary: [String: String] = {
+        var merged = ProcessInfo.processInfo.environment
+        for line in captured {
+            let parts = line.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            merged[String(parts[0])] = String(parts[1])
+        }
+        return merged
+    }()
+
+    /// Warm the (multi-second, interactive-shell) capture off the main
+    /// thread at app start, so the first agent pane does not pay for it.
+    static func warmUp() {
+        DispatchQueue.global(qos: .utility).async { _ = asDictionary }
+    }
 }

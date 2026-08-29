@@ -229,6 +229,14 @@ enum AgentTest {
         check(session.bytesFed == 0 && session.eventsEmitted > 0,
               "events counted without frames fed")
         check(rc.messagesRouted == 3, "messages routed counted")
+        print("— UserShellEnv —")
+        // The Finder-launch regression: a non-interactive capture missed
+        // .zshrc, agent CLIs got a PATH without them and died instantly.
+        // The interactive capture must resolve the real toolchain PATH.
+        check(UserShellEnv.asDictionary["PATH"]?.contains("homebrew") == true,
+              "captured PATH resolves the user toolchain")
+        check(UserShellEnv.asDictionary["HOME"] != nil, "HOME present in merged env")
+
         print("— manifest —")
         let launch = AgentManifests.acpLaunch(for: "omp")
         check(launch?.command == "omp" && launch?.args == ["acp"], "omp acp launch")

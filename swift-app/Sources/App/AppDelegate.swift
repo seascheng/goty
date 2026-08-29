@@ -215,6 +215,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // marker to its daemon stream.
 
         wireSidebarActions()
+        // The interactive-shell env capture takes seconds; warm it off
+        // main so the first agent pane doesn't stall or miss the cache.
+        UserShellEnv.warmUp()
         wireTabStripActions()
 
         wireRightPanelActions()
