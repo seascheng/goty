@@ -278,21 +278,53 @@ final class WorkspaceStore {
 /// The result overrides the process environment per key, so basics like
 /// TMPDIR survive even when the capture comes up short.
 enum UserShellEnv {
-    /// Fallback when the interactive capture fails (exotic setups):
-    /// the old non-interactive capture, then the inherited environment.
+    /// Bounded child runner for the capture: stdin MUST be the null
+    /// device (an inherited TTY makes an interactive zsh wait on the
+    /// terminal forever — the launch-hang where the window never
+    /// appeared), output piped and drained, stderr discarded, and a hard
+    /// deadline after which the child is terminated. Nothing about a GUI
+    /// launch context may block this unboundedly.
+    private static func run(_ command: String, timeout: TimeInterval) -> String? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+        proc.arguments = ["-c", command]
+        proc.standardInput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        let out = Pipe()
+        proc.standardOutput = out
+        // Drain concurrently: a chatty .zshrc past the pipe buffer would
+        // deadlock a wait-first order.
+        let drained = DispatchSemaphore(value: 0)
+        var data = Data()
+        DispatchQueue.global(qos: .utility).async {
+            data = out.fileHandleForReading.readDataToEndOfFile()
+            drained.signal()
+        }
+        let exited = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in exited.signal() }
+        do { try proc.run() } catch { return nil }
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
+            proc.terminate()
+            if exited.wait(timeout: .now() + 0.3) == .timedOut { return nil }
+        }
+        _ = drained.wait(timeout: .now() + 1)
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Interactive capture first (the toolchain PATH lives in .zshrc),
+    /// non-interactive as fallback; both from a CLEAN parent environment
+    /// so inherited launch context neither helps nor hides. A capture
+    /// that yields fewer than ~20 lines was not a real user shell.
     private static let captured: [String] = {
         let home = ProcessInfo.processInfo.environment["HOME"]
             ?? NSHomeDirectory()
         let base = "HOME=\(Shell.forceQuoted(home)) USER=\(NSUserName()) "
-            + "LOGNAME=\(NSUserName()) SHELL=/bin/zsh TERM=xterm-256color"
-        for command in ["/bin/zsh -l -i -c env", "/bin/zsh -l -c env"] {
-            let result = Shell.exec("/usr/bin/env -i \(base) " + command)
-            let lines = String(data: result.stdout, encoding: .utf8)?
-                .split(separator: "\n")
-                .map(String.init) ?? []
-            // A working interactive capture always yields the real
-            // toolchain; a wedged .zshrc yields a handful of lines.
-            if lines.count >= 20 { return lines }
+            + "LOGNAME=\(NSUserName()) SHELL=/bin/zsh TERM=dumb"
+        for (command, budget) in [("/bin/zsh -l -i -c env", 8.0),
+                                  ("/bin/zsh -l -c env", 3.0)] {
+            guard let output = run("/usr/bin/env -i \(base) " + command, timeout: budget),
+                  output.split(separator: "\n").count >= 20 else { continue }
+            return output.split(separator: "\n").map(String.init)
         }
         return []
     }()
