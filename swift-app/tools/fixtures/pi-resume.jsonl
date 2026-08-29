@@ -1,0 +1,10 @@
+PI> {"type":"extension_ui_request","id":"3635e332-01f1-4c8e-8282-3bb655f8bc37","method":"setStatus","statusKey":"ponytail","statusText":"\u001b[38;2;102;102;102m○\u001b[39m 🐴 \u001b[38;2;128;128;128mponytail: \u001b[39m\u001b[38;2;212;212;212m⚡ FULL\u001b[39m"}
+PI> {"type":"extension_ui_request","id":"e36ba745-f1ea-40c8-97e2-3f46f68439ff","method":"notify","message":"Ponytail loaded: full","notifyType":"info"}
+PI> {"type":"extension_ui_request","id":"32f96a73-e47c-4e7b-a224-63ad4dc8acfa","method":"setWidget","widgetKey":"subagent-async"}
+PI> {"type":"extension_ui_request","id":"1ff93185-bf69-4159-b56b-51ae97209dbb","method":"setStatus","statusKey":"mcp"}
+PI> {"type":"extension_ui_request","id":"e52f1546-5165-49b9-9c03-dbc5e6c6c6a0","method":"setStatus","statusKey":"goal"}
+PI> {"type":"extension_ui_request","id":"2fefba45-b4cc-4ef3-b864-9c692be42380","method":"setStatus","statusKey":"pi-cache-stats","statusText":"· 1/1·0.0002M/0.02M 1.1%"}
+PI> {"type":"extension_ui_request","id":"c7d67aec-cd3e-4544-9f95-c398a68d1099","method":"setWidget","widgetKey":"autoresearch"}
+PI> {"type":"extension_ui_request","id":"87f5ad4a-2ea6-465c-9193-9157b050fc35","method":"setStatus","statusKey":"plan-mode"}
+PI> {"type":"extension_ui_request","id":"8bd8a3d1-6c38-4aba-8a3e-d06fcdf25f0d","method":"setWidget","widgetKey":"plan-mode-plan"}
+PI> {"id":"m1","type":"response","command":"get_messages","success":true,"data":{"messages":[{"role":"user","content":[{"type":"text","text":"Reply with exactly HELLO_PI and nothing else"}],"timestamp":1787974503877},{"role":"assistant","content":[{"type":"text","text":"HELLO_PI"}],"api":"anthropic-messages","provider":"zai-glm","model":"glm-5.3","usage":{"input":16847,"output":5,"cacheRead":192,"cacheWrite":0,"totalTokens":17044,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0},"cacheWrite1h":0},"stopReason":"stop","timestamp":1787974503908,"responseId":"msg_20260829113504c366ecfe01e84b5b","rawStopReason":"end_turn"}]}}
