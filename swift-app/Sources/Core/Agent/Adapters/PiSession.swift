@@ -157,6 +157,10 @@ final class PiSession: AgentSessioning {
                 // messages through the mapper once the new process answers.
                 self.pane?.close()
                 self.pane = nil
+                // Pane id is daemon identity (attach-or-spawn): kill the
+                // old process or the reopen would ATTACH to it — a fresh
+                // --session spawn never happens.
+                self.daemon.killPane(id: self.paneId)
                 self.openPane(resume: sessionId) { [weak self] ok in
                     guard let self, ok else {
                         completion?(false)

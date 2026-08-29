@@ -32,6 +32,9 @@ enum RPCFailure: Error {
 /// route (transcript rebuild + permission revival).
 final class JSONRPCChannel {
     var onNotification: ((String, [String: Any]) -> Void)?
+    /// Non-JSON output lines (agent stderr merges into the pane);
+    /// counted always, surfaced for death-message diagnosis.
+    var onUnparseable: ((String) -> Void)?
     /// server→client request (session/request_permission)
     var onRequest: ((Int, String, [String: Any]) -> Void)?
     var onOutbound: (([UInt8]) -> Void)?
@@ -48,9 +51,17 @@ final class JSONRPCChannel {
     private(set) var unparseableLines = 0
 
     /// `replay`: consuming ring history — see the replay-mode notes above.
+    /// ALL callbacks (completions, notifications, requests) fire OUTSIDE
+    /// the lock: a consumer may answer a server request synchronously
+    /// (respond → send → same lock) or chain follow-ups — under the lock
+    /// that is a guaranteed self-deadlock (codex hit it on its first
+    /// server request; 2026-08-29).
     func feed(_ bytes: [UInt8], replay: Bool = false) {
         var fired: [(Result<[String: Any], RPCFailure>,
                      (Result<[String: Any], RPCFailure>) -> Void)] = []
+        var routed: [(Int, String, [String: Any])] = []
+        var notified: [(String, [String: Any])] = []
+        var unparseable: [String] = []
         lock.lock()
         for line in splitter.feed(bytes) {
             if recentOut.contains(line) { continue }
@@ -58,15 +69,16 @@ final class JSONRPCChannel {
                   let json = try? JSONSerialization.jsonObject(with: data),
                   let message = json as? [String: Any] else {
                 unparseableLines += 1
+                unparseable.append(line)
                 continue
             }
             messagesRouted += 1
             if let method = message["method"] as? String {
                 let params = message["params"] as? [String: Any] ?? [:]
                 if let id = message["id"] as? Int {
-                    onRequest?(id, method, params)
+                    routed.append((id, method, params))
                 } else {
-                    onNotification?(method, params)
+                    notified.append((method, params))
                 }
                 continue
             }
@@ -83,10 +95,10 @@ final class JSONRPCChannel {
             }
         }
         lock.unlock()
-        // Outside the lock: completions chain follow-up requests.
-        for (result, completion) in fired {
-            completion(result)
-        }
+        for line in unparseable { onUnparseable?(line) }
+        for (method, params) in notified { onNotification?(method, params) }
+        for (id, method, params) in routed { onRequest?(id, method, params) }
+        for (result, completion) in fired { completion(result) }
     }
 
     @discardableResult
@@ -112,13 +124,17 @@ final class JSONRPCChannel {
 
     private func send(_ message: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: message),
-              var line = String(data: data, encoding: .utf8) else { return }
-        line.append("\n")
-        let bytes = Array(line.utf8)
+              let line = String(data: data, encoding: .utf8) else { return }
         lock.lock()
+        // Ring stores the BARE line — the same shape NdjsonSplitter
+        // yields on the way in (terminator stripped, \r trimmed). The
+        // ring used to store the "\n"-terminated wire form and never
+        // matched a single echo (codex proved it: the echoed initialize
+        // parsed as a server request, got answered, and the empty
+        // response completed our own pending handshake).
         recentOut.append(line)
         if recentOut.count > Self.echoRing { recentOut.removeFirst(recentOut.count - Self.echoRing) }
         lock.unlock()
-        onOutbound?(bytes)
+        onOutbound?(Array((line + "\n").utf8))
     }
 }

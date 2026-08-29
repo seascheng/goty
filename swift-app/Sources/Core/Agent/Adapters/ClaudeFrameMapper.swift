@@ -23,6 +23,10 @@ final class ClaudeFrameMapper {
     /// Integrity accounting (agenttest asserts these).
     private(set) var framesRouted = 0
     private(set) var framesIgnored = 0
+    /// result.result repeats the last assistant text on success AND on
+    /// error runs (claude's error message arrives in an assistant frame
+    /// first) — emit it once.
+    private var lastAssistantText = ""
 
     func map(_ frame: [String: Any]) -> [AgentSessionEvent] {
         framesRouted += 1
@@ -87,6 +91,7 @@ final class ClaudeFrameMapper {
             switch kind {
             case "text":
                 if let text = block["text"] as? String, !text.isEmpty {
+                    lastAssistantText = text
                     events.append(.messageChunk(text))
                 }
             case "thinking":
@@ -147,7 +152,8 @@ final class ClaudeFrameMapper {
         sessionId = frame["session_id"] as? String ?? sessionId
         var events: [AgentSessionEvent] = []
         if frame["is_error"] as? Bool == true,
-           let text = frame["result"] as? String, !text.isEmpty {
+           let text = frame["result"] as? String, !text.isEmpty,
+           text != lastAssistantText {
             // The assistant text of a failed run would never arrive as an
             // assistant frame — the result string is all claude gives.
             events.append(.messageChunk(text))

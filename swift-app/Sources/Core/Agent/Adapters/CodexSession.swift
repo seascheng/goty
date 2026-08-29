@@ -39,7 +39,15 @@ final class CodexSession: AgentSessioning {
         self.daemon = params.daemon
         self.grid = AgentSession.fixedGrid
         client.onOutbound = { [weak self] in self?.pane?.sendInput($0) }
+        client.onUnparseable = { line in
+            if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                print("CODEX_UNPARSEABLE \(line.prefix(300))")
+            }
+        }
         client.onNotification = { [weak self] method, params in
+            if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                print("CODEX_NOTIF \(method)")
+            }
             self?.handleNotification(method: method, params: params)
         }
         client.onRequest = { [weak self] id, method, params in
@@ -76,6 +84,9 @@ final class CodexSession: AgentSessioning {
         pane?.start()
         client.request("initialize",
                        ["clientInfo": ["name": "goty", "version": "1"]]) { [weak self] result in
+            if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                print("CODEX initialize result: \(result)")
+            }
             guard let self, case .success = result else {
                 self?.delegate?.sessionDidFail(self!, reason: "codex initialize 失败")
                 completion?(false)
@@ -90,6 +101,9 @@ final class CodexSession: AgentSessioning {
         var params: [String: Any] = ["cwd": cwd ?? NSHomeDirectory()]
         if let modelOverride { params["model"] = modelOverride }
         client.request("thread/start", params) { [weak self] result in
+            if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                print("CODEX thread/start result: \(result)")
+            }
             guard let self, case .success(let value) = result,
                   let thread = value["thread"] as? [String: Any],
                   let id = thread["id"] as? String else {
@@ -205,6 +219,10 @@ final class CodexSession: AgentSessioning {
     // MARK: - plumbing
 
     private func handleTransportFrame(kind: UInt8, data: Data) {
+        if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil,
+           kind == SessionOutputKind.output {
+            print("CODEX_RAW \(String(decoding: data.prefix(200), as: UTF8.self))")
+        }
         switch kind {
         case SessionOutputKind.output:
             client.feed([UInt8](data))
@@ -230,6 +248,14 @@ final class CodexSession: AgentSessioning {
     }
 
     private func handleServerRequest(id: Int, method: String, params: [String: Any]) {
+        // Echo artifacts: these are methods WE initiate — a frame with
+        // one of them plus an id is our own request bouncing back past
+        // the echo ring, never a codex request. Answering it would
+        // complete our own pending handshake with an empty result.
+        let clientMethods: Set<String> = ["initialize", "initialized", "thread/start",
+                                          "thread/resume", "thread/read", "thread/list",
+                                          "turn/start", "turn/interrupt", "model/list"]
+        guard !clientMethods.contains(method) else { return }
         guard method.hasSuffix("requestApproval") || method.hasSuffix("requestUserInput") else {
             client.respond(id: id, result: [:])
             return

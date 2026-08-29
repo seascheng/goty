@@ -41,14 +41,20 @@ enum AgentTest {
         let client = JSONRPCChannel()
         var notifications: [(String, [String: Any])] = []
         client.onNotification = { notifications.append(($0, $1)) }
+        // Mirror the codex adapter: answer server requests synchronously
+        // — the deadlock shape (respond inside feed's callback) must hold.
+        client.onRequest = { id, _, _ in client.respond(id: id, result: [:]) }
         var outbound: [[UInt8]] = []
         client.onOutbound = { outbound.append($0) }
         var got: Result<[String: Any], RPCFailure>?
         client.request("initialize", ["protocolVersion": 1]) { got = $0 }
         let sentLine = String(decoding: outbound[0], as: UTF8.self)
-        // stty 竞态窗口的回显：逐字节原样回来，必须被丢弃且不影响 pending
-        client.feed(Array(sentLine.utf8))
-        check(notifications.isEmpty, "echoed request dropped")
+        let routedBefore = client.messagesRouted
+        // stty 竞态窗口的回显：逐字节原样回来（PTY 会加 \r），必须被
+        // 丢弃——不解码成服务器请求、不触发应答、不碰 pending。
+        client.feed(Array(sentLine.replacingOccurrences(of: "\n", with: "\r\n").utf8))
+        check(client.messagesRouted == routedBefore && notifications.isEmpty,
+              "echoed request dropped (CRLF form)")
         check(got == nil, "echo does not complete the pending request")
         client.feed(Array("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1}}\n".utf8))
         var completed = false

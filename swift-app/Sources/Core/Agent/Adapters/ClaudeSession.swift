@@ -51,6 +51,29 @@ final class ClaudeSession: AgentSessioning {
         channel.onFrame = { [weak self] frame in
             self?.handleFrame(frame)
         }
+        channel.onUnparseable = { line in
+            if ProcessInfo.processInfo.environment["GOTY_CLAUDE_DEBUG"] != nil {
+                print("CLAUDE_UNPARSEABLE \(line.prefix(300))")
+            }
+        }
+    }
+
+    /// claude refuses TTY stdin under --print ("Input must be provided
+    /// through stdin or as a prompt argument" — panes are PTYs). The
+    /// bash process substitution feeds claude a PIPE stdin (cat
+    /// forwards the PTY), keeping the single-process multi-turn stream
+    /// while satisfying the non-TTY check.
+    static func shellCommand(model: String?, resume: String?) -> (String, [String]) {
+        var cmd = "exec claude --print --input-format stream-json "
+            + "--output-format stream-json --verbose"
+        if let model, model.allSatisfy({ c in c.isLetter || c.isNumber || ".-_".contains(c) }) {
+            cmd += " --model \(model)"
+        }
+        if let resume, resume.allSatisfy({ $0.isHexDigit || $0 == "-" }) {
+            cmd += " --resume \(resume)"
+        }
+        cmd += " < <(cat)"
+        return ("/bin/bash", ["-c", cmd])
     }
 
     private func argv(resume: String?) -> [String] {
@@ -77,8 +100,10 @@ final class ClaudeSession: AgentSessioning {
     }
 
     private func openPane(resume: String?, completion: ((Bool) -> Void)?) {
+        let (shell, shellArgs) = ClaudeSession.shellCommand(model: modelOverride,
+                                                             resume: resume)
         pane = daemon.openPane(
-            id: paneId, cwd: cwd, shell: "claude", args: argv(resume: resume),
+            id: paneId, cwd: cwd, shell: shell, args: shellArgs,
             environment: environment, grid: grid,
             noEcho: true, ringBytes: 16_777_216,
             onFrame: { [weak self] kind, data in
@@ -108,6 +133,9 @@ final class ClaudeSession: AgentSessioning {
         // resumed spawn is the only way onward.
         if !processAlive, let sessionId {
             resumeSessionId = sessionId
+            pane?.close()
+            pane = nil
+            daemon.killPane(id: paneId)
             openPane(resume: sessionId, completion: nil)
         }
         channel.send(["type": "user",
@@ -171,6 +199,10 @@ final class ClaudeSession: AgentSessioning {
                 self.emit(events + [.configChanged(self.configOptions)])
                 self.pane?.close()
                 self.pane = nil
+                // Pane id is daemon identity (attach-or-spawn): kill the
+                // old process or the reopen would ATTACH to it — a fresh
+                // --resume/--session spawn never happens.
+                self.daemon.killPane(id: self.paneId)
                 self.openPane(resume: sessionId, completion: completion)
             }
         }
@@ -205,6 +237,11 @@ final class ClaudeSession: AgentSessioning {
 
     private func handleFrame(_ frame: [String: Any]) {
         framesRouted += 1
+        if ProcessInfo.processInfo.environment["GOTY_CLAUDE_DEBUG"] != nil {
+            let kind = (frame["type"] as? String) ?? "?"
+            let sub = (frame["subtype"] as? String) ?? ""
+            print("CLAUDE_FRAME \(kind)/\(sub) keys=\(frame.keys.sorted().joined(separator: ","))")
+        }
         // Permission requests ride control_request frames.
         if frame["type"] as? String == "control_request",
            let payload = frame["payload"] as? [String: Any],

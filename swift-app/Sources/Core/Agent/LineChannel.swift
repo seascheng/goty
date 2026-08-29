@@ -15,6 +15,10 @@ import Foundation
 final class LineChannel {
     /// Every parsed inbound frame, on the pane's reader thread.
     var onFrame: (([String: Any]) -> Void)?
+    /// Non-JSON output lines (agent stderr merges into the pane). These
+    /// are COUNTED always; the callback lets adapters surface death
+    /// messages instead of losing them to the garbage guard.
+    var onUnparseable: ((String) -> Void)?
     var onOutbound: (([UInt8]) -> Void)?
 
     private let lock = NSLock()
@@ -39,6 +43,7 @@ final class LineChannel {
                   let json = try? JSONSerialization.jsonObject(with: data),
                   let frame = json as? [String: Any] else {
                 unparseableLines += 1
+                onUnparseable?(line)
                 continue
             }
             framesRouted += 1
@@ -52,13 +57,13 @@ final class LineChannel {
 
     func send(_ frame: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: frame),
-              var line = String(data: data, encoding: .utf8) else { return }
-        line.append("\n")
-        let bytes = Array(line.utf8)
+              let line = String(data: data, encoding: .utf8) else { return }
         lock.lock()
+        // Bare line, matching NdjsonSplitter's output shape — see
+        // JSONRPCChannel.send for why the terminated form never matched.
         recentOut.append(line)
         if recentOut.count > Self.echoRing { recentOut.removeFirst(recentOut.count - Self.echoRing) }
         lock.unlock()
-        onOutbound?(bytes)
+        onOutbound?(Array((line + "\n").utf8))
     }
 }
