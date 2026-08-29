@@ -13,7 +13,7 @@ final class OutputTail {
     /// arrive as UnsafeBufferPointer over the IPC Data) — one copy into
     /// the ring, no intermediate Array allocation per frame.
     func append(_ bytes: UnsafeBufferPointer<UInt8>) {
-        guard let base = bytes.baseAddress, bytes.count > 0 else { return }
+        guard bytes.count > 0 else { return }
         lock.lock()
         ring.append(contentsOf: bytes)
         if ring.count > Self.capacity {

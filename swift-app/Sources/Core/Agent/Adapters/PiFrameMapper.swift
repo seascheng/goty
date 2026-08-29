@@ -169,7 +169,7 @@ final class PiFrameMapper {
         if let blocks = raw as? [[String: Any]] {
             return blocks.compactMap { AgentContent($0) }
         }
-        if raw != nil, let json = try? JSONSerialization.data(withJSONObject: raw),
+        if let raw, let json = try? JSONSerialization.data(withJSONObject: raw),
            let text = String(data: json, encoding: .utf8) {
             return [AgentContent(type: "text", text: text, path: nil)]
         }

@@ -49,13 +49,14 @@ enum HostFlyout {
 
         // Click-outside dismissal: global (other apps) + local (our own
         // windows — the global monitor never sees those).
-        monitors.append(NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { _ in
+        let global = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { _ in
             close()
-        })
-        monitors.append(NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
+        }
+        let local = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
             if event.window !== p { close() }
             return event
-        })
+        }
+        monitors.append(contentsOf: [global, local].compactMap { $0 })
     }
 
     static func close() {
