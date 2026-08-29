@@ -118,13 +118,28 @@ final class CodexSession: AgentSessioning {
                                                         category: nil,
                                                         currentValue: model, options: [])]
             }
-            self.emit([.configChanged(self.configOptions), .ready])
+            var readyEvents: [AgentSessionEvent] = [.configChanged(self.configOptions), .ready]
+            // v1 command directory: /compact maps to thread/compact/start
+            // (codex exposes no command-list RPC; skills arrive later).
+            let compact = AgentSlashCommand(
+                name: "compact",
+                description: "压缩对话以释放上下文",
+                inputHint: nil)
+            self.commands = [compact]
+            readyEvents.append(.commandsChanged([compact]))
+            self.emit(readyEvents)
             completion?(true)
         }
     }
 
     func send(_ text: String) {
         guard let threadId, !isWorking else { return }
+        // Builtin slash handling: app-server takes raw text; /compact
+        // is ours to translate.
+        if text.trimmingCharacters(in: .whitespacesAndNewlines) == "/compact" {
+            client.request("thread/compact/start", ["threadId": threadId]) { _ in }
+            return
+        }
         isWorking = true
         client.request("turn/start", [
             "threadId": threadId,

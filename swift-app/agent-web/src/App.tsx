@@ -338,13 +338,15 @@ function Composer({ working }: { working: boolean }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
 
+  const atMatch = /@([\w./-]*)$/.exec(text);
+  const atOpen = atMatch != null && !dismissed;
   const slashQuery = /^\/[\w-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
   const slashMatches = slashQuery == null ? [] :
     store.commands.filter((c) => c.name.toLowerCase().startsWith(slashQuery));
-  const slashOpen = slashQuery != null && slashMatches.length > 0 && !dismissed;
+  // Opens even on zero matches: a silent no-op on "/" hid the feature
+  // entirely on agents without a command directory (codex pre-skills).
+  const slashOpen = slashQuery != null && !dismissed && !atOpen;
 
-  const atMatch = /@([\w./-]*)$/.exec(text);
-  const atOpen = atMatch != null && !dismissed;
   const atQuery = (atMatch?.[1] ?? "").toLowerCase();
   const atMatches = atOpen
     ? store.files.filter((f) => f.toLowerCase().includes(atQuery)).slice(0, 8)
@@ -492,6 +494,13 @@ function Composer({ working }: { working: boolean }) {
         )}
         {slashOpen && (
           <div className="slash-pop">
+            {slashMatches.length === 0 && (
+              <div className="slash-desc">
+                {store.commands.length === 0
+                  ? "该 agent 暂无可用指令目录"
+                  : `无匹配“${slashQuery}”的指令`}
+              </div>
+            )}
             {slashMatches.map((c, i) => (
               <button key={c.name}
                 ref={(el) => { if (i === slashIndex && el) el.scrollIntoView({ block: "nearest" }); }}

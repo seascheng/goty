@@ -96,9 +96,12 @@ final class PiSession: AgentSessioning {
             }
             self.emit(events)
             self.request("get_commands") { [weak self] response in
-                guard let self,
-                      response["success"] as? Bool == true,
-                      let data = response["data"] as? [[String: Any]] else { return }
+                guard let self, response["success"] as? Bool == true else { return }
+                // Response wraps the list: {"commands":[…]} (verified
+                // live); a bare array is tolerated for forward compat.
+                let payload = response["data"] as? [String: Any]
+                let data = (payload?["commands"] as? [[String: Any]])
+                    ?? (response["data"] as? [[String: Any]]) ?? []
                 let commands: [AgentSlashCommand] = data.compactMap { raw in
                     guard let name = raw["name"] as? String else { return nil }
                     return AgentSlashCommand(name: name,

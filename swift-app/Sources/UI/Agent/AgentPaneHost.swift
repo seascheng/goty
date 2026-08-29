@@ -109,6 +109,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         bridge.onSend = { [weak self] text in
             guard let self else { return }
             self.bridge.push(["type": "working", "value": true])
+            self.onWorkingChange?(true)
             self.session.send(text)
         }
         bridge.onStop = { [weak self] in self?.session.cancel() }
@@ -302,6 +303,11 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     // watchdog (configChanged arrives even when an
                     // adapter omits ready).
                     self.handshakeDone = true
+                    if case .ready = event { self.onWorkingChange?(false) }
+                case .turnEnded:
+                    // Sidebar status follows the turn lifecycle — the
+                    // sessiond agent integration only reports omp.
+                    self.onWorkingChange?(false)
                 default:
                     break
                 }
@@ -318,6 +324,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         DispatchQueue.main.async { [weak self] in
             self?.bridge.push(["type": "working", "value": false])
             self?.bridge.push(["type": "status", "text": reason])
+            self?.onWorkingChange?(false)
         }
     }
 }

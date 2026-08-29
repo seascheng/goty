@@ -46,6 +46,8 @@ enum AgentProbe {
                         case .turnEnded:
                             self.turnsEnded += 1
                             print("PROBE  turnEnded #\(self.turnsEnded)")
+                        case .commandsChanged(let commands):
+                            print("PROBE  commands=\(commands.count) first=\(commands.first?.name ?? "none")")
                         default:
                             break
                         }
