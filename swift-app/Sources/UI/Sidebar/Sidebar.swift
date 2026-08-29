@@ -321,7 +321,7 @@ final class SidebarView: NSView {
             item.isEnabled = entry.available
             if !entry.available { item.toolTip = "\(entry.key) 不在 PATH" }
             item.representedObject = [entry.key, dir]
-            item.image = AgentBrandIcons.image(for: entry.key)
+            item.image = AgentBrandIcons.menuImage(for: entry.key)
             menu.addItem(item)
         }
         return menu

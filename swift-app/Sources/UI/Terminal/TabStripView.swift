@@ -122,7 +122,7 @@ final class TabStripView: NSView {
             item.representedObject = entry.key
             item.isEnabled = entry.available
             if !entry.available { item.toolTip = "\(entry.key) 不在 PATH" }
-            item.image = AgentBrandIcons.image(for: entry.key)
+            item.image = AgentBrandIcons.menuImage(for: entry.key)
             menu.addItem(item)
         }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.maxY + 4),

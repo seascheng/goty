@@ -54,7 +54,7 @@ extension AppDelegate {
             item.representedObject = command
             // Official brand logo when the asset exists (AgentIcons.swift),
             // SF Symbol otherwise.
-            item.image = AgentBrandIcons.image(for: command)
+            item.image = AgentBrandIcons.menuImage(for: command)
                 ?? menuItemIcon(spec.icon, pointSize: 11)
             agentMenu.addItem(item)
         }

@@ -27,3 +27,16 @@ extension AgentBrandIcons {
         return "data:image/png;base64," + png.base64EncodedString()
     }
 }
+
+extension AgentBrandIcons {
+    /// Menu-slot size: NSMenuItem draws at image.size, and brand images
+    /// are 18pt — dwarfing the 10-11pt SF Symbols next to them in the
+    /// same menu. The 18pt image stays the sidebar-row size.
+    /// (Lives here, not in the GENERATED AgentIcons.swift.)
+    static func menuImage(for kind: String?) -> NSImage? {
+        guard let image = image(for: kind) else { return nil }
+        let small = image.copy() as! NSImage
+        small.size = NSSize(width: 11, height: 11)
+        return small
+    }
+}

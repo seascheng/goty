@@ -50,7 +50,7 @@ enum AgentRegistry {
     static let descriptors: [AgentDescriptor] = [
         AgentDescriptor(
             key: "omp",
-            label: "omp (GUI)",
+            label: "OMP",
             binary: "omp",
             spawn: AgentSpawn(command: "omp", args: ["acp"], ringBytes: 67_108_864),
             make: { params in
