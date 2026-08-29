@@ -42,19 +42,24 @@ enum AgentTheme {
             "diff-added": hex(t.gitAdded),
             "diff-removed": hex(t.gitRemoved),
             // Terminal-parity translucency: the page paints its body at
-            // the config's background-opacity and blurs by the config's
-            // radius (0 when disabled — blur(0px) composites as none).
+            // the config's background-opacity; blur ships as a full
+            // filter value (or "none") — see blurFilter().
             "bg-alpha": String(format: "%.2f", t.backgroundOpacity),
-            "blur": "\(blurRadius())",
+            "blur": blurFilter(),
         ]
     }
 
-    private static func blurRadius() -> Int {
-        guard let conf = liveGhostty?.config else { return 0 }
+    /// The full backdrop-filter value, or an explicit "none": installing
+    /// blur(0px) is NOT a no-op — any filter function forces WebKit's
+    /// backdrop-sampling compositing path, which on a transparent
+    /// WKWebView re-samples the native content behind it erratically on
+    /// every repaint (the "pane background changes by itself" report).
+    private static func blurFilter() -> String {
+        guard let conf = liveGhostty?.config else { return "none" }
         switch conf.backgroundBlur {
-        case .disabled: return 0
-        case .radius(let r): return Int(r)
-        default: return 20   // glass styles: a CSS approximation
+        case .disabled: return "none"
+        case .radius(let r): return "blur(\(Int(r))px)"
+        default: return "blur(20px)"   // glass styles: a CSS approximation
         }
     }
 

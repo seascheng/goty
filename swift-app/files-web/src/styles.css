@@ -11,7 +11,7 @@
   --border: #252b2a;
   --border-accent: #2f3534;
   --bg-alpha: 1;
-  --blur: 0px;
+  --blur: none;
   --surface1: color-mix(in srgb, var(--surface0) 96%, var(--foreground));
   --surface2: color-mix(in srgb, var(--surface0) 91%, var(--foreground));
   --surface3: color-mix(in srgb, var(--surface0) 78%, var(--foreground));
@@ -48,14 +48,16 @@
 html, body, #root { height: 100%; margin: 0; }
 html { background: transparent; }
 body {
-  /* background-opacity/blur parity with the terminal: Swift pushes
-     --bg-alpha and --blur alongside the palette; the webview paints
-     no background of its own (drawsBackground off), so this layer
-     composites over the window's translucency and blurs whatever
-     sits behind the pane. */
+  /* background-opacity parity with the terminal: Swift pushes --bg-alpha
+     alongside the palette; the webview paints no background of its own
+     (drawsBackground off), so this layer composites over the window's
+     translucency. --blur is a FULL filter value ("blur(Npx)") or an
+     explicit "none" — a bare blur(0px) still forces WebKit's
+     backdrop-sampling path, which on a transparent webview re-samples
+     erratically on every repaint (background visibly shifting). */
   background:
     color-mix(in srgb, var(--surface0) calc(var(--bg-alpha, 1) * 100%), transparent);
-  -webkit-backdrop-filter: blur(var(--blur, 0px));
+  -webkit-backdrop-filter: var(--blur, none);
   color: var(--foreground);
   font: 13px/1.5 -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
   -webkit-font-smoothing: antialiased;
