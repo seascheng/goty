@@ -261,6 +261,7 @@ class Store {
     ]);
     if (handshakeSignals.has(event.type)) this.starting = null;
     switch (event.type) {
+      case "userMessage": this.push({ kind: "user", text: event.text }); break;
       case "userChunk":
         this.userTail(event.text); break;
       case "agentChunk":
@@ -317,6 +318,13 @@ class Store {
           else root.style.setProperty(`--${k}`, v);
         }
         break;
+      }
+      default: {
+        // Exhaustiveness guard: a swallowed case (an edit once ate
+        // userMessage — sent messages vanished from the transcript)
+        // must fail the BUILD, not ship silently.
+        const exhaustive: never = event;
+        void exhaustive;
       }
     }
   }

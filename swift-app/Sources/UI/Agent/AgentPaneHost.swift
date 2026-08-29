@@ -43,6 +43,10 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     /// explicit starting chip — a hung MCP server must read as
     /// "starting", never as silent nothing (the claude+serena hang).
     private var handshakeDone = false
+    /// Themed cover ABOVE the webview until the page has painted; see
+    /// the setup comment for why a fill below cannot work.
+    private let coverView = NSView()
+
 
     init(key: HostKey, session: any AgentSessioning, agentLabel: String) {
         self.hostKey = key
@@ -64,9 +68,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
 
         super.init(frame: .zero)
         wantsLayer = true
-        // Themed placeholder behind the transparent webview: without it
-        // the pane is clear until first paint — the full-black agent
-        // pane flash. The page paints the same family of color over it.
+        // Themed placeholder behind the transparent webview.
         layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
 
         webView.translatesAutoresizingMaskIntoConstraints = false
@@ -77,13 +79,32 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             webView.trailingAnchor.constraint(equalTo: trailingAnchor),
             webView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
-
+        // …and ABOVE it: WKWebView's own compositing layer paints black
+        // until the content process renders (verified live — a fill
+        // UNDER the webview never shows), so the placeholder has to
+        // cover it. Dropped one beat after the page's ready signal
+        // (React 18 commit is scheduled, not synchronous).
+        coverView.wantsLayer = true
+        coverView.layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        coverView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(coverView)
+        NSLayoutConstraint.activate([
+            coverView.topAnchor.constraint(equalTo: topAnchor),
+            coverView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            coverView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            coverView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
         session.delegate = self
         // Theme first: the page's palette lands before any queued
         // transcript events (push order is preserved).
         bridge.onReady = { [weak self] in
             self?.pushTheme()
             self?.pushMeta()
+            // Drop the cover one beat after the ready signal: React's
+            // first commit is scheduled, not synchronous.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self?.coverView.removeFromSuperview()
+            }
         }
         bridge.onSend = { [weak self] text in
             guard let self else { return }
@@ -231,6 +252,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
 
     func retheme() {
         layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        coverView.layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
         pushTheme()
         pushMeta()   // the icon tint is theme-derived
     }
