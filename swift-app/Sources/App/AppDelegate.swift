@@ -277,10 +277,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeGhosttyNotifications()
 
         NSApp.activate(ignoringOtherApps: true)
-        // Boot focus: the active pane takes the keyboard from the start
-        // (agent panes otherwise sit deaf until a tab round-trip).
+        // Boot focus (responder side): the ACTIVE pane takes the
+        // keyboard — visibleHosts.first would deafen every restored
+        // pane that is not the first grid item. The page focuses its
+        // composer on mount (DOM side); both layers are needed.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.wc?.terminalArea.paneGrid.visibleHosts.first?.focusAsPane()
+            guard let self, let area = self.wc?.terminalArea else { return }
+            let hosts = area.paneGrid.visibleHosts
+            let activeId = self.coordinator.store?.focused.flatMap {
+                self.coordinator.activePane(of: $0)?.id
+            }
+            let target = hosts.first(where: { $0.hostKey.pane == activeId }) ?? hosts.first
+            target?.focusAsPane()
         }
 
     }

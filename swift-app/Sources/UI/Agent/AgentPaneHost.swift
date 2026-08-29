@@ -105,6 +105,15 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 self?.coverView.removeFromSuperview()
             }
+            if ProcessInfo.processInfo.environment["GOTY_FOCUS_DEBUG"] != nil {
+                self?.dumpFocusState("pageReady")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    self?.dumpFocusState("t+1.5s")
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                    self?.dumpFocusState("t+5s")
+                }
+            }
         }
         bridge.onSend = { [weak self] text in
             guard let self else { return }
@@ -292,6 +301,19 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     }
 
     // MARK: AgentSessionDelegate（Core 回调，切主线程再碰 UI）
+
+    /// GOTY_FOCUS_DEBUG: dump every link of the focus chain for this
+    /// pane — window responder, webview responder, page activeElement.
+    func dumpFocusState(_ tag: String) {
+        guard ProcessInfo.processInfo.environment["GOTY_FOCUS_DEBUG"] != nil else { return }
+        let fr = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
+        print("FOCUS[\(agentLabel)] \(tag): windowFR=\(fr) webViewIsFR=\(window?.firstResponder === webView)")
+        webView.evaluateJavaScript(
+            "document.activeElement ? document.activeElement.tagName + '.' + (document.activeElement.className || '') : 'none'"
+        ) { r, err in
+            print("FOCUS[\(self.agentLabel)] \(tag): pageActive=\(err.map { "ERR \($0)" } ?? (r as? String ?? "nil"))")
+        }
+    }
 
     func session(_ session: AgentSessioning, didEmit events: [AgentSessionEvent]) {
         DispatchQueue.main.async { [weak self] in

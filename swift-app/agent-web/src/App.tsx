@@ -338,6 +338,14 @@ function Composer({ working }: { working: boolean }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
 
+  // Boot focus (DOM side): the app focuses the webview (responder
+  // level); without this the page's activeElement stays BODY and every
+  // keystroke dies — the "restored pane ignores the keyboard" report.
+  // Chat-surface convention: the composer is where typing goes.
+  useEffect(() => {
+    ref.current?.focus();
+  }, []);
+
   const atMatch = /@([\w./-]*)$/.exec(text);
   const atOpen = atMatch != null && !dismissed;
   const slashQuery = /^\/[\w-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
