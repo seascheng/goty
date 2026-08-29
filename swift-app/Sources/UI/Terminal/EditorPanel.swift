@@ -152,9 +152,15 @@ final class EditorPanelView: NSView, ThemeRefreshable {
         dirtyDot.translatesAutoresizingMaskIntoConstraints = false
         headerBackground.addSubview(dirtyDot)
 
-        let close = IconButton.make("xmark", pointSize: 11) { [weak self] in
+        // The close glyph earns a bigger tile than the 22pt toolbar
+        // norm: xmark is a thin small-inked shape (arrows read fine at
+        // 11pt; a 11pt xmark all but disappears), so 24pt/12pt with
+        // full foreground ink.
+        let close = IconButton.make("xmark", pointSize: 12) { [weak self] in
             self?.hide()
         }
+        close.tint = .labelColor
+        close.usesThemeTint = false
         close.toolTip = "Back to terminal (Esc)"
         headerBackground.addSubview(close)
         saveButton.onClick = { [weak self] in self?.save() }
@@ -242,9 +248,9 @@ final class EditorPanelView: NSView, ThemeRefreshable {
             // One group, one width: Save never reads narrower than the
             // Preview beside it (autolayout resolves to the wider label).
             saveButton.widthAnchor.constraint(equalTo: previewButton.widthAnchor),
-            close.widthAnchor.constraint(equalToConstant: 22),
-            // Status-bar group reads as one control row: equal widths
-            // (resolves to the widest label shown).
+            close.widthAnchor.constraint(equalToConstant: 24),
+            close.heightAnchor.constraint(equalToConstant: 24),
+            // Status-bar group: one control row, equal widths.
             reloadButton.widthAnchor.constraint(equalTo: keepButton.widthAnchor),
             keepButton.widthAnchor.constraint(equalTo: wrapButton.widthAnchor),
             wrapButton.widthAnchor.constraint(equalTo: splitButton.widthAnchor),

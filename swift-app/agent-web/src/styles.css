@@ -12,6 +12,8 @@
   --border: #252b2a;
   --border-accent: #2f3534;
   --radius: 8px;
+  --bg-alpha: 1;
+  --blur: 0px;
   --surface1: color-mix(in srgb, var(--surface0) 96%, var(--foreground));
   --surface2: color-mix(in srgb, var(--surface0) 91%, var(--foreground));
   --surface3: color-mix(in srgb, var(--surface0) 78%, var(--foreground));
@@ -57,8 +59,16 @@
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
+html { background: transparent; }
 body {
-  background: var(--surface0); color: var(--foreground);
+  /* Terminal-parity translucency: AgentTheme ships --bg-alpha and
+     --blur with the palette; the webview paints no background of its
+     own, so this layer composites over the window and blurs what sits
+     behind the pane. */
+  background:
+    color-mix(in srgb, var(--surface0) calc(var(--bg-alpha, 1) * 100%), transparent);
+  -webkit-backdrop-filter: blur(var(--blur, 0px));
+  color: var(--foreground);
   font: 13.5px/1.6 -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
