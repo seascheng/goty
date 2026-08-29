@@ -176,31 +176,55 @@ final class PaneHost: NSView {
             self.onAgentState?(self, state)
         }
         wantsLayer = true
-        layer?.backgroundColor = Self.backdropColorForNewHost()?.cgColor
+        layer?.backgroundColor = Self.backdropPlaceholder().cgColor
         createSurfaceIfNeeded()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
-
     /// Terminal backdrop follows window transparency (background-opacity/
     /// background-blur): an opaque pane layer would swallow the surface's
     /// alpha behind the terminal — clear both panes of it when the
-    /// window composites translucency. applyChromeTheme() re-drives every
-    /// live host on config change; the init path reads the live config.
+    /// window composites translucency. Until the FIRST output byte the
+    /// backdrop is an opaque theme placeholder instead: a clear layer
+    /// before the surface paints is the full-black pane flash on
+    /// translucent windows. applyChromeTheme() re-drives every live
+    /// host on config change; the init path reads the live config.
+    private var backdropSettled = false
+
     func setSurfaceBackdrop(_ color: NSColor?) {
+        // Pre-first-frame, an explicit nil (the translucent steady
+        // state) must not re-expose the pre-paint black gap.
+        guard backdropSettled || color != nil else { return }
         layer?.backgroundColor = color?.cgColor
         coverView?.layer?.backgroundColor = color?.cgColor
     }
 
-    /// The backdrop color for NEW hosts: clear whenever the resolved
-    /// config asks for a translucent window, else the theme background.
-    static func backdropColorForNewHost() -> NSColor? {
+    /// Backdrop before the surface has content: ALWAYS opaque theme
+    /// background — the placeholder that kills the black flash.
+    static func backdropPlaceholder() -> NSColor {
+        Chrome.theme.background
+    }
+
+    /// Steady-state backdrop once content exists: clear when the
+    /// resolved config asks for a translucent window — the surface
+    /// renders its own tint; any fill here double-composites (the
+    /// mismatched-strip bug).
+    static func backdropTarget() -> NSColor? {
         let conf = liveGhostty?.config
         let translucent = (conf?.backgroundOpacity ?? 1) < 0.999
             || (conf?.backgroundBlur.isEnabled ?? false)
-        // CLEAR when translucent — the surface renders its own tint;
-        // any fill here double-composites (the mismatched-strip bug).
         return translucent ? nil : Chrome.theme.background
+    }
+
+    /// First content arrived: settle the backdrop to its steady state.
+    private func settleBackdropOnFirstContent() {
+        guard !backdropSettled else { return }
+        backdropSettled = true
+        let target = Self.backdropTarget()
+        DispatchQueue.main.async { [weak self] in
+            self?.layer?.backgroundColor = target?.cgColor
+            self?.coverView?.layer?.backgroundColor = target?.cgColor
+        }
     }
 
     func createSurfaceIfNeeded() {
@@ -247,7 +271,7 @@ final class PaneHost: NSView {
 
         let cover = NSView()
         cover.wantsLayer = true
-        cover.layer?.backgroundColor = Self.backdropColorForNewHost()?.cgColor
+        cover.layer?.backgroundColor = Self.backdropPlaceholder().cgColor
         cover.translatesAutoresizingMaskIntoConstraints = false
         addSubview(cover)
         NSLayoutConstraint.activate([
@@ -322,6 +346,14 @@ final class PaneHost: NSView {
             // output bytes that preceded it, so pending output flushes
             // first.
             flushCoalescedOutput()
+        }
+        if !backdropSettled {
+            switch kind {
+            case SessionOutputKind.output, SessionOutputKind.snapshot:
+                settleBackdropOnFirstContent()
+            default:
+                break
+            }
         }
         switch kind {
         case SessionOutputKind.size:

@@ -64,6 +64,10 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
 
         super.init(frame: .zero)
         wantsLayer = true
+        // Themed placeholder behind the transparent webview: without it
+        // the pane is clear until first paint — the full-black agent
+        // pane flash. The page paints the same family of color over it.
+        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
 
         webView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(webView)
@@ -226,6 +230,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     }
 
     func retheme() {
+        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
         pushTheme()
         pushMeta()   // the icon tint is theme-derived
     }
