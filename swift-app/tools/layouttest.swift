@@ -1405,20 +1405,28 @@ func run() {
               + "non-repo paths stay their own")
 
     // Sidebar "+" menu: built pure, fired like the host picker.
+    // Flat shape: terminal + worktree + separator + one entry per ACP
+    // agent (AgentRegistry).
     var plusDirs: [String?] = []
     var wtDirs: [String?] = []
+    var agentDirs: [(key: String, dir: String?)] = []
     wc.sidebar.onNewTabInDir = { plusDirs.append($0) }
     wc.sidebar.onNewWorktreeInDir = { wtDirs.append($0) }
+    wc.sidebar.onNewAgentSessionInDir = { agentDirs.append(($0, $1)) }
     let plusMenu = wc.sidebar.spacePlusMenu(dir: repoDir)
-    check(plusMenu.items.count == 2
+    let agentCount = AgentRegistry.descriptors.count
+    check(plusMenu.items.count == 3 + agentCount
           && plusMenu.items[0].title == "New Terminal"
           && plusMenu.items[1].title == "New Worktree…",
-          "space '+' menu: terminal + worktree entries")
-    for item in plusMenu.items {
+          "space '+' menu: terminal + worktree + flat agent entries")
+    for item in plusMenu.items where item.action != nil {
         _ = NSApp.sendAction(item.action!, to: item.target, from: item)
     }
     check(plusDirs == [repoDir] && wtDirs == [repoDir],
           "menu items route to their callbacks")
+    check(agentDirs.count == agentCount
+          && agentDirs.allSatisfy { $0.dir == repoDir },
+          "agent entries route with the section dir")
 
     // RepoWatcher (FSEvents): local repos are event-driven — a file
     // change fires onRootChanged with the repo root, the stores drop
@@ -1432,7 +1440,41 @@ func run() {
     settle(90)   // FSEvents latency 0.4s + delivery (heavy-load headroom)
     check(watchedRoots.contains(repoDir),
           "RepoWatcher fires for a local repo change (roots=\(watchedRoots))")
+    // Closing a pane must REMOVE its view from the grid, not just
+    // retire the host: a retired-but-attached view kept painting (the
+    // ghost agent pane after closing its tab).
+    print("— pane grid: closed pane's view leaves the hierarchy —")
+    final class StubPaneHost: NSView, PaneHosting {
+    func focusAsPane() {}  // stub pane — keyboard never targets it
+
+        let hostKey: HostKey
+        var retired = false
+        init(_ key: HostKey) { self.hostKey = key; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
+        var windowVisible = true
+        func setVisible(_ visible: Bool) { isHidden = !visible }
+        func syncCoreVisibility() {}
+        func createSurfaceIfNeeded() {}
+        func retire() { retired = true }   // deliberately does NOT detach
+    }
+    do {
+        let grid = PaneGridView()
+        grid.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let k1 = HostKey(workspace: UUID(), pane: "p1")
+        let k2 = HostKey(workspace: UUID(), pane: "p2")
+        let h1 = StubPaneHost(k1)
+        let h2 = StubPaneHost(k2)
+        grid.setVisiblePanes([(k1, h1, NSRect(x: 0, y: 0, width: 1, height: 1))],
+                             keepAlive: [])
+        check(h1.superview === grid, "pane 1 attached to the grid")
+        grid.setVisiblePanes([(k2, h2, NSRect(x: 0, y: 0, width: 1, height: 1))],
+                             keepAlive: [])
+        check(h1.retired, "closed pane's host retired")
+        check(h1.superview == nil, "closed pane's view removed from the hierarchy")
+    }
+
     RepoWatcher.shared.onRootChanged = nil
+
 
     // The sidebar's fetch carries the root beside the summary — it is
     // the watcher's key and the invalidation mapping — and the space

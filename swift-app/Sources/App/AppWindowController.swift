@@ -341,7 +341,7 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         // — the mismatched-strip bug).
         let bandColor = chromeSurface(Chrome.theme.topBarBackground)
         terminalArea.setBackdrop(bandColor)
-        for host in terminalArea.paneGrid.visibleHosts {
+        for case let host as PaneHost in terminalArea.paneGrid.visibleHosts {
             host.setSurfaceBackdrop(transparent ? nil : Chrome.theme.background)
         }
 

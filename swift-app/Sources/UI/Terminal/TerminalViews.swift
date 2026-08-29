@@ -14,6 +14,32 @@ struct PaneDaemonTarget {
     let environment: [String: String]
 }
 
+/// One grid-hostable pane view: the terminal surface (PaneHost) or a GUI
+/// agent session (AgentPaneHost). PaneGridView and the AppDelegate host
+/// pool hold these indifferently.
+protocol PaneHosting: NSView {
+    var hostKey: HostKey { get }
+    func setVisible(_ visible: Bool)
+    func syncCoreVisibility()
+    func retire()
+    /// Make this pane the keyboard target. Terminal panes focus their
+    /// ghostty surface; agent panes focus the WKWebView (it forwards
+    /// keys to the page). Without this the agent pane rendered fully
+    /// but its composer ignored the keyboard until a tab round-trip.
+    func focusAsPane()
+    /// Terminal panes arm their ghostty surface lazily; agent panes are
+    /// always live. Called from the grid's layout pass.
+    func createSurfaceIfNeeded()
+    var windowVisible: Bool { get set }
+}
+
+extension PaneHost: PaneHosting {
+    func setVisible(_ visible: Bool) { isHidden = !visible }
+    func focusAsPane() {
+        window?.makeFirstResponder(surfaceView)
+    }
+}
+
 /// One terminal pane: a libghostty EXEC surface fed by a sessiond stream.
 final class PaneHost: NSView {
     let paneId: String
@@ -97,7 +123,9 @@ final class PaneHost: NSView {
     private var lastLayoutGrid: SessionGrid?
     private let sharedStateLock = NSLock()
     private let gapp: ghostty_app_t
-    private let initialCwd: String?
+    /// Spawn directory; the @omp-style trigger falls back to it when
+    /// no live cwd is tracked for the pane yet.
+    let initialCwd: String?
     private let launchCommand: String?
     private let daemonTarget: () -> PaneDaemonTarget?
 
@@ -126,6 +154,9 @@ final class PaneHost: NSView {
     // onWrite; the tail keeps the last output as task context. Both are
     // Core types owned here, fed from the byte paths below.
     let aiTrigger = LineTrigger()
+    /// `@omp [prompt]` → AppDelegate opens an Agent GUI space in this
+    /// pane's cwd (capability-checked there).
+    var onAgentSessionTrigger: ((PaneHost, String, String?) -> Void)?
     let aiTail = OutputTail()
     private let replaySanitizer = ReplaySanitizer()
     /// A trigger fires this with the request text (after the host has
@@ -150,6 +181,9 @@ final class PaneHost: NSView {
         agentCommand = AgentDetect.hasRules(for: command) ? command : nil
         super.init(frame: .zero)
         aiTrigger.onTrigger = { [weak self] text in self?.handleAITrigger(text) }
+        aiTrigger.onAgentTrigger = { [weak self] key, text in
+            self?.handleAgentTrigger(key, text)
+        }
         aiTrigger.onPendingEnter = { [weak self] in
             DispatchQueue.main.async { self?.handleAIHistoryEnter() }
         }
@@ -159,31 +193,55 @@ final class PaneHost: NSView {
             self.onAgentState?(self, state)
         }
         wantsLayer = true
-        layer?.backgroundColor = Self.backdropColorForNewHost()?.cgColor
+        layer?.backgroundColor = Self.backdropPlaceholder().cgColor
         createSurfaceIfNeeded()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
-
     /// Terminal backdrop follows window transparency (background-opacity/
     /// background-blur): an opaque pane layer would swallow the surface's
     /// alpha behind the terminal — clear both panes of it when the
-    /// window composites translucency. applyChromeTheme() re-drives every
-    /// live host on config change; the init path reads the live config.
+    /// window composites translucency. Until the FIRST output byte the
+    /// backdrop is an opaque theme placeholder instead: a clear layer
+    /// before the surface paints is the full-black pane flash on
+    /// translucent windows. applyChromeTheme() re-drives every live
+    /// host on config change; the init path reads the live config.
+    private var backdropSettled = false
+
     func setSurfaceBackdrop(_ color: NSColor?) {
+        // Pre-first-frame, an explicit nil (the translucent steady
+        // state) must not re-expose the pre-paint black gap.
+        guard backdropSettled || color != nil else { return }
         layer?.backgroundColor = color?.cgColor
         coverView?.layer?.backgroundColor = color?.cgColor
     }
 
-    /// The backdrop color for NEW hosts: clear whenever the resolved
-    /// config asks for a translucent window, else the theme background.
-    static func backdropColorForNewHost() -> NSColor? {
+    /// Backdrop before the surface has content: ALWAYS opaque theme
+    /// background — the placeholder that kills the black flash.
+    static func backdropPlaceholder() -> NSColor {
+        Chrome.theme.background
+    }
+
+    /// Steady-state backdrop once content exists: clear when the
+    /// resolved config asks for a translucent window — the surface
+    /// renders its own tint; any fill here double-composites (the
+    /// mismatched-strip bug).
+    static func backdropTarget() -> NSColor? {
         let conf = liveGhostty?.config
         let translucent = (conf?.backgroundOpacity ?? 1) < 0.999
             || (conf?.backgroundBlur.isEnabled ?? false)
-        // CLEAR when translucent — the surface renders its own tint;
-        // any fill here double-composites (the mismatched-strip bug).
         return translucent ? nil : Chrome.theme.background
+    }
+
+    /// First content arrived: settle the backdrop to its steady state.
+    private func settleBackdropOnFirstContent() {
+        guard !backdropSettled else { return }
+        backdropSettled = true
+        let target = Self.backdropTarget()
+        DispatchQueue.main.async { [weak self] in
+            self?.layer?.backgroundColor = target?.cgColor
+            self?.coverView?.layer?.backgroundColor = target?.cgColor
+        }
     }
 
     func createSurfaceIfNeeded() {
@@ -234,7 +292,7 @@ final class PaneHost: NSView {
 
         let cover = NSView()
         cover.wantsLayer = true
-        cover.layer?.backgroundColor = Self.backdropColorForNewHost()?.cgColor
+        cover.layer?.backgroundColor = Self.backdropPlaceholder().cgColor
         cover.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(cover)
@@ -331,6 +389,14 @@ final class PaneHost: NSView {
             // output bytes that preceded it, so pending output flushes
             // first.
             flushCoalescedOutput()
+        }
+        if !backdropSettled {
+            switch kind {
+            case SessionOutputKind.output, SessionOutputKind.snapshot:
+                settleBackdropOnFirstContent()
+            default:
+                break
+            }
         }
         switch kind {
         case SessionOutputKind.size:
@@ -602,6 +668,19 @@ final class PaneHost: NSView {
         }
     }
 
+    /// `@omp [prompt]` fired: the agent key IS the prefix, so the rest
+    /// is the optional initial prompt. Clear the shell's readline copy
+    /// of the line (the swallowed enter left the typed bytes there),
+    /// then hand it up.
+    private func handleAgentTrigger(_ agent: String, _ text: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.sendText("\u{15}")
+            let prompt = text.isEmpty ? nil : text
+            self.onAgentSessionTrigger?(self, agent, prompt)
+        }
+    }
+
     /// History-recalled enter (↑/ctrl-r): the line's bytes never
     /// passed the input filter — zsh redrew it as PTY output — so read
     /// what the shell actually holds: the rendered cursor row. An @ai
@@ -610,17 +689,22 @@ final class PaneHost: NSView {
     /// Runs on main, outside the onWrite callback (surface reads must
     /// not re-enter the io path).
     private func handleAIHistoryEnter() {
-        guard let request = aiHistoryRowRequest() else {
+        guard let match = aiHistoryRowMatch() else {
             sendText("\r")
             return
         }
         sendText("\u{15}")
-        onAITask?(self, request)
+        switch match.kind {
+        case .ai:
+            onAITask?(self, match.text)
+        case .agent(let key):
+            onAgentSessionTrigger?(self, key, match.text.isEmpty ? nil : match.text)
+        }
     }
 
-    /// The @ai request on the cursor row, or nil. Failures return nil
-    /// → the enter is forwarded (fail-open).
-    private func aiHistoryRowRequest() -> String? {
+    /// The trigger match on the cursor row, or nil. Failures return
+    /// nil → the enter is forwarded (fail-open).
+    private func aiHistoryRowMatch() -> LineTrigger.Match? {
         guard let view = surfaceView, let surface = view.surface else { return nil }
         var m = ghostty_surface_grid_metrics_s()
         guard ghostty_surface_grid_metrics(surface, &m) else { return nil }
@@ -639,7 +723,7 @@ final class PaneHost: NSView {
         if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
             FileHandle.standardError.write("AIHISTORY cursor=\(m.cursor_row):\(m.cursor_column) row=\(row.prefix(60))\n".data(using: .utf8)!)
         }
-        return LineTrigger.requestFromScreenRow(row)
+        return LineTrigger.matchFromScreenRow(row)
     }
 
     /// @ai arms only at a shell prompt with the model provider
@@ -655,6 +739,7 @@ final class PaneHost: NSView {
             FileHandle.standardError.write("AITRIGGER pane=\(paneId) \(why)\n".data(using: .utf8)!)
         }
         aiTrigger.armed = next
+        aiTrigger.agentArmed = prompt
     }
 
     /// True for nil (spawned shell) and the shell basenames — matches
@@ -855,7 +940,7 @@ final class PaneHost: NSView {
 final class PaneGridView: NSView {
 
     private struct Item {
-        let host: PaneHost
+        let host: any PaneHosting
         let fraction: NSRect
         let visible: Bool
     }
@@ -883,8 +968,8 @@ final class PaneGridView: NSView {
         seams.stroke()
     }
 
-    func setVisiblePanes(_ entries: [(paneKey: HostKey, host: PaneHost, fraction: NSRect)],
-                         keepAlive: [PaneHost]) {
+    func setVisiblePanes(_ entries: [(paneKey: HostKey, host: any PaneHosting, fraction: NSRect)],
+                         keepAlive: [any PaneHosting]) {
         var present = Set<HostKey>()
         var newItems: [Item] = []
         for e in entries {
@@ -901,6 +986,7 @@ final class PaneGridView: NSView {
         }
         for item in items where !present.contains(item.host.hostKey) {
             item.host.retire()
+            item.host.removeFromSuperview()   // ghost-view guard: the host's own retire may not detach
         }
         items = newItems
         for item in items where item.host.superview !== self {
@@ -909,8 +995,7 @@ final class PaneGridView: NSView {
             addSubview(item.host)
         }
         for item in items {
-            item.host.isHidden = !item.visible
-            // Pane show/hide must reach the core: a hidden pane's surface
+            item.host.setVisible(item.visible)
             // otherwise stays "visible" forever, keeping its renderer
             // armed (occlusionCallback(false) pauses it; true re-renders).
             item.host.syncCoreVisibility()
@@ -935,7 +1020,7 @@ final class PaneGridView: NSView {
         for item in items { item.host.syncCoreVisibility() }
     }
 
-    var visibleHosts: [PaneHost] { items.filter(\.visible).map(\.host) }
+    var visibleHosts: [any PaneHosting] { items.filter(\.visible).map(\.host) }
 
     override func layout() {
         super.layout()

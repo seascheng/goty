@@ -82,6 +82,7 @@ impl Registry {
 
 fn main() -> anyhow::Result<()> {
     let socket = socket_argument()?;
+    detach_stdio(&socket);
     let listener = bind_singleton(&socket)?;
     let _ = SOCKET_PATH.set(socket.clone());
     // omp/pi state extension: installed wherever those agents live on
@@ -89,7 +90,6 @@ fn main() -> anyhow::Result<()> {
     // its own host when the SSH link starts it — no extra transfer).
     integration::install_extension();
     println!("READY");
-    use std::io::Write as _;
     std::io::stdout().flush()?;
     let registry = Arc::new(Registry::default());
 
@@ -117,6 +117,40 @@ fn main() -> anyhow::Result<()> {
             });
     }
     Ok(())
+}
+
+/// The daemon is a detached singleton: it outlives the GUI that launched
+/// it, and the inherited stdio is that GUI's pipe/pty — which dies with
+/// it. `eprintln!` PANICS on a broken stderr, and that panic killed every
+/// SPAWN thread: after a GUI relaunch, new agent panes (and therefore
+/// session resumes) failed silently while VERSION/LIST kept working.
+/// Point stdin at the void and stdout/stderr at a durable log file.
+fn detach_stdio(socket: &Path) {
+    let log_path = socket.with_file_name("sessiond.log");
+    let devnull = std::fs::File::open("/dev/null");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+    unsafe {
+        if let Ok(file) = devnull {
+            libc::dup2(std::os::unix::io::AsRawFd::as_raw_fd(&file), 0);
+        }
+        match log {
+            Ok(file) => {
+                let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
+                libc::dup2(fd, 1);
+                libc::dup2(fd, 2);
+            }
+            Err(_) => {
+                if let Ok(file) = std::fs::File::open("/dev/null") {
+                    let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
+                    libc::dup2(fd, 1);
+                    libc::dup2(fd, 2);
+                }
+            }
+        }
+    }
 }
 
 /// One extension report: its first 5 bytes plus the rest of one JSON
@@ -195,10 +229,24 @@ fn dispatch(
     match kind {
         protocol::kind::SPAWN => {
             let request: SpawnRequest = protocol::from_json(&payload)?;
+            eprintln!(
+                "gotyd: SPAWN pane={} env={} no_echo={} ring={:?}",
+                request.pane_id,
+                request.env.len(),
+                request.no_echo,
+                request.ring_bytes
+            );
             if registry.get(&request.pane_id).is_some() {
                 return write_error(&stream, format!("pane {} already exists", request.pane_id));
             }
-            let pane = Pane::spawn(request)?;
+            let pane = match Pane::spawn(request) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("gotyd: SPAWN FAILED: {e:#}");
+                    return Err(e);
+                }
+            };
+            eprintln!("gotyd: SPAWNED pane={}", pane.id);
             registry.insert(pane.clone()).map_err(anyhow::Error::msg)?;
             protocol::write_frame(&stream, protocol::kind::SPAWNED, pane.id.as_bytes())?;
             stream_pane(stream, pane)
@@ -232,7 +280,10 @@ fn dispatch(
             )?;
             Ok(())
         }
-        _ => write_error(&stream, "invalid first frame".to_string()),
+        _ => {
+            eprintln!("gotyd: INVALID first frame kind={kind}");
+            write_error(&stream, "invalid first frame".to_string())
+        }
     }
 }
 

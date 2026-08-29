@@ -21,6 +21,13 @@ extension HostKey {
     /// UUIDs keep the result stable across GUI restarts.
     var runtimeId: String { "\(workspace.uuidString)_\(pane)" }
 }
+
+enum PaneKind: Codable, Equatable {
+    case terminal
+    /// A GUI agent session; payload = the AgentCatalog key ("omp").
+    case agent(String)
+}
+
 struct PaneState: Codable {
     let id: String        // pane UUID (stable, persisted)
     var cwd: String?
@@ -29,6 +36,31 @@ struct PaneState: Codable {
     var top: Int = 0
     var width: Int = 1
     var height: Int = 1
+    /// Terminal pane vs GUI agent session. Absent in older state.json —
+    /// decodes as .terminal so no migration is ever needed.
+    var kind: PaneKind = .terminal
+
+    init(id: String, cwd: String?, kind: PaneKind = .terminal,
+         left: Int = 0, top: Int = 0, width: Int = 1, height: Int = 1) {
+        self.id = id
+        self.cwd = cwd
+        self.kind = kind
+        self.left = left
+        self.top = top
+        self.width = width
+        self.height = height
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
+        left = try container.decodeIfPresent(Int.self, forKey: .left) ?? 0
+        top = try container.decodeIfPresent(Int.self, forKey: .top) ?? 0
+        width = try container.decodeIfPresent(Int.self, forKey: .width) ?? 1
+        height = try container.decodeIfPresent(Int.self, forKey: .height) ?? 1
+        kind = try container.decodeIfPresent(PaneKind.self, forKey: .kind) ?? .terminal
+    }
 }
 
 struct TabState: Codable {
@@ -228,21 +260,90 @@ final class WorkspaceStore {
 
 // MARK: - User shell environment
 
-/// The user's login-shell environment, captured once at first use. A GUI
-/// launched from launchd/automation inherits a minimal env; the user's zshrc
-/// (oh-my-zsh, prompts, version managers) misbehaves or hangs without the
-/// real PATH. Without this, shells hang mid-init and never print a prompt.
+/// The user's REAL shell environment, captured once. A GUI launched from
+/// Finder/launchd inherits a minimal environment — and the user's
+/// toolchain (homebrew, version managers) lives in `.zshrc`, which a
+/// NON-interactive `zsh -l -c` never sources. The old capture therefore
+/// returned the inherited ~20 vars on Finder launches and spawned agent
+/// CLIs with a PATH that could not find them: `omp: not found`, the pane
+/// process died instantly, and everything downstream (connect, history,
+/// resume) silently broke. Dev launches from a full shell masked this
+/// for the entire M1 development period.
+///
+/// Two countermeasures, both required:
+/// - capture INTERACTIVELY (`-l -i`): sources `.zshrc`, where the real
+///   PATH is set up;
+/// - capture from a CLEAN parent environment: what the GUI happens to
+///   inherit must not leak into (or be mistaken for) the user's setup.
+/// The result overrides the process environment per key, so basics like
+/// TMPDIR survive even when the capture comes up short.
 enum UserShellEnv {
-    static let cached: [String] = {
-        String(data: Shell.exec("/bin/zsh -l -c env").stdout, encoding: .utf8)?
-            .split(separator: "\n")
-            .map(String.init) ?? []
+    /// Bounded child runner for the capture: stdin MUST be the null
+    /// device (an inherited TTY makes an interactive zsh wait on the
+    /// terminal forever — the launch-hang where the window never
+    /// appeared), output piped and drained, stderr discarded, and a hard
+    /// deadline after which the child is terminated. Nothing about a GUI
+    /// launch context may block this unboundedly.
+    private static func run(_ command: String, timeout: TimeInterval) -> String? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+        proc.arguments = ["-c", command]
+        proc.standardInput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        let out = Pipe()
+        proc.standardOutput = out
+        // Drain concurrently: a chatty .zshrc past the pipe buffer would
+        // deadlock a wait-first order.
+        let drained = DispatchSemaphore(value: 0)
+        var data = Data()
+        DispatchQueue.global(qos: .utility).async {
+            data = out.fileHandleForReading.readDataToEndOfFile()
+            drained.signal()
+        }
+        let exited = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in exited.signal() }
+        do { try proc.run() } catch { return nil }
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
+            proc.terminate()
+            if exited.wait(timeout: .now() + 0.3) == .timedOut { return nil }
+        }
+        _ = drained.wait(timeout: .now() + 1)
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Interactive capture first (the toolchain PATH lives in .zshrc),
+    /// non-interactive as fallback; both from a CLEAN parent environment
+    /// so inherited launch context neither helps nor hides. A capture
+    /// that yields fewer than ~20 lines was not a real user shell.
+    private static let captured: [String] = {
+        let home = ProcessInfo.processInfo.environment["HOME"]
+            ?? NSHomeDirectory()
+        let base = "HOME=\(Shell.forceQuoted(home)) USER=\(NSUserName()) "
+            + "LOGNAME=\(NSUserName()) SHELL=/bin/zsh TERM=dumb"
+        for (command, budget) in [("/bin/zsh -l -i -c env", 8.0),
+                                  ("/bin/zsh -l -c env", 3.0)] {
+            guard let output = run("/usr/bin/env -i \(base) " + command, timeout: budget),
+                  output.split(separator: "\n").count >= 20 else { continue }
+            return output.split(separator: "\n").map(String.init)
+        }
+        return []
     }()
 
-    /// KEY=VALUE lines parsed into a dictionary for SurfaceConfiguration.
-    static let asDictionary: [String: String] = Dictionary(uniqueKeysWithValues: cached.compactMap {
-        let parts = $0.split(separator: "=", maxSplits: 1)
-        guard parts.count == 2 else { return nil }
-        return (String(parts[0]), String(parts[1]))
-    })
+    /// Captured user env layered over the process environment. Values
+    /// with `=` survive (maxSplits 1); junk lines without `=` drop.
+    static let asDictionary: [String: String] = {
+        var merged = ProcessInfo.processInfo.environment
+        for line in captured {
+            let parts = line.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            merged[String(parts[0])] = String(parts[1])
+        }
+        return merged
+    }()
+
+    /// Warm the (multi-second, interactive-shell) capture off the main
+    /// thread at app start, so the first agent pane does not pay for it.
+    static func warmUp() {
+        DispatchQueue.global(qos: .utility).async { _ = asDictionary }
+    }
 }

@@ -279,6 +279,13 @@ struct ChromeTheme: Equatable {
         NSColor(hex: isDark ? "#22D3EE" : "#0E7490") ?? .systemCyan
     }
 
+    /// Emphasis accent for text (links, current values): the theme
+    /// accent lifted toward the foreground until it clears 3.5:1 —
+    /// dark selection-backgrounds stay legible on light themes.
+    var accentBright: NSColor {
+        lift(accent, toward: foreground, ratio: 3.5, from: 0.3)
+    }
+
     /// Ring that separates an avatar's status dot from the disc — the
     /// sidebar's own surface, so the dot reads as a badge on any accent.
     var avatarDotRing: NSColor { topBarBackground }

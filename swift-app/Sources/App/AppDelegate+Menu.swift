@@ -23,6 +23,21 @@ extension AppDelegate {
         appItem.submenu = appMenu
         main.addItem(appItem)
 
+        // Edit menu = the copy/paste lifeline for every webview pane:
+        // without responder-chain menu items (copy:, paste:…) the
+        // WKWebView never receives ⌘C/⌘V — transcript text could not
+        // be copied and the composer could not paste.
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        main.addItem(editItem)
         let shellItem = NSMenuItem(title: "Shell", action: nil, keyEquivalent: "")
         let shellMenu = NSMenu()
         shellMenu.addItem(withTitle: "New Space", action: #selector(menuNewTab), keyEquivalent: "t")
@@ -39,13 +54,28 @@ extension AppDelegate {
             item.representedObject = command
             // Official brand logo when the asset exists (AgentIcons.swift),
             // SF Symbol otherwise.
-            item.image = AgentBrandIcons.image(for: command)
+            item.image = AgentBrandIcons.menuImage(for: command)
                 ?? menuItemIcon(spec.icon, pointSize: 11)
             agentMenu.addItem(item)
         }
         let agentItem = NSMenuItem(title: "New Agent Space", action: nil, keyEquivalent: "")
         agentItem.submenu = agentMenu
         shellMenu.addItem(agentItem)
+        let sessionMenu = NSMenu()
+        let path = UserShellEnv.asDictionary["PATH"] ?? ""
+        for entry in AgentRegistry.pickerEntries(path: path) {
+            let item = NSMenuItem(title: entry.label,
+                                  action: #selector(menuNewAgentSessionFrom(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = entry.key
+            item.isEnabled = entry.available
+            if !entry.available { item.toolTip = "\(entry.key) 不在 PATH" }
+            sessionMenu.addItem(item)
+        }
+        let sessionItem = NSMenuItem(title: "New Agent Session", action: nil, keyEquivalent: "")
+        sessionItem.submenu = sessionMenu
+        shellMenu.addItem(sessionItem)
         shellMenu.addItem(withTitle: "Close Space", action: #selector(menuCloseTab), keyEquivalent: "w")
         shellMenu.addItem(.separator())
         shellMenu.addItem(withTitle: "Split Right", action: #selector(menuSplitRight), keyEquivalent: "d")
@@ -81,6 +111,41 @@ extension AppDelegate {
             coordinator.newAgentTab(command: command)
         }
     }
+
+    /// The ONE Agent GUI open path: capability gate (with the daemon
+    /// upgrade offer), then open. Menu items, the tab-strip +, the
+    /// sidebar space + and the @gui trigger all land here.
+    func openAgentSession(agent: String, cwd: String? = nil,
+                          initialPrompt: String? = nil) {
+        if !SessionDaemon.supportsAgentSessions() {
+            // Stale singleton daemon (it outlives the GUI by design, so a
+            // GUI restart never replaces it). Offer the upgrade right here —
+            // killing it ends the sessions it hosts, an explicit choice.
+            let alert = NSAlert()
+            alert.messageText = "升级本机 sessiond？"
+            alert.informativeText = "本机 sessiond 是旧版（CAPABILITY < 4），不支持 Agent GUI Session。重启它几秒即可，其托管的现有会话会一并结束。"
+            alert.addButton(withTitle: "重启 Daemon")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            SessionDaemon.terminateSharedForUpgrade()
+            guard SessionDaemon.shared.ensureRunning(),
+                  SessionDaemon.supportsAgentSessions() else {
+                let fail = NSAlert()
+                fail.messageText = "sessiond 升级未完成"
+                fail.informativeText = "重启后仍不可用。请确认正在运行的 Goty.app 内的 goty-sessiond 为本次构建，再重试。"
+                fail.runModal()
+                return
+            }
+        }
+        coordinator.newAgentSessionTab(agent: agent, cwd: cwd,
+                                       initialPrompt: initialPrompt)
+    }
+
+    @objc private func menuNewAgentSessionFrom(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        openAgentSession(agent: key)
+    }
+
     @objc func menuCloseTab() { coordinator.closeTab() }
     @objc func menuSplitRight() { coordinator.splitPane(vertical: false) }
     @objc func menuSplitDown() { coordinator.splitPane(vertical: true) }
@@ -91,8 +156,8 @@ extension AppDelegate {
         guard let store = coordinator.store, let ws = store.focused,
               let pane = coordinator.activePane(of: ws) else { return }
         // The ask is app-global: clear any other pane's ask card first.
-        for host in hostPool.values { host.hideAITaskIfInputMode() }
-        hostPool[HostKey(workspace: ws.id, pane: pane.id)]?.openAIInputMode()
+        for case let host as PaneHost in hostPool.values { host.hideAITaskIfInputMode() }
+        (hostPool[HostKey(workspace: ws.id, pane: pane.id)] as? PaneHost)?.openAIInputMode()
     }
 
     /// App-level config change (Settings writes, or a reload from the
@@ -148,7 +213,7 @@ extension AppDelegate {
     /// target (the click monitor focused it on right-mouse-down).
     @objc func ghosttySplitRequested(_ note: Notification) {
         guard let view = note.object as? Ghostty.SurfaceView,
-              let host = hostPool.values.first(where: { $0.surfaceView === view })
+              let host = hostPool.values.compactMap({ $0 as? PaneHost }).first(where: { $0.surfaceView === view })
         else { return }
         coordinator.focusPane(wsId: host.hostKey.workspace, paneId: host.paneId)
         let vertical: Bool, after: Bool

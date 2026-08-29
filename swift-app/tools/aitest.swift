@@ -135,6 +135,42 @@ import Foundation
         type("echo @ai mid-line\r")
         check(fired.last == "无空格配对", "mid-line @ai still does not trigger")
 
+        // Agent prefixes (@omp/@claude/…): agentArmed-gated, routed to
+        // onAgentTrigger with the manifest key; @ai and @agent are
+        // independent arming domains.
+        var agentFired: [(key: String, text: String)] = []
+        lt.onAgentTrigger = { agentFired.append(($0, $1)) }
+        lt.armed = false
+        lt.agentArmed = false
+        type("@omp hi\r")
+        check(agentFired.isEmpty, "agent trigger needs agentArmed")
+        lt.agentArmed = true
+        type("@omp fix the build\r")
+        check(agentFired.last?.key == "omp" && agentFired.last?.text == "fix the build",
+              "line-leading @omp routes key + prompt")
+        type("@pi\r")   // pi is a registry agent now (bare, no prompt)
+        check(agentFired.count == 2 && agentFired.last?.key == "pi",
+              "@pi routes to the pi adapter")
+        lt.armed = true
+        type("@ai plan the work\r")
+        check(fired.last == "plan the work" && agentFired.count == 2,
+              "@ai still routes to onTrigger")
+        type("@omp\r")
+        check(agentFired.last?.text == "", "bare @omp opens without prompt")
+        _ = lt.filter([0x03])
+        type("@claude write tests\r")   // claude is a registry agent now
+        check(agentFired.last?.key == "claude" && agentFired.last?.text == "write tests",
+              "@claude routes to the claude adapter")
+        _ = lt.filter([0x03])
+        type("@cursor-agent hi\r")   // genuinely not a registry agent
+        check(agentFired.last?.key == "claude",
+              "non-manifest agent names pass through to the shell")
+        _ = lt.filter([0x03])
+        type("@omp again\r")
+        check(agentFired.last?.key == "omp" && agentFired.last?.text == "again",
+              "manifest key fires after a passthrough line")
+        _ = lt.filter([0x03])
+
         // History recall (↑/ctrl-r): the recalled text lives only on
         // the rendered screen, so the enter is swallowed pending a
         // cursor-row check (onPendingEnter) — it never reaches the
@@ -200,6 +236,13 @@ import Foundation
               "bash prompt recall matches")
         check(LineTrigger.requestFromScreenRow("➜  ✗ echo \"@ai x\"") == nil,
               "quoted mid-command recall passes through")
+        check(LineTrigger.matchFromScreenRow("➜  ✗ @omp fix login")?.kind == .agent(key: "omp")
+              && LineTrigger.matchFromScreenRow("➜  ✗ @omp fix login")?.text == "fix login",
+              "recalled @omp row classifies agent + prompt")
+        check(LineTrigger.matchFromScreenRow("➜  ✗ @ai refactor")?.kind == .ai,
+              "recalled @ai row still classifies ai")
+        check(LineTrigger.matchFromScreenRow("➜  ✗ echo \"@omp x\"") == nil,
+              "quoted mid-command @omp passes through")
         check(LineTrigger.requestFromScreenRow("➜  ✗ ls -la") == nil,
               "row without @ai is nil")
         check(LineTrigger.requestFromScreenRow("➜  ✗ @ai ") == nil,

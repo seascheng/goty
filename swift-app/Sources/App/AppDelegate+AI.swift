@@ -38,15 +38,15 @@ extension AppDelegate {
                     }
                     return
                 }
-                let host = self.hostPool[key]
+                let host = self.hostPool[key] as? PaneHost
                 if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
                     FileHandle.standardError.write("AICARD phase=\(task.phase) host=\(host != nil) frame=\(host?.currentAITaskCard?.frame ?? .zero)\n".data(using: .utf8)!)
                 }
                 host?.showAITask(task)
                 // A task card showing clears stale ask cards on OTHER
                 // panes (one AI surface at a time — tasks win).
-                for other in self.hostPool.values where other !== host {
-                    other.hideAITaskIfInputMode()
+                for other in self.hostPool.values where (other as? PaneHost) !== host {
+                    (other as? PaneHost)?.hideAITaskIfInputMode()
                 }
                 if let host { self.wireAICard(host, task: task) }
             }
@@ -113,6 +113,17 @@ extension AppDelegate {
             ? ["-l", "-c", "exec " + command!] : ["-l"]
         return PaneDaemonTarget(daemon: daemon, shell: link.remoteShell, args: args,
                                 environment: [:])
+    }
+
+    /// Agent sessions run the user's real login environment (version
+    /// managers), no ghostty surface. The spawn shape itself comes from
+    /// AgentRegistry; only the environment is workspace-dependent.
+    /// M1 is local-daemon only — SSH agent sessions are M2 (spec).
+    func agentEnvironment(wsId: UUID) -> [String: String]? {
+        guard let store = coordinator.store,
+              let ws = store.workspaces.first(where: { $0.id == wsId }) else { return nil }
+        guard !ws.isRemote else { return nil }
+        return UserShellEnv.asDictionary
     }
 
     func startRemoteLink(_ workspace: WorkspaceState) {

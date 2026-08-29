@@ -67,7 +67,7 @@ extension AppDelegate {
         // target; every store pass is a free re-arm (idle panes never see
         // another foreground report, so the stale unarmed state stuck —
         // "@ai works in one pane, not another").
-        for host in hostPool.values { host.refreshAITrigger() }
+        for case let host as PaneHost in hostPool.values { host.refreshAITrigger() }
         let titleText = "Goty — \(ws.displayName)"
         window?.title = titleText
         wc.setChromeTitle(titleText)
@@ -106,7 +106,7 @@ extension AppDelegate {
         let keepAlive = hostPool.compactMap { key, host in
             liveKeys.contains(key) ? host : nil
         }
-        var entries: [(paneKey: HostKey, host: PaneHost, fraction: NSRect)] = []
+        var entries: [(paneKey: HostKey, host: any PaneHosting, fraction: NSRect)] = []
         let panes = tab.panes.filter { !$0.id.isEmpty }
         if panes.count == 1 {
             if let host = makePaneHost(pane: panes[0], ws: ws, gapp: gapp) {
@@ -180,6 +180,7 @@ extension AppDelegate {
         refreshSidebarSpaces()
         updateRightPanel()
         wc?.rightPanel.refreshScm()
+        for case let host as AgentPaneHost in hostPool.values { host.pushMeta() }
     }
 
     private func refreshSidebarSpaces() {

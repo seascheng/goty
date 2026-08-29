@@ -12,15 +12,34 @@
 import Foundation
 
 final class LineTrigger {
+    /// Which line-leading trigger matched.
+    enum TriggerKind: Equatable {
+        case ai
+        /// `@omp` / `@claude` / `@codex` … — an Agent GUI space for
+        /// that agent; payload is the manifest key.
+        case agent(key: String)
+    }
+
     var armed = false
+    /// @ai arms only with the provider configured; agent triggers need
+    /// just a shell prompt (the fire path handles a stale daemon itself).
+    var agentArmed = false
     var onTrigger: ((String) -> Void)?
+    /// `@omp [prompt]` — a new Agent GUI space in this pane's cwd.
+    var onAgentTrigger: ((String, String) -> Void)?
     /// Enter swallowed on a zle-edited line (↑/↓/ctrl-r recall): the
     /// line's text lives only on the rendered screen, so the host
     /// reads the cursor row and either fires the task or re-sends the
     /// enter (fail-open, identical to no interception).
     var onPendingEnter: (() -> Void)?
     private var line: [UInt8] = []
-    private static let prefix: [UInt8] = Array("@ai".utf8)
+    private static let prefixes: [(bytes: [UInt8], kind: TriggerKind)] = {
+        var list: [(bytes: [UInt8], kind: TriggerKind)] = [(Array("@ai".utf8), .ai)]
+        for descriptor in AgentRegistry.descriptors {
+            list.append((Array("@\(descriptor.key)".utf8), .agent(key: descriptor.key)))
+        }
+        return list
+    }()
     /// Escape-sequence parser state: inside CSI / inside SS3.
     private var inCsi = false
     private var inSs3 = false
@@ -41,7 +60,9 @@ final class LineTrigger {
     private var zleEdit = false
 
     func filter(_ bytes: [UInt8]) -> [UInt8] {
-        guard armed else { line = []; inCsi = false; inSs3 = false; zleEdit = false; inPaste = false; csi = []; return bytes }
+        guard armed || agentArmed else {
+            line = []; inCsi = false; inSs3 = false; zleEdit = false; inPaste = false; csi = []; return bytes
+        }
         var out: [UInt8] = []
         var i = 0
         while i < bytes.count {
@@ -102,16 +123,18 @@ final class LineTrigger {
             switch b {
             case 0x0D, 0x0A:
                 // Paired-symbol IMEs emit '@' as '@@' and may drop the
-                // space after the prefix — match the LAST @ai occurrence
+                // space after the prefix — match the LAST occurrence
                 // and let trim handle the rest.
-                let isTrigger = Self.hasPrefix(line)
+                let match = Self.classify(line)
                 if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1", !line.isEmpty {
-                    FileHandle.standardError.write("AILINE armed=\(armed) zle=\(zleEdit) line=\(String(decoding: line.prefix(24), as: UTF8.self)) trigger=\(isTrigger)\n".data(using: .utf8)!)
+                    FileHandle.standardError.write("AILINE armed=\(armed) agent=\(agentArmed) zle=\(zleEdit) line=\(String(decoding: line.prefix(24), as: UTF8.self)) trigger=\(match != nil)\n".data(using: .utf8)!)
                 }
-                if isTrigger {
-                    let text = Self.requestText(from: line)
+                if let match, (match.kind == .ai ? armed : agentArmed) {
                     line = []; zleEdit = false
-                    onTrigger?(text)
+                    switch match.kind {
+                    case .ai: onTrigger?(match.text)
+                    case .agent(let key): onAgentTrigger?(key, match.text)
+                    }
                     return out  // swallow this enter (and anything after in the same chunk)
                 }
                 if zleEdit {
@@ -123,24 +146,25 @@ final class LineTrigger {
                 line = []
                 out.append(b)
             case 0x7F, 0x08:
-                // Clamp at the trigger prefix: backspacing into "@ai"
-                // would silently disarm the trigger for the rest of the
-                // line — the prefix is kept and the delete is dropped
-                // (the shell still sees the backspace byte).
-                if line.count > Self.prefix.count {
+                // Clamp at the matched trigger prefix: backspacing into
+                // "@ai"/"@omp" would silently disarm the trigger — while
+                // the line IS exactly a prefix, the delete is dropped
+                // (the shell still sees the backspace byte). Any other
+                // line deletes freely.
+                let matchedPrefixCount = Self.prefixes.first {
+                    line.count == $0.bytes.count && line.elementsEqual($0.bytes)
+                }?.bytes.count ?? 0
+                if line.count > matchedPrefixCount {
                     line.removeLast()
                     // Remove the WHOLE UTF-8 character, not one byte:
                     // continuation bytes first, then the LEAD byte they
-                    // belong to. Stopping at the lead byte left it
-                    // dangling and the next append made the line invalid
-                    // UTF-8 → U+FFFD in the card title (the Chinese
-                    // mojibake report).
+                    // belong to (the Chinese mojibake report).
                     while let last = line.last, last & 0xC0 == 0x80,
-                          line.count > Self.prefix.count {
+                          line.count > matchedPrefixCount {
                         line.removeLast()
                     }
                     if let last = line.last, last >= 0xC2,
-                       line.count > Self.prefix.count {
+                       line.count > matchedPrefixCount {
                         line.removeLast()   // lead of the truncated sequence
                     }
                 }
@@ -167,30 +191,60 @@ final class LineTrigger {
 
     func reset() { line = []; inCsi = false; inSs3 = false; zleEdit = false; inPaste = false; csi = [] }
 
-    /// Index just after the @ai prefix at the START of the line,
-    /// tolerating paired-symbol IMEs that emit '@' as '@@' (each extra
-    /// '@' before the final "@ai" is skipped). Mid-line occurrences
-    /// never trigger — only line-leading requests do.
-    static func lastPrefixEnd(_ line: [UInt8]) -> Int? {
-        var i = 0
-        // Skip any run of leading '@' — single or doubled alike — then
-        // require the literal "ai" right after it.
-        while i < line.count && line[i] == 0x40 { i += 1 }
-        guard i > 0, i + 2 <= line.count, line[i] == 0x61, line[i + 1] == 0x69
-        else { return nil }
-        return i + 2
+    /// A matched trigger: kind + request text after the prefix.
+    struct Match {
+        let kind: TriggerKind
+        let text: String
     }
 
-    /// True when the last "@ai" carries at least one non-space byte
-    /// after it (a bare '@ai' with nothing typed does not trigger).
+    /// Classify a line: the LAST line-leading trigger wins (IME "@@"
+    /// tolerance). `.ai` needs a request after the prefix (a bare @ai
+    /// is meaningless); `.agent` accepts a bare `@omp` — that means
+    /// "open the space, no initial prompt".
+    static func classify(_ line: [UInt8]) -> Match? {
+        for (bytes, kind) in prefixes {
+            if hasPrefix(line, prefix: bytes, requirePayload: kind == .ai) {
+                return Match(kind: kind, text: requestText(from: line, prefix: bytes))
+            }
+        }
+        return nil
+    }
+
+    /// Index just after the trigger prefix at the START of the line,
+    /// tolerating paired-symbol IMEs that emit '@' as '@@' (each extra
+    /// '@' before the prefix is skipped). Mid-line occurrences never
+    /// trigger — only line-leading requests do.
+    static func lastPrefixEnd(_ line: [UInt8], prefix: [UInt8] = Array("@ai".utf8)) -> Int? {
+        var i = 0
+        // Skip any run of leading '@' — single or doubled alike — then
+        // require the prefix's remaining bytes right after it.
+        while i < line.count && line[i] == 0x40 { i += 1 }
+        let stem = prefix.dropFirst()   // prefix's bytes after '@'
+        guard i > 0, stem.count > 0, i + stem.count <= line.count,
+              Array(line[i..<(i + stem.count)]) == Array(stem)
+        else { return nil }
+        return i + stem.count
+    }
+
+    /// True when the trigger prefix is line-leading and, for `.ai`,
+    /// carries at least one non-space byte after it (a bare '@ai' with
+    /// nothing typed does not trigger).
     static func hasPrefix(_ line: [UInt8]) -> Bool {
-        guard let end = lastPrefixEnd(line) else { return false }
+        hasPrefix(line, prefix: Array("@ai".utf8))
+    }
+    static func hasPrefix(_ line: [UInt8], prefix: [UInt8],
+                          requirePayload: Bool = true) -> Bool {
+        guard let end = lastPrefixEnd(line, prefix: prefix) else { return false }
+        if !requirePayload { return true }
         return line[end...].contains { $0 != 0x20 && $0 != 0x09 }
     }
 
     /// The request text after the last @ai (surrounding spaces trimmed).
     static func requestText(from line: [UInt8]) -> String {
-        guard let end = lastPrefixEnd(line) else { return "" }
+        requestText(from: line, prefix: Array("@ai".utf8))
+    }
+    static func requestText(from line: [UInt8], prefix: [UInt8]) -> String {
+        guard let end = lastPrefixEnd(line, prefix: prefix) else { return "" }
         return String(decoding: line[end...], as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -209,10 +263,18 @@ final class LineTrigger {
     /// zsh-autosuggestion text; tighten with cursor-column walking
     /// and cell-attribute reads if it bites.
     static func requestFromScreenRow(_ row: String) -> String? {
+        matchFromScreenRow(row, needle: "@ai", kind: .ai)?.text
+    }
+    /// One needle's screen-row scan; the LAST hit on the row wins
+    /// (same prompt-tolerance rules as the @ai scan). A bare agent
+    /// prefix at end-of-row matches with empty text; @ai still needs a
+    /// request.
+    static func matchFromScreenRow(_ row: String, needle: String,
+                                   kind: TriggerKind) -> Match? {
         let banned: Set<Character> = ["\"", "'", "`", "|", "&", ";", "<", ">", "=", "\\"]
         var hits: [Range<String.Index>] = []
         var search = row.startIndex
-        while let r = row.range(of: "@ai", range: search..<row.endIndex) {
+        while let r = row.range(of: needle, range: search..<row.endIndex) {
             hits.append(r); search = r.upperBound
         }
         for r in hits.reversed() {
@@ -220,8 +282,26 @@ final class LineTrigger {
             guard !before.contains(where: { banned.contains($0) }) else { continue }
             let after = row[r.upperBound..<row.endIndex]
                 .trimmingCharacters(in: .whitespaces)
-            if !after.isEmpty { return after }
+            if !after.isEmpty || kind != .ai {
+                return Match(kind: kind, text: after)
+            }
         }
         return nil
+    }
+
+    /// Screen-row match across every trigger: the rightmost hit on the
+    /// row wins, whatever trigger it belongs to.
+    static func matchFromScreenRow(_ row: String) -> Match? {
+        var best: (at: String.Index, match: Match)?
+        for (bytes, kind) in prefixes {
+            let needle = String(decoding: bytes, as: UTF8.self)
+            guard let m = matchFromScreenRow(row, needle: needle, kind: kind) else { continue }
+            // Re-find the rightmost position of this needle that yields
+            // the match (the scan above already walks hits backwards).
+            if let r = row.range(of: needle, options: .backwards), best == nil || r.lowerBound > best!.at {
+                best = (r.lowerBound, m)
+            }
+        }
+        return best?.match
     }
 }

@@ -47,13 +47,15 @@ impl RingSegment {
 
 struct ReplayRing {
     segments: VecDeque<RingSegment>,
+    cap: usize,
     len: usize,
 }
 
 impl ReplayRing {
-    fn new(size: WinSize) -> Self {
+    fn new(size: WinSize, cap: usize) -> Self {
         Self {
             segments: VecDeque::from([RingSegment::empty(size)]),
+            cap,
             len: 0,
         }
     }
@@ -85,7 +87,7 @@ impl ReplayRing {
         if bytes.is_empty() {
             return;
         }
-        if bytes.len() >= RING_CAP {
+        if bytes.len() >= self.cap {
             let size = self.segments.back().map_or(
                 WinSize {
                     cols: 80,
@@ -97,16 +99,16 @@ impl ReplayRing {
             );
             self.segments.clear();
             let mut tail = RingSegment::empty(size);
-            tail.bytes.extend(&bytes[bytes.len() - RING_CAP..]);
+            tail.bytes.extend(&bytes[bytes.len() - self.cap..]);
             self.segments.push_back(tail);
-            self.len = RING_CAP;
+            self.len = self.cap;
             return;
         }
         if let Some(tail) = self.segments.back_mut() {
             tail.bytes.extend(bytes);
         }
         self.len += bytes.len();
-        let mut overflow = self.len.saturating_sub(RING_CAP);
+        let mut overflow = self.len.saturating_sub(self.cap);
         while overflow > 0 {
             let Some(head) = self.segments.front_mut() else {
                 break;
@@ -216,8 +218,13 @@ impl Pane {
     pub fn spawn(request: crate::protocol::SpawnRequest) -> anyhow::Result<Arc<Self>> {
         let size = request.size.sane();
         let pair = native_pty_system().openpty(pty_size(size))?;
-        let mut command = CommandBuilder::new(&request.shell);
-        command.args(&request.args);
+        let (shell, args) = if request.no_echo {
+            echo_off_wrapper(&request.shell, &request.args)
+        } else {
+            (request.shell.clone(), request.args.clone())
+        };
+        let mut command = CommandBuilder::new(&shell);
+        command.args(&args);
         if let Some(cwd) = request
             .cwd
             .as_deref()
@@ -250,7 +257,13 @@ impl Pane {
             child: Mutex::new(Some(child)),
             writer: Mutex::new(writer),
             state: Mutex::new(PaneState {
-                ring: ReplayRing::new(size),
+                ring: ReplayRing::new(
+                    size,
+                    request
+                        .ring_bytes
+                        .map(|b| (b as usize).clamp(64 * 1024, 256 * 1024 * 1024))
+                        .unwrap_or(RING_CAP),
+                ),
                 bracketed_paste: BracketedPasteTracker::new(),
                 subscriber: None,
                 subscriber_epoch: 0,
@@ -556,6 +569,23 @@ fn unwrap_runtime_argv(argv: &[String]) -> Option<String> {
         _ => Some(argv0),
     }
 }
+/// Agent panes need ECHO off (agent CLIs never manage termios). Rather
+/// than reaching for the master fd, run the command under `sh -c`: stty
+/// executes inside the pty itself, then exec replaces the shell. The
+/// client's echo filter (JSONRPCChannel.recentOut) tolerates the µs window
+/// before stty lands.
+fn echo_off_wrapper(shell: &str, args: &[String]) -> (String, Vec<String>) {
+    fn quote(token: &str) -> String {
+        format!("'{}'", token.replace('\'', "'\\''"))
+    }
+    let mut line = String::from("stty -echo 2>/dev/null; exec ");
+    line.push_str(&quote(shell));
+    for arg in args {
+        line.push(' ');
+        line.push_str(&quote(arg));
+    }
+    ("/bin/sh".to_string(), vec!["-c".to_string(), line])
+}
 
 impl Drop for Pane {
     fn drop(&mut self) {
@@ -576,10 +606,28 @@ fn spawn_reader(
         .name(format!("goty-pane-{}", pane.id))
         .spawn(move || {
             let mut scratch = [0u8; 64 * 1024];
+            let mut diag_bytes: usize = 0;
+            let mut diag_chunks: usize = 0;
+            let diag_t0 = std::time::Instant::now();
             loop {
                 match reader.read(&mut scratch) {
                     Ok(0) => break,
                     Ok(count) => {
+                        if std::env::var("GOTYD_REPLAY_DIAG").is_ok() {
+                            diag_bytes += count;
+                            diag_chunks += 1;
+                            if diag_bytes / 262_144 != (diag_bytes - count) / 262_144 {
+                                eprintln!(
+                                    "gotyd: reader {}B in {:.3}s chunks={} ({:.2} MB/s)",
+                                    diag_bytes,
+                                    diag_t0.elapsed().as_secs_f32(),
+                                    diag_chunks,
+                                    diag_bytes as f32
+                                        / 1048576.0
+                                        / diag_t0.elapsed().as_secs_f32().max(0.001)
+                                );
+                            }
+                        }
                         let bytes = &scratch[..count];
                         let Ok(mut state) = pane.state.lock() else {
                             break;
@@ -653,7 +701,7 @@ mod tests {
 
     #[test]
     fn replay_preserves_geometry_boundaries() {
-        let mut ring = ReplayRing::new(size(80));
+        let mut ring = ReplayRing::new(size(80), RING_CAP);
         ring.append(b"old");
         assert!(ring.resize(size(120)));
         ring.append(b"new");
@@ -676,7 +724,7 @@ mod tests {
 
     #[test]
     fn duplicate_resize_is_not_a_new_geometry() {
-        let mut ring = ReplayRing::new(size(80));
+        let mut ring = ReplayRing::new(size(80), RING_CAP);
         ring.append(b"screen");
         let before = ring.segments.len();
         assert!(!ring.resize(size(80)));
@@ -718,12 +766,42 @@ mod tests {
 
     #[test]
     fn ring_keeps_only_the_newest_bytes() {
-        let mut ring = ReplayRing::new(size(80));
+        let mut ring = ReplayRing::new(size(80), RING_CAP);
         let bytes = vec![b'x'; RING_CAP + 4096];
         ring.append(&bytes);
         assert_eq!(ring.len, RING_CAP);
         assert_eq!(ring.segments.len(), 1);
         assert_eq!(ring.segments[0].bytes.len(), RING_CAP);
+    }
+
+    #[test]
+    fn ring_honors_custom_capacity() {
+        let mut ring = ReplayRing::new(size(80), 16);
+        ring.append(b"aaaaaaaaaaaaaaaa"); // 16 bytes: exactly full
+        ring.append(b"bbbb");
+        assert_eq!(ring.len, 16);
+        let (tx, rx) = mpsc::sync_channel(8);
+        assert!(ring.replay(&tx));
+        drop(tx);
+        let bytes: Vec<u8> = rx
+            .into_iter()
+            .filter(|f: &OutFrame| f.kind == protocol::kind::SNAPSHOT)
+            .flat_map(|f| f.payload)
+            .collect();
+        assert_eq!(bytes, b"aaaaaaaaaaaabbbb".to_vec()); // newest 16 bytes
+    }
+
+    #[test]
+    fn echo_off_wrapper_quotes_arguments() {
+        let (shell, args) = echo_off_wrapper("omp", &["acp".to_string()]);
+        assert_eq!(shell, "/bin/sh");
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[1], "stty -echo 2>/dev/null; exec 'omp' 'acp'");
+        let (_, args) = echo_off_wrapper(
+            "/usr/local/bin/claude",
+            &["-r".to_string(), "it's id".to_string()],
+        );
+        assert!(args[1].contains(r"'it'\''s id'"));
     }
 
     #[test]
