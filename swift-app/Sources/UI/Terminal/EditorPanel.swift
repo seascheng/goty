@@ -105,8 +105,13 @@ final class EditorPanelView: NSView, ThemeRefreshable {
     /// into the page.
     func retheme() {
         layer?.backgroundColor = PaneHost.backdropTarget()?.cgColor
-        headerBackground.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
-        statusBar.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
+        // Region-exclusive bands (the webview is constrained BETWEEN
+        // them, never underlaps): they must paint their own
+        // chromeSurface fill in every mode — chromeContainerFill's
+        // translucent nil is for fills that sit ABOVE a painted root,
+        // and nil here exposed raw desktop through the band.
+        headerBackground.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
+        statusBar.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
         nameLabel.textColor = currentFile == nil
             ? Chrome.theme.secondaryText : Chrome.theme.foreground
         coverView.layer?.backgroundColor = PaneHost.backdropPlaceholder().cgColor
@@ -137,7 +142,9 @@ final class EditorPanelView: NSView, ThemeRefreshable {
 
         // Header: filename, dirty dot, close (= back to terminal).
         headerBackground.wantsLayer = true
-        headerBackground.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
+        // Region-exclusive band (webview starts BELOW it) — see the
+        // retheme() comment: chromeSurface, never chromeContainerFill.
+        headerBackground.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
         headerBackground.translatesAutoresizingMaskIntoConstraints = false
         addSubview(headerBackground)
 
@@ -195,7 +202,8 @@ final class EditorPanelView: NSView, ThemeRefreshable {
 
         // Status bar: path, wrap toggle, Ln/Col (tty7 26pt strip).
         statusBar.wantsLayer = true
-        statusBar.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
+        // Region-exclusive band — chromeSurface, see retheme().
+        statusBar.layer?.backgroundColor = chromeSurface(Chrome.theme.topBarBackground).cgColor
         statusBar.translatesAutoresizingMaskIntoConstraints = false
         addSubview(statusBar)
 
