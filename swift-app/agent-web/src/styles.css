@@ -135,6 +135,10 @@ body {
   font-family: "SF Mono", Menlo, monospace; font-size: 12px;
 }
 .tool-path { color: var(--fg-muted); font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
+.tool-out-label {
+  margin-top: 6px; font-size: 11px; color: var(--fg-extra-muted);
+  text-transform: uppercase; letter-spacing: 0.4px;
+}
 
 /* — plan — */
 .plan {

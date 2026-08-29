@@ -7,6 +7,9 @@ export type ToolContent = { type: string; text?: string | null; path?: string | 
 export type ToolCall = {
   id: string; title?: string | null; kind?: string | null; status?: string | null;
   content: ToolContent[];
+  /// Tool result (`rawOutput.content`, omp displayContent fallback) —
+  /// what the flat-only Swift reader used to drop on resume.
+  output: ToolContent[];
   rawInput?: Record<string, unknown> | null;
   oldText?: string | null;
 };
@@ -85,6 +88,7 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
     kind: z.string().nullish(),
     status: z.string().nullish(),
     content: z.array(ToolContentSchema).nullish(),
+    output: z.array(ToolContentSchema).nullish(),
     rawInput: z.record(z.string(), z.unknown()).nullish(),
     oldText: z.string().nullish(),
   }),
@@ -165,6 +169,11 @@ class Store {
   /// Bumped whenever blocks are replaced wholesale (clearTranscript):
   /// the render window resets with it.
   generation = 0;
+  /// Transport integrity accounting (cumulative across clearTranscript):
+  /// the replayprobe asserts applied+rejected == what Swift delivered
+  /// and rejected == 0 — a mismatch localizes the first lossy boundary.
+  appliedCount = 0;
+  rejectedCount = 0;
   private nextBlockId = 1;
   private listeners = new Set<Listener>();
 
@@ -211,21 +220,28 @@ class Store {
   /// session/load stall).
   applyAll(rawList: unknown[]) {
     let applied = 0;
+    let rejected = 0;
     for (const raw of rawList) {
       const event = parseEvent(raw);
-      if (!event) continue;
+      if (!event) { rejected += 1; continue; }
       this.applyParsed(event);
       applied += 1;
     }
+    if (rejected > 0) {
+      this.rejectedCount += rejected;
+      console.warn("goty: rejected", rejected, "unparseable events in batch");
+    }
     if (applied === 0) return;
+    this.appliedCount += applied;
     this.revision += 1;
     this.emit();
   }
 
   apply(raw: unknown) {
     const event = parseEvent(raw);
-    if (!event) return;
+    if (!event) { this.rejectedCount += 1; return; }
     this.applyParsed(event);
+    this.appliedCount += 1;
     this.revision += 1;
     this.emit();
   }
@@ -249,6 +265,7 @@ class Store {
           kind: event.kind ?? prev?.kind,
           status: event.status ?? prev?.status,
           content: (event.content ?? []).length > 0 ? (event.content as ToolContent[]) : prev?.content ?? [],
+          output: (event.output ?? []).length > 0 ? (event.output as ToolContent[]) : prev?.output ?? [],
           rawInput: event.rawInput ?? prev?.rawInput ?? null,
           oldText: event.oldText ?? prev?.oldText ?? null,
         };

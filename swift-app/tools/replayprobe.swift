@@ -20,109 +20,45 @@ final class ProbeSink: NSObject, WKScriptMessageHandler {
 final class ProbeDelegate: AgentSessionDelegate {
     let lock = NSLock()
     var eventCounts: [String: Int] = [:]
-    var lastAgentText = ""
     var lastUserText = ""
-    var mapped: [[String: Any]] = []
+    var lastAgentText = ""
+    var lastThoughtText = ""
+    /// Latest-wins per tool id — mirrors the page store's upsert so the
+    /// char totals are comparable across the boundary.
+    var toolContentChars: [String: Int] = [:]
+    var toolOutputChars: [String: Int] = [:]
+    var totalEvents = 0
     weak var bridge: AgentWebBridge?
 
     func session(_ session: AgentSession, didEmit events: [AgentSessionEvent]) {
         lock.lock(); defer { lock.unlock() }
+        totalEvents += events.count
         for e in events {
             switch e {
             case .ready: break
             case .userChunk(let t):
                 eventCounts["userChunk", default: 0] += 1
                 lastUserText += t
-                mapped.append(["type": "userChunk", "text": t])
             case .messageChunk(let t):
                 eventCounts["messageChunk", default: 0] += 1
                 lastAgentText += t
-                mapped.append(["type": "agentChunk", "text": t])
             case .thoughtChunk(let t):
                 eventCounts["thoughtChunk", default: 0] += 1
-                mapped.append(["type": "thoughtChunk", "text": t])
-            case .toolCallUpdate(let id, let title, let kind, let status, let content, let rawInput, let oldText):
+                lastThoughtText += t
+            case .toolCallUpdate(let id, _, _, _, let content, let output, _, _):
                 eventCounts["toolCallUpdate", default: 0] += 1
-                let contentList: [[String: Any]] = content.map { item in
-                    var d: [String: Any] = ["type": item.type]
-                    if let text = item.text { d["text"] = text }
-                    if let path = item.path { d["path"] = path }
-                    return d
-                }
-                var d: [String: Any] = ["type": "toolCall", "id": id, "content": contentList]
-                d["title"] = title ?? NSNull()
-                d["kind"] = kind ?? NSNull()
-                d["status"] = status ?? NSNull()
-                d["rawInput"] = rawInput ?? NSNull()
-                d["oldText"] = oldText ?? NSNull()
-                mapped.append(d)
-            case .plan(let entries):
-                eventCounts["plan", default: 0] += 1
-                mapped.append(["type": "plan", "entries": entries.map { ["content": $0.content] }])
-            case .permissionRequested(let prompt):
-                eventCounts["permission", default: 0] += 1
-                mapped.append(["type": "permission", "requestID": prompt.requestID,
-                               "toolCallTitle": prompt.toolCallTitle ?? NSNull(),
-                               "options": prompt.options.map { ["optionId": $0.optionId, "name": $0.name] }])
-            case .turnEnded:
-                eventCounts["turnEnded", default: 0] += 1
-                mapped.append(["type": "turnEnded"])
-            case .configChanged(let opts):
-                eventCounts["config", default: 0] += 1
-                mapped.append(["type": "configOptions", "options": opts.map { ["id": $0.id, "name": $0.name] }])
-            case .commandsChanged(let cmds):
-                eventCounts["commands", default: 0] += 1
-                mapped.append(["type": "commands", "commands": cmds.map { ["name": $0.name, "description": $0.description ?? "", "input": ["hint": $0.inputHint ?? ""]] }])
-            case .usageUpdate(let used, let size, let input, let output, let amount, let currency):
-                eventCounts["usage", default: 0] += 1
-                mapped.append(["type": "usage", "used": used ?? NSNull(), "size": size ?? NSNull(),
-                               "input": input ?? NSNull(), "output": output ?? NSNull(),
-                               "costAmount": amount ?? NSNull(), "costCurrency": currency ?? NSNull()])
+                toolContentChars[id] = content.reduce(0) { $0 + ($1.text?.utf16.count ?? 0) }
+                toolOutputChars[id] = output.reduce(0) { $0 + ($1.text?.utf16.count ?? 0) }
+            case .plan: eventCounts["plan", default: 0] += 1
+            case .permissionRequested: eventCounts["permission", default: 0] += 1
+            case .turnEnded: eventCounts["turnEnded", default: 0] += 1
+            case .configChanged: eventCounts["config", default: 0] += 1
+            case .commandsChanged: eventCounts["commands", default: 0] += 1
+            case .usageUpdate: eventCounts["usage", default: 0] += 1
             }
-            if let bridge, let js = jsEvent(e), !js.isEmpty {
-                bridge.push(js)
+            if let bridge {
+                bridge.push(e.jsRepresentation)
             }
-        }
-    }
-
-    /// Mirrors AgentPaneHost.jsEvent — keep in sync when editing that.
-    private func jsEvent(_ event: AgentSessionEvent) -> [String: Any]? {
-        switch event {
-        case .ready: return nil
-        case .userChunk(let text): return ["type": "userChunk", "text": text]
-        case .messageChunk(let text): return ["type": "agentChunk", "text": text]
-        case .thoughtChunk(let text): return ["type": "thoughtChunk", "text": text]
-        case .toolCallUpdate(let id, let title, let kind, let status, let content, let rawInput, let oldText):
-            let contentList: [[String: Any]] = content.map { item in
-                var d: [String: Any] = ["type": item.type]
-                if let text = item.text { d["text"] = text }
-                if let path = item.path { d["path"] = path }
-                return d
-            }
-            var d: [String: Any] = ["type": "toolCall", "id": id, "content": contentList]
-            d["title"] = title ?? NSNull()
-            d["kind"] = kind ?? NSNull()
-            d["status"] = status ?? NSNull()
-            d["rawInput"] = rawInput ?? NSNull()
-            d["oldText"] = oldText ?? NSNull()
-            return d
-        case .plan(let entries):
-            return ["type": "plan", "entries": entries.map { ["content": $0.content, "priority": $0.priority ?? NSNull(), "status": $0.status ?? NSNull()] as [String: Any] }]
-        case .permissionRequested(let prompt):
-            return ["type": "permission", "requestID": prompt.requestID,
-                    "toolCallTitle": prompt.toolCallTitle ?? NSNull(),
-                    "options": prompt.options.map { ["optionId": $0.optionId, "name": $0.name, "kind": $0.kind ?? NSNull()] as [String: Any] }]
-        case .turnEnded(let stopReason):
-            _ = stopReason
-            return ["type": "turnEnded"]
-        case .configChanged(let opts):
-            return ["type": "configOptions", "options": opts.map { ["id": $0.id, "name": $0.name] }]
-        case .commandsChanged(let cmds):
-            return ["type": "commands", "commands": cmds.map { ["name": $0.name, "description": $0.description ?? "", "input": ["hint": $0.inputHint ?? ""] as [String: String] ] as [String: Any] }]
-        case .usageUpdate(let used, let size, let input, let output, let amount, let currency):
-            return ["type": "usage", "used": used ?? NSNull(), "size": size ?? NSNull(),
-                    "input": input ?? NSNull(), "output": output ?? NSNull(),
-                    "costAmount": amount ?? NSNull(), "costCurrency": currency ?? NSNull()]
         }
     }
 
@@ -190,30 +126,67 @@ enum ReplayProbe {
         session.load(sessionId: sid) { ok in loadOk = ok }
         _ = pump(until: { loadOk }, timeout: 60)
         print("load ok:", loadOk, "in", Date().timeIntervalSince(t0), "s")
-        pump(until: { false }, timeout: 5)
+        pump(until: { false }, timeout: 8)
 
         delegate.lock.lock()
         print("EVENTS:", delegate.eventCounts.sorted { $0.key < $1.key })
         print("AGENT TAIL:", delegate.lastAgentText.suffix(120))
+        let swiftEvents = delegate.totalEvents
+        let swiftUser = delegate.lastUserText
+        let swiftAgent = delegate.lastAgentText
+        let swiftThought = delegate.lastThoughtText
+        let swiftToolChars = delegate.toolContentChars.values.reduce(0, +)
+            + delegate.toolOutputChars.values.reduce(0, +)
         delegate.lock.unlock()
 
-        var readBack: String?
+        // — Integrity audit: every layer must agree byte-for-byte —
+        var audit: String?
         webView.evaluateJavaScript("""
             JSON.stringify({
-              revision: window.__gotyStore.revision,
-              blocks: window.__gotyStore.blocks.length,
-              users: window.__gotyStore.blocks.filter(b => b.kind === 'user').length,
-              lastUser: (() => { const u = [...window.__gotyStore.blocks].reverse().find(b => b.kind === 'user'); return u ? u.text.slice(0, 80) : null; })(),
-              tailKind: window.__gotyStore.blocks[window.__gotyStore.blocks.length-1]?.kind ?? 'none',
-              tailText: ((window.__gotyStore.blocks[window.__gotyStore.blocks.length-1]?.text) ?? '').slice(-120),
+              applied: window.__gotyStore.appliedCount,
+              rejected: window.__gotyStore.rejectedCount,
+              userText: window.__gotyStore.blocks.filter(b => b.kind === 'user').map(b => b.text).join(''),
+              agentText: window.__gotyStore.blocks.filter(b => b.kind === 'agent').map(b => b.text).join(''),
+              thoughtText: window.__gotyStore.blocks.filter(b => b.kind === 'thought').map(b => b.text).join(''),
+              toolChars: [...window.__gotyStore.tools.values()].reduce((n, c) =>
+                n + c.content.reduce((m, x) => m + (x.text ? x.text.length : 0), 0)
+                  + c.output.reduce((m, x) => m + (x.text ? x.text.length : 0), 0), 0),
             })
             """) { r, err in
             if let err { print("READ ERROR:", err) }
-            readBack = r as? String
+            audit = r as? String
         }
-        _ = pump(until: { readBack != nil }, timeout: 30)
-        print("STORE:", readBack ?? "nil")
+        _ = pump(until: { audit != nil }, timeout: 30)
+        guard let raw = audit,
+              let data = raw.data(using: .utf8),
+              let page = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            print("FAIL  page audit readback")
+            exit(1)
+        }
+        let pageApplied = page["applied"] as? Int ?? -1
+        let pageRejected = page["rejected"] as? Int ?? -1
+        let pageToolChars = page["toolChars"] as? Int ?? -1
+        print("PAGE: applied=\(pageApplied) rejected=\(pageRejected) toolChars=\(pageToolChars)")
+
+        var auditFailures = 0
+        func expect(_ ok: Bool, _ name: String) {
+            if ok { print("  ok  \(name)") } else { auditFailures += 1; print("FAIL  \(name)") }
+        }
+        expect(bridge.droppedPoison == 0, "bridge dropped no poison events")
+        expect(swiftEvents == bridge.pushed,
+               "delegate events == bridge pushed (\(swiftEvents) vs \(bridge.pushed))")
+        expect(pageRejected == 0, "page rejected nothing")
+        expect(pageApplied + pageRejected == bridge.delivered,
+               "page applied+rejected == bridge delivered (\(pageApplied)+\(pageRejected) vs \(bridge.delivered))")
+        expect(page["userText"] as? String == swiftUser, "user text byte-equal")
+        expect(page["agentText"] as? String == swiftAgent, "agent text byte-equal")
+        expect(page["thoughtText"] as? String == swiftThought, "thought text byte-equal")
+        expect(pageToolChars == swiftToolChars,
+               "tool text chars byte-equal (\(pageToolChars) vs \(swiftToolChars))")
+
         session.shutdown()
+        if auditFailures > 0 { exit(1) }
+        print("replayprobe: integrity audit passed")
         exit(0)
     }
 }

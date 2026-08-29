@@ -223,86 +223,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             for event in events {
-                if case .ready = event {
-                    self.bridge.push(["type": "status", "text": "就绪"])
-                    continue
-                }
                 if case .permissionRequested(let prompt) = event {
                     self.pendingPrompt = prompt
                     self.onPermissionPending?(true)
                 }
-                self.bridge.push(self.jsEvent(event))
+                self.bridge.push(event.jsRepresentation)
             }
-        }
-    }
-
-    /// One decoded ACP event → one JS event. `.ready` is handled above.
-    private func jsEvent(_ event: AgentSessionEvent) -> [String: Any] {
-        switch event {
-        case .ready:
-            return [:]
-        case .userChunk(let text):
-            return ["type": "userChunk", "text": text]
-        case .messageChunk(let text):
-            return ["type": "agentChunk", "text": text]
-        case .thoughtChunk(let text):
-            return ["type": "thoughtChunk", "text": text]
-        case .toolCallUpdate(let id, let title, let kind, let status, let content, let rawInput, let oldText):
-            let contentList: [[String: Any]] = content.map { item in
-                ["type": item.type, "text": item.text ?? NSNull(), "path": item.path ?? NSNull()]
-            }
-            return ["type": "toolCall",
-                    "id": id,
-                    "title": title ?? NSNull(),
-                    "kind": kind ?? NSNull(),
-                    "status": status ?? NSNull(),
-                    "content": contentList,
-                    "rawInput": rawInput ?? NSNull(),
-                    "oldText": oldText ?? NSNull()]
-        case .plan(let entries):
-            let entryList: [[String: Any]] = entries.map { entry in
-                ["content": entry.content,
-                 "priority": entry.priority ?? NSNull(),
-                 "status": entry.status ?? NSNull()]
-            }
-            return ["type": "plan", "entries": entryList]
-        case .permissionRequested(let prompt):
-            let optionList: [[String: Any]] = prompt.options.map { option in
-                ["optionId": option.optionId,
-                 "name": option.name,
-                 "kind": option.kind ?? NSNull()]
-            }
-            return ["type": "permission",
-                    "requestID": prompt.requestID,
-                    "toolCallTitle": prompt.toolCallTitle ?? NSNull(),
-                    "options": optionList]
-        case .configChanged(let options):
-            let optionList: [[String: Any]] = options.map { option in
-                let choices: [[String: Any]] = option.options.map { choice in
-                    ["value": choice.value, "name": choice.name,
-                     "description": choice.description ?? NSNull()]
-                }
-                return ["id": option.id, "name": option.name,
-                        "category": option.category ?? NSNull(),
-                        "currentValue": option.currentValue ?? NSNull(),
-                        "options": choices]
-            }
-            return ["type": "configOptions", "options": optionList]
-        case .commandsChanged(let commands):
-            let commandList: [[String: Any]] = commands.map { command in
-                ["name": command.name,
-                 "description": command.description ?? NSNull(),
-                 "inputHint": command.inputHint ?? NSNull()]
-            }
-            return ["type": "commands", "commands": commandList]
-        case .usageUpdate(let used, let size, let input, let output,
-                          let costAmount, let costCurrency):
-            return ["type": "usage", "used": used ?? NSNull(), "size": size ?? NSNull(),
-                    "input": input ?? NSNull(), "output": output ?? NSNull(),
-                    "costAmount": costAmount ?? NSNull(),
-                    "costCurrency": costCurrency ?? NSNull()]
-        case .turnEnded:
-            return ["type": "turnEnded"]
         }
     }
 

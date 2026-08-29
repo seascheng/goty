@@ -85,8 +85,9 @@ enum AgentTest {
         ]])
         check(events.count == 2, "two events so far")
         if case .messageChunk(let text)? = events.first, text == "hello" {} else { failures += 1; print("FAIL  messageChunk payload") }
-        if case .toolCallUpdate(let id, _, _, let status, let content, let rawInput, let oldText) = events.last,
-           id == "t1", status == "completed", content.count == 1, rawInput == nil, oldText == nil {} else { failures += 1; print("FAIL  toolCallUpdate payload") }
+        if case .toolCallUpdate(let id, _, _, let status, let content, let output, let rawInput, let oldText) = events.last,
+           id == "t1", status == "completed", content.count == 1, output.isEmpty,
+           rawInput == nil, oldText == nil {} else { failures += 1; print("FAIL  toolCallUpdate payload") }
 
         events += session.interpret(["method": "session/update", "params": [
             "sessionId": "s1",
@@ -95,7 +96,7 @@ enum AgentTest {
                        "rawInput": ["path": samplePath, "content": "new"],
                        "content": [["type": "text", "text": "x"]]],
         ]])
-        if case .toolCallUpdate(_, _, let kind, _, _, let editInput, let oldText)? = events.last,
+        if case .toolCallUpdate(_, _, let kind, _, _, _, let editInput, let oldText)? = events.last,
            kind == "edit",
            let editPath = editInput?["path"] as? String, editPath == samplePath,
            oldText == "old content" {} else { failures += 1; print("FAIL  edit oldText snapshot") }
@@ -110,19 +111,21 @@ enum AgentTest {
         if case .userChunk(let userText)? = events.last, userText == "我看当前已经有了" {} else {
             failures += 1; print("FAIL  user_message_chunk replay")
         }
-        // Oversized tool payloads get capped so one event can never blow
-        // the webview's evaluateJavaScript budget.
+        // Full fidelity, both wire shapes: nested content wrappers and
+        // rawOutput results survive untouched — no cap. The old flat-only
+        // reader plus the 64 KiB cap dropped exactly these on resume.
         events += session.interpret(["method": "session/update", "params": [
             "sessionId": "s1",
-            "update": ["sessionUpdate": "tool_call", "toolCallId": "big",
-                       "title": "Read", "kind": "read", "status": "completed",
-                       "content": [["type": "content", "text": String(repeating: "x", count: 100_000)]]],
-        ]])
-        if case .toolCallUpdate(_, _, _, _, let bigContent, _, _)? = events.last,
-           let capped = bigContent.first?.text,
-           capped.hasPrefix(String(repeating: "x", count: 64_000)),
-           capped.hasSuffix("… [截断，完整输出见终端]") {} else {
-            failures += 1; print("FAIL  tool content cap")
+            "update": ["sessionUpdate": "tool_call_update", "toolCallId": "t3",
+                       "status": "completed",
+                       "content": [["type": "content", "content":
+                                       ["type": "text", "text": String(repeating: "x", count: 100_000)]]],
+                       "rawOutput": ["content": [["type": "text", "text": "tool result body"]]],
+        ]]])
+        if case .toolCallUpdate(_, _, _, _, let big, let bigOut, _, _)? = events.last,
+           big.first?.text?.count == 100_000,
+           bigOut.first?.text == "tool result body" {} else {
+            failures += 1; print("FAIL  full-fidelity tool payloads (nested + rawOutput, no cap)")
         }
 
         events += session.interpret(["method": "session/update", "params": [
@@ -169,6 +172,63 @@ enum AgentTest {
         if case .usageUpdate(_, _, let noIn, let noOut, _, _)? = events.last,
            noIn == nil && noOut == nil {} else { failures += 1; print("FAIL  usage without token split stays nil") }
 
+        print("— ACPContentNormalizer —")
+        check(ACPContentNormalizer.flatten([["type": "text", "text": "a"]]).first?.text == "a",
+              "flat leaf")
+        check(ACPContentNormalizer.flatten([
+            ["type": "content", "content": ["type": "text", "text": "inner"]],
+        ]).first?.text == "inner", "nested single wrapper")
+        check(ACPContentNormalizer.flatten([
+            ["type": "content", "content": [["type": "text", "text": "b"],
+                                            ["type": "text", "text": "c"]]],
+        ]).map { $0.text } == ["b", "c"], "nested list wrapper")
+        check(ACPContentNormalizer.resultItems(rawOutput: [
+            "content": [["type": "text", "text": "out"]],
+        ]).first?.text == "out", "rawOutput content")
+        check(ACPContentNormalizer.resultItems(rawOutput: [
+            "details": ["displayContent": "display fallback"],
+        ]).first?.text == "display fallback", "displayContent fallback")
+
+        print("— NdjsonSplitter big lines —")
+        var big = NdjsonSplitter()
+        let huge = "{\"j\":\"" + String(repeating: "y", count: 2_000_000) + "\"}\n"
+        let raw = Array(huge.utf8)
+        var collected: [String] = []
+        var idx = 0
+        while idx < raw.count {
+            let end = min(idx + 7919, raw.count)
+            collected += big.feed(Array(raw[idx..<end]))
+            idx = end
+        }
+        check(collected.count == 1 && collected[0].count == huge.count - 1,
+              "2MB line survives chunked feed byte-exact")
+
+        print("— ACPClient replay suppression —")
+        let rc = ACPClient()
+        var replayed: [(String, [String: Any])] = []
+        var liveResult: [String: Any]?
+        var liveDone = false
+        rc.onNotification = { replayed.append(($0, $1)) }
+        rc.request("session/new", [:]) { result in
+            if case .success(let v) = result { liveResult = v }
+            liveDone = true
+        }
+        // Ring history: the OLD session/new response carries the SAME id.
+        // It must not complete the fresh handshake…
+        rc.feed(Array("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"stale\"}}\n".utf8), replay: true)
+        check(!liveDone, "replayed stale response does not complete pending")
+        // …while history notifications still rebuild the transcript.
+        rc.feed(Array("{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"from-ring\"}}}}\n".utf8), replay: true)
+        check(replayed.count == 1, "replayed notification routed")
+        // The real live response completes normally afterwards.
+        rc.feed(Array("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"fresh\"}}\n".utf8))
+        check(liveDone && liveResult?["sessionId"] as? String == "fresh",
+              "live response completes after replay")
+
+        print("— integrity counters —")
+        check(session.bytesFed == 0 && session.eventsEmitted > 0,
+              "events counted without frames fed")
+        check(rc.messagesRouted == 3, "messages routed counted")
         print("— manifest —")
         let launch = AgentManifests.acpLaunch(for: "omp")
         check(launch?.command == "omp" && launch?.args == ["acp"], "omp acp launch")

@@ -134,7 +134,7 @@ final class AgentSession: AgentSessioning {
     }
 
     private func handleFrame(kind: UInt8, data: Data) {
-        guard kind == SessionOutputKind.output else { return } // SIZE/SNAPSHOT 已进 ring，无需解析
+        bytesFed += data.count
         if debugFramesEnabled {
             if loadDebugBytes == 0 { loadDebugStart = Date() }
             loadDebugBytes += data.count
@@ -143,7 +143,20 @@ final class AgentSession: AgentSessioning {
                 print("GOTY_DEBUG: replay \(loadDebugBytes)B in \(Date().timeIntervalSince(loadDebugStart))s frames=\(loadDebugFrames)")
             }
         }
-        client.feed([UInt8](data))
+        switch kind {
+        case SessionOutputKind.output:
+            client.feed([UInt8](data))
+        case SessionOutputKind.snapshot:
+            // Ring replay (reattach to a live pane): the history bytes ARE
+            // the transcript. Replayed responses never complete the fresh
+            // handshake — ACPClient drops those in replay mode — while the
+            // session/update notifications rebuild the transcript.
+            client.feed([UInt8](data), replay: true)
+        case SessionOutputKind.exited:
+            delegate?.sessionDidFail(self, reason: "agent 进程已退出")
+        default:
+            break // SIZE/ATTACHED/ERROR: transport markers, not transcript
+        }
     }
 
     /// Replay bursts arrive as thousands of single-event emits; hopping
@@ -153,6 +166,7 @@ final class AgentSession: AgentSessioning {
     /// time ready/config events can never strand in the buffer.
     private func emit(_ events: [AgentSessionEvent]) {
         guard !events.isEmpty else { return }
+        eventsEmitted += events.count
         pendingLock.lock()
         pendingEvents.append(contentsOf: events)
         let needsSchedule = !pendingFlushScheduled
@@ -191,6 +205,16 @@ final class AgentSession: AgentSessioning {
     private let debugFramesEnabled = ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil
     var debugReplayBytes: Int { loadDebugBytes }
     var debugReplayFrames: Int { loadDebugFrames }
+
+    // MARK: - Integrity accounting
+
+    /// Resume audits compare these per layer — bytes in, ACP messages
+    /// routed, events emitted; any mismatch localizes the first lossy
+    /// boundary. Integer bumps, always on.
+    private(set) var bytesFed = 0
+    private(set) var eventsEmitted = 0
+    var messagesRouted: Int { client.messagesRouted }
+    var unparseableLines: Int { client.unparseableLines }
 
     func send(_ text: String) {
         guard let sessionId, !isWorking else { return }
@@ -261,7 +285,7 @@ final class AgentSession: AgentSessioning {
         // omp REQUIRES a string cwd ("path must be of type string" on
         // null/missing) — fall back to the process cwd for panes whose
         // workspace never tracked one.
-        var params: [String: Any] = [
+        let params: [String: Any] = [
             "sessionId": id,
             "cwd": cwd ?? FileManager.default.currentDirectoryPath,
             "mcpServers": [],
@@ -331,18 +355,13 @@ final class AgentSession: AgentSessioning {
             }
         case "tool_call", "tool_call_update":
             if let id = update["toolCallId"] as? String {
-                // Cap each content item: replayed sessions carry whole-file
-                // tool payloads, and a single multi-hundred-KB event would
-                // blow the webview's evaluateJavaScript budget even chunked.
-                let content = ((update["content"] as? [[String: Any]]) ?? [])
-                    .map { item -> [String: Any] in
-                        var item = item
-                        if let text = item["text"] as? String, text.count > 64_000 {
-                            item["text"] = String(text.prefix(64_000)) + "\n… [截断，完整输出见终端]"
-                        }
-                        return item
-                    }
-                    .compactMap(ACPContent.init)
+                // Full fidelity, both wire shapes: nested `content` wrappers
+                // and `rawOutput` tool results. The flat-only reader plus a
+                // 64 KiB cap silently dropped most tool output on resume —
+                // the long-session content loss. No truncation here: the
+                // render layer windows, the bridge is structured transport.
+                let content = ACPContentNormalizer.flatten(update["content"] as? [[String: Any]])
+                let output = ACPContentNormalizer.resultItems(rawOutput: update["rawOutput"])
                 // Edit-like calls carry rawInput {path, content}: snapshot the
                 // on-disk file NOW (before the write lands) so the UI can
                 // render a real old↔new diff. Local panes only; 256 KiB cap.
@@ -360,6 +379,7 @@ final class AgentSession: AgentSessioning {
                                               kind: update["kind"] as? String,
                                               status: toolStatus,
                                               content: content,
+                                              output: output,
                                               rawInput: update["rawInput"] as? [String: Any],
                                               oldText: oldText))
             }

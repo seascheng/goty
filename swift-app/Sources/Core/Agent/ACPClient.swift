@@ -1,5 +1,6 @@
 // goty — see CLAUDE.md for the working principles.
 import Foundation
+
 /// JSON-RPC `error.message` carrier. String itself is not an Error
 /// (SE-0192 removed the implicit conformance).
 enum ACPFailure: Error {
@@ -11,62 +12,92 @@ enum ACPFailure: Error {
 /// and the schema is still moving (v1/v2); AgentSession owns the typed
 /// extraction. Outbound goes through onOutbound → PaneSession.sendInput.
 ///
+/// Concurrency: frames arrive on the pane's reader thread while requests
+/// are sent from the main thread — all mutable state (pending map, ids,
+/// echo ring, splitter) is lock-guarded, and request completions fire
+/// OUTSIDE the lock (connect chains issue follow-up requests from inside
+/// completions). `pending` is inserted BEFORE the request hits the wire,
+/// so a fast response can never outrun its own registration.
+///
 /// Echo filter: the no-echo stty runs inside the pty microseconds after
 /// fork; anything we write before it lands can come back verbatim. The
 /// last 32 outbound lines are ring-buffered and dropped on sight.
+///
+/// Replay mode: the daemon's ring replay (reattach to a live pane)
+/// re-streams history containing stale responses to OLD requests. Those
+/// carry the same small ids a fresh handshake is about to use —
+/// completing a fresh pending entry from a stale replayed response would
+/// bind wrong session ids. Replayed responses therefore never complete
+/// pending requests; notifications and server→client requests still
+/// route (transcript rebuild + permission revival).
 final class ACPClient {
     var onNotification: ((String, [String: Any]) -> Void)?
     /// server→client request (session/request_permission)
     var onRequest: ((Int, String, [String: Any]) -> Void)?
     var onOutbound: (([UInt8]) -> Void)?
 
+    private let lock = NSLock()
     private var nextID = 1
     private var pending: [Int: (Result<[String: Any], ACPFailure>) -> Void] = [:]
     private var recentOut: [String] = []
     private var splitter = NdjsonSplitter()
     private static let echoRing = 32
 
-    func feed(_ bytes: [UInt8]) {
+    /// Integrity accounting (probes/agenttest assert these).
+    private(set) var messagesRouted = 0
+    private(set) var unparseableLines = 0
+
+    /// `replay`: consuming ring history — see the replay-mode notes above.
+    func feed(_ bytes: [UInt8], replay: Bool = false) {
+        var fired: [(Result<[String: Any], ACPFailure>,
+                     (Result<[String: Any], ACPFailure>) -> Void)] = []
+        lock.lock()
         for line in splitter.feed(bytes) {
             if recentOut.contains(line) { continue }
             guard let data = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: data),
-                  let message = json as? [String: Any] else { continue }
-            route(message)
-        }
-    }
-
-    private func route(_ message: [String: Any]) {
-        if let method = message["method"] as? String {
-            let params = message["params"] as? [String: Any] ?? [:]
-            if let id = message["id"] as? Int {
-                onRequest?(id, method, params)
-            } else {
-                onNotification?(method, params)
+                  let message = json as? [String: Any] else {
+                unparseableLines += 1
+                continue
             }
-            return
+            messagesRouted += 1
+            if let method = message["method"] as? String {
+                let params = message["params"] as? [String: Any] ?? [:]
+                if let id = message["id"] as? Int {
+                    onRequest?(id, method, params)
+                } else {
+                    onNotification?(method, params)
+                }
+                continue
+            }
+            // A response. Replayed history never completes fresh requests.
+            guard !replay, let id = message["id"] as? Int,
+                  let completion = pending.removeValue(forKey: id) else { continue }
+            if let error = message["error"] as? [String: Any],
+               let text = error["message"] as? String {
+                fired.append((.failure(.message(text)), completion))
+            } else if let result = message["result"] as? [String: Any] {
+                fired.append((.success(result), completion))
+            } else {
+                fired.append((.success([:]), completion))
+            }
         }
-        // A response: complete the pending request. An echo that somehow
-        // passed the exact-match filter lands here without a pending id.
-        guard let id = message["id"] as? Int, let completion = pending.removeValue(forKey: id)
-        else { return }
-        if let error = message["error"] as? [String: Any],
-           let text = error["message"] as? String {
-            completion(.failure(.message(text)))
-        } else if let result = message["result"] as? [String: Any] {
-            completion(.success(result))
-        } else {
-            completion(.success([:]))
+        lock.unlock()
+        // Outside the lock: completions chain follow-up requests.
+        for (result, completion) in fired {
+            completion(result)
         }
     }
 
     @discardableResult
     func request(_ method: String, _ params: [String: Any],
                  completion: @escaping (Result<[String: Any], ACPFailure>) -> Void) -> Int {
+        lock.lock()
         let id = nextID
         nextID += 1
-        send(["jsonrpc": "2.0", "id": id, "method": method, "params": params])
         pending[id] = completion
+        lock.unlock()
+        send(["jsonrpc": "2.0", "id": id, "method": method, "params": params])
         return id
     }
 
@@ -84,8 +115,10 @@ final class ACPClient {
               var line = String(data: data, encoding: .utf8) else { return }
         line.append("\n")
         let bytes = Array(line.utf8)
+        lock.lock()
         recentOut.append(line)
         if recentOut.count > Self.echoRing { recentOut.removeFirst(recentOut.count - Self.echoRing) }
+        lock.unlock()
         onOutbound?(bytes)
     }
 }

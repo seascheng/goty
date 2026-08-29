@@ -180,6 +180,14 @@ function ToolCard({ id }: { id: string }) {
           {!showDiff && textContent === "" && (call.rawInput != null) && (
             <pre><code>{JSON.stringify(call.rawInput, null, 1)}</code></pre>
           )}
+          {call.output.length > 0 && (
+            <>
+              <div className="tool-out-label">输出</div>
+              {call.output.map((c, j) => c.text
+                ? <pre key={"o" + j}><code>{c.text}</code></pre>
+                : c.path ? <div key={"o" + j} className="tool-path">{c.path}</div> : null)}
+            </>
+          )}
         </div>
       )}
     </div>

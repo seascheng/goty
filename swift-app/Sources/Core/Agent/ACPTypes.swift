@@ -14,6 +14,21 @@ struct ACPContent {
         self.text = raw["text"] as? String
         self.path = raw["path"] as? String
     }
+
+    /// Explicit memberwise: defining the failable wire init suppresses
+    /// the synthesized one, and the normalizer synthesizes leaf items.
+    init(type: String, text: String?, path: String?) {
+        self.type = type
+        self.text = text
+        self.path = path
+    }
+}
+
+extension ACPContent {
+    /// Exact JS leaf shape (store.ts ToolContentSchema).
+    var jsRepresentation: [String: Any] {
+        ["type": type, "text": text ?? NSNull(), "path": path ?? NSNull()]
+    }
 }
 
 struct ACPPlanEntry {
@@ -146,6 +161,10 @@ enum AgentSessionEvent {
     case thoughtChunk(String)
     case toolCallUpdate(id: String, title: String?, kind: String?,
                         status: String?, content: [ACPContent],
+                        /// Tool result: `rawOutput.content` leaves (omp
+                        /// displayContent fallback). The old flat-only
+                        /// reader dropped these — the resume content loss.
+                        output: [ACPContent],
                         rawInput: [String: Any]?, oldText: String?)
     case plan([ACPPlanEntry])
     case permissionRequested(ACPPermissionPrompt)
@@ -159,6 +178,74 @@ enum AgentSessionEvent {
     /// future agents — nil segments hide in the composer statusbar.
     case usageUpdate(used: Int?, size: Int?, input: Int?, output: Int?,
                      costAmount: Double?, costCurrency: String?)
+}
+
+extension AgentSessionEvent {
+    /// The exact JS event shape the web store consumes (store.ts
+    /// IncomingEventSchema) — one mapping for the app, the probes and
+    /// the tests; the hand copies here used to drift and lose fields.
+    var jsRepresentation: [String: Any] {
+        switch self {
+        case .ready:
+            return ["type": "status", "text": "就绪"]
+        case .userChunk(let text):
+            return ["type": "userChunk", "text": text]
+        case .messageChunk(let text):
+            return ["type": "agentChunk", "text": text]
+        case .thoughtChunk(let text):
+            return ["type": "thoughtChunk", "text": text]
+        case .toolCallUpdate(let id, let title, let kind, let status,
+                             let content, let output, let rawInput, let oldText):
+            return ["type": "toolCall",
+                    "id": id,
+                    "title": title ?? NSNull(),
+                    "kind": kind ?? NSNull(),
+                    "status": status ?? NSNull(),
+                    "content": content.map { $0.jsRepresentation },
+                    "output": output.map { $0.jsRepresentation },
+                    "rawInput": rawInput ?? NSNull(),
+                    "oldText": oldText ?? NSNull()]
+        case .plan(let entries):
+            return ["type": "plan", "entries": entries.map { entry in
+                ["content": entry.content,
+                 "priority": entry.priority ?? NSNull(),
+                 "status": entry.status ?? NSNull()] as [String: Any]
+            }]
+        case .permissionRequested(let prompt):
+            return ["type": "permission",
+                    "requestID": prompt.requestID,
+                    "toolCallTitle": prompt.toolCallTitle ?? NSNull(),
+                    "options": prompt.options.map { option in
+                        ["optionId": option.optionId,
+                         "name": option.name,
+                         "kind": option.kind ?? NSNull()] as [String: Any]
+                    }]
+        case .turnEnded:
+            return ["type": "turnEnded"]
+        case .configChanged(let options):
+            return ["type": "configOptions", "options": options.map { option in
+                ["id": option.id, "name": option.name,
+                 "category": option.category ?? NSNull(),
+                 "currentValue": option.currentValue ?? NSNull(),
+                 "options": option.options.map { choice in
+                    ["value": choice.value, "name": choice.name,
+                     "description": choice.description ?? NSNull()] as [String: Any]
+                 }] as [String: Any]
+            }]
+        case .commandsChanged(let commands):
+            return ["type": "commands", "commands": commands.map { command in
+                ["name": command.name,
+                 "description": command.description ?? NSNull(),
+                 "inputHint": command.inputHint ?? NSNull()] as [String: Any]
+            }]
+        case .usageUpdate(let used, let size, let input, let output,
+                          let costAmount, let costCurrency):
+            return ["type": "usage", "used": used ?? NSNull(), "size": size ?? NSNull(),
+                    "input": input ?? NSNull(), "output": output ?? NSNull(),
+                    "costAmount": costAmount ?? NSNull(),
+                    "costCurrency": costCurrency ?? NSNull()]
+        }
+    }
 }
 
 protocol AgentSessionDelegate: AnyObject {
