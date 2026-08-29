@@ -30,7 +30,7 @@ final class ProbeDelegate: AgentSessionDelegate {
     var totalEvents = 0
     weak var bridge: AgentWebBridge?
 
-    func session(_ session: AgentSession, didEmit events: [AgentSessionEvent]) {
+    func session(_ session: AgentSessioning, didEmit events: [AgentSessionEvent]) {
         lock.lock(); defer { lock.unlock() }
         totalEvents += events.count
         for e in events {
@@ -62,7 +62,7 @@ final class ProbeDelegate: AgentSessionDelegate {
         }
     }
 
-    func sessionDidFail(_ session: AgentSession, reason: String) {
+    func sessionDidFail(_ session: AgentSessioning, reason: String) {
         print("SESSION FAIL: \(reason)")
     }
 }
