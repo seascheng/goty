@@ -18,7 +18,7 @@ protocol AgentSessioning: AnyObject {
     func connect(completion: ((Bool) -> Void)?)
     func send(_ text: String)
     func cancel()
-    func respondPermission(requestID: Int, optionId: String)
+    func respondPermission(requestID: String, optionId: String)
     func setConfigOption(id: String, value: String)
     /// Persisted-session directory (session/list) filtered to the pane cwd.
     func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void)
@@ -250,8 +250,9 @@ final class AgentSession: AgentSessioning {
         client.notify("session/cancel", ["sessionId": sessionId])
     }
 
-    func respondPermission(requestID: Int, optionId: String) {
-        client.respond(id: requestID,
+    func respondPermission(requestID: String, optionId: String) {
+        guard let id = Int(requestID) else { return }
+        client.respond(id: id,
                        result: ["outcome": ["outcome": "selected", "optionId": optionId]])
     }
 
@@ -342,7 +343,7 @@ final class AgentSession: AgentSessioning {
                     .compactMap { ACPOption(raw: $0) }
                 let title = (params["toolCall"] as? [String: Any])?["title"] as? String
                 events.append(.permissionRequested(
-                    AgentPermissionPrompt(requestID: id, toolCallTitle: title, options: options)))
+                    AgentPermissionPrompt(requestID: String(id), toolCallTitle: title, options: options)))
             }
             emit(events)
             return events

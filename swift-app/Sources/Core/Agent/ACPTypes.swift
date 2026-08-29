@@ -56,10 +56,20 @@ struct ACPOption {
         self.name = name
         self.kind = raw["kind"] as? String
     }
+
+    /// Explicit memberwise (failable wire init suppresses the
+    /// synthesized one) — native adapters build options directly.
+    init(optionId: String, name: String, kind: String?) {
+        self.optionId = optionId
+        self.name = name
+        self.kind = kind
+    }
 }
 
 struct AgentPermissionPrompt {
-    let requestID: Int
+    /// Dialect's raw request id as a string (ACP Int ids stringify;
+    /// claude control_request ids are strings natively).
+    let requestID: String
     let toolCallTitle: String?
     let options: [ACPOption]
 }
@@ -98,6 +108,17 @@ struct AgentConfigOption {
             .compactMap { ACPConfigChoice(raw: $0) }
     }
 
+    /// Explicit memberwise (failable wire init suppresses the
+    /// synthesized one) — native adapters build options directly.
+    init(id: String, name: String, category: String?,
+         currentValue: String?, options: [ACPConfigChoice]) {
+        self.id = id
+        self.name = name
+        self.category = category
+        self.currentValue = currentValue
+        self.options = options
+    }
+
     static func list(_ raw: Any?) -> [AgentConfigOption] {
         (raw as? [[String: Any]] ?? []).compactMap { AgentConfigOption(raw: $0) }
     }
@@ -117,6 +138,13 @@ struct AgentSlashCommand {
         self.inputHint = (raw["input"] as? [String: Any])?["hint"] as? String
     }
 
+    /// Explicit memberwise (failable wire init suppresses the
+    /// synthesized one) — native adapters build commands directly.
+    init(name: String, description: String?, inputHint: String?) {
+        self.name = name
+        self.description = description
+        self.inputHint = inputHint
+    }
     static func list(_ raw: Any?) -> [AgentSlashCommand] {
         (raw as? [[String: Any]] ?? []).compactMap { AgentSlashCommand(raw: $0) }
     }
@@ -138,6 +166,18 @@ struct AgentSessionSummary {
         self.updatedAt = raw["updatedAt"] as? String
         let meta = raw["_meta"] as? [String: Any]
         self.messageCount = meta?["messageCount"] as? Int
+    }
+
+    /// Explicit memberwise: the failable wire init suppresses the
+    /// synthesized one, and native adapters (claude/pi store readers)
+    /// construct summaries directly.
+    init(sessionId: String, cwd: String?, title: String?,
+         updatedAt: String?, messageCount: Int?) {
+        self.sessionId = sessionId
+        self.cwd = cwd
+        self.title = title
+        self.updatedAt = updatedAt
+        self.messageCount = messageCount
     }
 
     static func list(_ raw: Any?) -> [AgentSessionSummary] {

@@ -15,7 +15,7 @@ export type ToolCall = {
 };
 export type PlanEntry = { content: string; priority?: string | null; status?: string | null };
 export type Permission = {
-  requestID: number; toolCallTitle?: string | null;
+  requestID: string; toolCallTitle?: string | null;
   options: { optionId: string; name: string; kind?: string | null }[];
 };
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -95,7 +95,7 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("plan"), entries: z.array(PlanEntrySchema).nullish() }),
   z.object({
     type: z.literal("permission"),
-    requestID: z.number(),
+    requestID: z.string(),
     toolCallTitle: z.string().nullish(),
     options: z.array(PermissionOptionSchema),
   }),

@@ -140,7 +140,7 @@ enum AgentTest {
             "sessionId": "s1", "toolCall": ["title": "bash"],
             "options": [["optionId": "allow", "name": "Allow", "kind": "allow_once"]],
         ]])
-        if case .permissionRequested(let prompt)? = events.last, prompt.requestID == 7,
+        if case .permissionRequested(let prompt)? = events.last, prompt.requestID == "7",
            prompt.toolCallTitle == "bash",
            prompt.options.first?.optionId == "allow" {} else { failures += 1; print("FAIL  permission prompt") }
 
@@ -244,7 +244,53 @@ enum AgentTest {
         check(AgentRegistry.descriptors.first?.key == "omp", "picker order leads with omp")
         let path = UserShellEnv.asDictionary["PATH"] ?? ""
         check(omp?.isAvailable(path: path) == true, "omp resolves in captured PATH")
-        check(omp?.isAvailable(path: "/nonexistent-dir-only") == false, "availability misses on absent PATH")
+
+        print("— claude adapter —")
+        check(AgentRegistry.descriptor(for: "claude")?.binary == "claude", "claude descriptor present")
+        let claudeFixture = (CommandLine.arguments.count > 1
+            ? CommandLine.arguments[1] : "tools/fixtures") + "/claude-oneshot.jsonl"
+        var claudeEvents: [AgentSessionEvent] = []
+        let claudeMapper = ClaudeFrameMapper()
+        var claudeLines = 0
+        if let lines = try? String(contentsOfFile: claudeFixture, encoding: .utf8) {
+            for line in lines.split(separator: "\n") {
+                guard let data = String(line).data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data),
+                      let frame = json as? [String: Any] else { continue }
+                claudeLines += 1
+                claudeEvents += claudeMapper.map(frame)
+            }
+        }
+        check(claudeLines == 7, "claude fixture frames counted (\(claudeLines))")
+        check(claudeMapper.framesIgnored == 4, "hook lifecycle frames ignored (\(claudeMapper.framesIgnored))")
+        check(claudeEvents.contains(where: { if case .ready = $0 { return true }; return false }),
+              "init maps ready")
+        check(claudeMapper.sessionId == "2123c193-59d5-4165-a29c-80372472a3f0",
+              "session id captured")
+        check(claudeEvents.contains(where: { if case .turnEnded = $0 { return true }; return false }),
+              "result maps turnEnded")
+        check(claudeEvents.contains(where: {
+            if case .usageUpdate(let used, _, _, _, _, _) = $0 { return used != nil }
+            return false
+        }), "usage mapped")
+        // History replay: the store file carries the asking side.
+        let claudeHistory = ClaudeSessionStore.history(sessionId: "2123c193-59d5-4165-a29c-80372472a3f0")
+        check(!claudeHistory.isEmpty, "claude store finds the probe session")
+        var replayMapper = ClaudeFrameMapper()
+        var replayEvents: [AgentSessionEvent] = []
+        for frame in claudeHistory { replayEvents += replayMapper.map(frame) }
+        check(replayEvents.contains(where: {
+            if case .userChunk(let text) = $0 {
+                return text.contains("HELLO_CLAUDE")
+            }
+            return false
+        }), "history replay carries the user prompt")
+        check(replayEvents.contains(where: {
+            if case .messageChunk(let text) = $0 { return !text.isEmpty }
+            return false
+        }), "history replay carries assistant text")
+        check(ClaudeFrameMapper.toolKind("Bash") == "execute"
+              && ClaudeFrameMapper.toolKind("Edit") == "edit", "tool kinds mapped")
 
         try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }

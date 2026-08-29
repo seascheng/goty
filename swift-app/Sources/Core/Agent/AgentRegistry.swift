@@ -59,7 +59,16 @@ enum AgentRegistry {
                              environment: params.environment,
                              spawn: ompSpawn, daemon: params.daemon)
             }),
-        // claude / codex / pi land with their adapters (plan tasks 3-5).
+        AgentDescriptor(
+            key: "claude",
+            label: "Claude Code",
+            binary: "claude",
+            spawn: AgentSpawn(command: "claude",
+                              args: ["--print", "--input-format", "stream-json",
+                                     "--output-format", "stream-json", "--verbose"],
+                              ringBytes: 16_777_216),
+            make: { params in ClaudeSession(params: params) }),
+        // codex / pi land with their adapters (plan tasks 4-5).
     ]
 
     /// The omp spawn shape shared by the descriptor table above and

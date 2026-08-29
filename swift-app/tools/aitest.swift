@@ -157,8 +157,12 @@ import Foundation
         type("@omp\r")
         check(agentFired.last?.text == "", "bare @omp opens without prompt")
         _ = lt.filter([0x03])
-        type("@claude write tests\r")   // claude is not an ACP manifest yet
-        check(agentFired.last?.key == "omp",
+        type("@claude write tests\r")   // claude is a registry agent now
+        check(agentFired.last?.key == "claude" && agentFired.last?.text == "write tests",
+              "@claude routes to the claude adapter")
+        _ = lt.filter([0x03])
+        type("@cursor-agent hi\r")   // genuinely not a registry agent
+        check(agentFired.last?.key == "claude",
               "non-manifest agent names pass through to the shell")
         _ = lt.filter([0x03])
         type("@omp again\r")
