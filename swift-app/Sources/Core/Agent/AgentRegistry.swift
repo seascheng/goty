@@ -75,7 +75,13 @@ enum AgentRegistry {
             spawn: AgentSpawn(command: "codex", args: ["app-server"],
                               ringBytes: 16_777_216),
             make: { params in CodexSession(params: params) }),
-        // pi lands with its adapter (plan task 5).
+        AgentDescriptor(
+            key: "pi",
+            label: "pi",
+            binary: "pi",
+            spawn: AgentSpawn(command: "pi", args: ["--mode", "rpc"],
+                              ringBytes: 16_777_216),
+            make: { params in PiSession(params: params) }),
     ]
 
     /// The omp spawn shape shared by the descriptor table above and

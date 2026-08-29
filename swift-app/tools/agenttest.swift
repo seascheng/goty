@@ -328,6 +328,63 @@ enum AgentTest {
         check(CodexFrameMapper.textOf([["type": "text", "text": "a"], ["type": "text", "text": "b"]]) == "ab",
               "codex content text join")
 
+        print("— pi adapter —")
+        check(AgentRegistry.descriptor(for: "pi")?.binary == "pi", "pi descriptor present")
+        check(AgentRegistry.descriptors.map(\.key) == ["omp", "claude", "codex", "pi"],
+              "registry order omp, claude, codex, pi")
+        let piFixture = (CommandLine.arguments.count > 1
+            ? CommandLine.arguments[1] : "tools/fixtures") + "/pi-rpc.jsonl"
+        let piMapper = PiFrameMapper()
+        var piEvents: [AgentSessionEvent] = []
+        if let raw = try? String(contentsOfFile: piFixture, encoding: .utf8) {
+            for line in raw.split(separator: "\n") {
+                guard line.hasPrefix("PI> ") else { continue }
+                guard let data = String(line.dropFirst(4)).data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data),
+                      let frame = json as? [String: Any] else { continue }
+                piEvents += piMapper.map(frame)
+            }
+        }
+        // Deltas must assemble to exactly the message_end text.
+        let assembled = piEvents.reduce(into: "") { acc, event in
+            if case .messageChunk(let text) = event { acc += text }
+        }
+        check(assembled == "HELLO_PI", "pi deltas assemble (\(assembled))")
+        check(piEvents.contains(where: {
+            if case .userChunk = $0 { return true }; return false
+        }) == false, "live user echo suppressed")
+        check(piEvents.contains(where: {
+            if case .turnEnded = $0 { return true }; return false
+        }), "agent_settled maps turnEnded")
+        check(piMapper.framesIgnored >= 9, "extension ui requests counted (\(piMapper.framesIgnored))")
+        // Replay: get_messages payload from pi-resume.jsonl.
+        let piResumeFixture = (CommandLine.arguments.count > 1
+            ? CommandLine.arguments[1] : "tools/fixtures") + "/pi-resume.jsonl"
+        let piReplayMapper = PiFrameMapper()
+        var piReplayed: [AgentSessionEvent] = []
+        if let raw = try? String(contentsOfFile: piResumeFixture, encoding: .utf8) {
+            for line in raw.split(separator: "\n") {
+                guard line.hasPrefix("PI> ") else { continue }
+                guard let data = String(line.dropFirst(4)).data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data),
+                      let frame = json as? [String: Any],
+                      frame["id"] as? String == "m1",
+                      let payload = frame["data"] as? [String: Any],
+                      let messages = payload["messages"] as? [[String: Any]] else { continue }
+                for message in messages {
+                    piReplayed += piReplayMapper.mapReplayedMessage(message)
+                }
+            }
+        }
+        check(piReplayed.contains(where: {
+            if case .userChunk(let text) = $0 { return text.contains("HELLO_PI") }
+            return false
+        }), "pi replay carries user prompt")
+        check(piReplayed.contains(where: {
+            if case .messageChunk(let text) = $0 { return text == "HELLO_PI" }
+            return false
+        }), "pi replay carries assembled assistant text")
+
         try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }
         print("agenttest: all passed")

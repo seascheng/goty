@@ -148,11 +148,12 @@ import Foundation
         type("@omp fix the build\r")
         check(agentFired.last?.key == "omp" && agentFired.last?.text == "fix the build",
               "line-leading @omp routes key + prompt")
-        type("@pi\r")   // pi is not an ACP manifest yet
-        check(agentFired.count == 1, "non-manifest @pi passes through")
+        type("@pi\r")   // pi is a registry agent now (bare, no prompt)
+        check(agentFired.count == 2 && agentFired.last?.key == "pi",
+              "@pi routes to the pi adapter")
         lt.armed = true
         type("@ai plan the work\r")
-        check(fired.last == "plan the work" && agentFired.count == 1,
+        check(fired.last == "plan the work" && agentFired.count == 2,
               "@ai still routes to onTrigger")
         type("@omp\r")
         check(agentFired.last?.text == "", "bare @omp opens without prompt")
