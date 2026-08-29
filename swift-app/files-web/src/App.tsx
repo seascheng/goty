@@ -32,7 +32,10 @@ export function App() {
 
   const editorHidden = doc.mode !== "edit";
   return (
-    <div className="app">
+    <div
+      className={"app" + (doc.wrap ? " wrap-diff" : "")}
+      style={{ "--app-font": `${doc.fontSize}px` } as React.CSSProperties}
+    >
       <div className={"editor-pane" + (editorHidden ? " hidden" : "")}>
         <CodeEditor doc={doc} />
       </div>

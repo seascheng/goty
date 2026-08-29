@@ -41,8 +41,23 @@ enum AgentTheme {
             "mode": t.isDark ? "dark" : "light",
             "diff-added": hex(t.gitAdded),
             "diff-removed": hex(t.gitRemoved),
+            // Terminal-parity translucency: the page paints its body at
+            // the config's background-opacity and blurs by the config's
+            // radius (0 when disabled — blur(0px) composites as none).
+            "bg-alpha": String(format: "%.2f", t.backgroundOpacity),
+            "blur": "\(blurRadius())",
         ]
     }
+
+    private static func blurRadius() -> Int {
+        guard let conf = liveGhostty?.config else { return 0 }
+        switch conf.backgroundBlur {
+        case .disabled: return 0
+        case .radius(let r): return Int(r)
+        default: return 20   // glass styles: a CSS approximation
+        }
+    }
+
     /// Push the current theme into the page.
     static func push(to bridge: WebBridge) {
         bridge.push(["type": "theme", "vars": vars()])

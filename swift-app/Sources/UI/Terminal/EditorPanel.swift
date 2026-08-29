@@ -568,10 +568,23 @@ final class EditorPanelView: NSView, ThemeRefreshable {
         return !a.isRemote && !b.isRemote
     }
 
-    private func failOnMain(title: String, detail: String) {
-        DispatchQueue.main.async {
-            Dialog.error(title: title, detail: detail)
+    func show() {
+        visible = true
+        isHidden = false
+        onVisibilityChange?(true)
+        let focused = window?.makeFirstResponder(webView) ?? false
+        if ProcessInfo.processInfo.environment["GOTY_EDITOR_FOCUS_DEBUG"] != nil {
+            let fr = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
+            print("EDITOR-FOCUS show: makeFirstResponder=\(focused) windowFR=\(fr)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                self.webView.evaluateJavaScript(
+                    "document.activeElement ? document.activeElement.tagName : 'none'"
+                ) { r, e in
+                    print("EDITOR-FOCUS t+1s: pageActive=\(e.map { "ERR \($0)" } ?? (r as? String ?? "nil"))")
+                }
+            }
         }
+        refreshRemoteStat()
     }
 
     /// Swap the active buffer into the page.
@@ -582,15 +595,14 @@ final class EditorPanelView: NSView, ThemeRefreshable {
         cursorLabel.stringValue = ""
     }
 
+    private func failOnMain(title: String, detail: String) {
+        DispatchQueue.main.async {
+            Dialog.error(title: title, detail: detail)
+        }
+    }
+
     // MARK: - Visibility
 
-    func show() {
-        visible = true
-        isHidden = false
-        onVisibilityChange?(true)
-        window?.makeFirstResponder(webView)
-        refreshRemoteStat()
-    }
 
     /// Esc / close: hide, keep every file open (tty7 keeps TabCode).
     func hide() {
@@ -717,7 +729,7 @@ final class EditorPanelView: NSView, ThemeRefreshable {
     // MARK: - Wrap / preview / diff view
 
     private func toggleWrap() {
-        guard let f = currentFile, !f.isDiff else { return }
+        guard let f = currentFile else { return }
         f.wrap.toggle()
         pushState()
         renderChrome()
@@ -854,7 +866,7 @@ final class EditorPanelView: NSView, ThemeRefreshable {
         let diffNote = f.isDiff
             ? ((f.diff?.staged == true) ? " [staged]" : " [worktree]") : ""
         pathLabel.stringValue = hostPrefix + f.path + diffNote
-        wrapButton.isHidden = f.isDiff || f.preview
+        wrapButton.isHidden = f.preview
         wrapButton.setTitle(f.wrap ? "Wrap: On" : "Wrap: Off")
         splitButton.isHidden = !f.isDiff
         splitButton.setTitle(diffSplit ? "Split" : "Unified")

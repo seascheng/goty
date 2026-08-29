@@ -100,14 +100,8 @@ export function CodeEditor({ doc }: { doc: Doc }) {
           bracketMatching(),
           rectangularSelection(),
           crosshairCursor(),
-          highlightActiveLine(),
-          highlightSelectionMatches(),
-          search({ top: true }),
           keymap.of([
             { key: "Mod-s", preventDefault: true, run: () => { post({ type: "save" }); return true; } },
-            { key: "Mod-=", preventDefault: true, run: () => { post({ type: "zoom", delta: 1 }); return true; } },
-            { key: "Mod--", preventDefault: true, run: () => { post({ type: "zoom", delta: -1 }); return true; } },
-            { key: "Mod-0", preventDefault: true, run: () => { post({ type: "zoom", reset: true }); return true; } },
             ...closeBracketsKeymap,
             ...searchKeymap,
             ...historyKeymap,
@@ -150,7 +144,8 @@ export function CodeEditor({ doc }: { doc: Doc }) {
   }, []);
 
   // Doc identity/content swap — includes chunked loads (each chunk
-  // grows doc.text while loading).
+  // grows doc.text while loading). Text ONLY: a keystroke must not
+  // rebuild the language support tree.
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
@@ -163,6 +158,13 @@ export function CodeEditor({ doc }: { doc: Doc }) {
       });
       programmatic.current = false;
     }
+  }, [doc.id, doc.text, doc.loading]);
+
+  // Config flips (wrap toggle, zoom, language identity): reconfigure
+  // the compartments WITHOUT touching the document.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
     view.dispatch({
       effects: [
         languageConf.reconfigure(languageFor(doc.path) ?? []),
@@ -170,7 +172,8 @@ export function CodeEditor({ doc }: { doc: Doc }) {
         themeConf.reconfigure(fontSizeTheme(doc.fontSize)),
       ],
     });
-  }, [doc.id, doc.text, doc.loading]);
+  }, [doc.path, doc.wrap, doc.fontSize]);
+
 
   return <div ref={hostRef} className="editor-host" />;
 }

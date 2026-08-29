@@ -948,6 +948,17 @@ func run() {
         check(got && pageText == fixtureText,
               "file content landed in the page (\(pageText?.count ?? 0) vs \(fixtureText.count) chars)")
         check(editor.bridgeDeliveredForTest > 0, "bridge delivered document events")
+        // Zoom: a page-dispatched ⌘= must reach Swift (zoomFont) and
+        // the new size must come back as the page's --app-font.
+        let before = AppPreferences.shared.editorFontSize
+        editor.webViewForTest.evaluateJavaScript(
+            "document.dispatchEvent(new KeyboardEvent('keydown', " +
+            "{key: '=', metaKey: true, code: 'Equal', bubbles: true, cancelable: true})); 'ok'") { _, _ in }
+        for _ in 0..<60 {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        check(AppPreferences.shared.editorFontSize > before,
+              "zoom key reached Swift (\(before) → \(AppPreferences.shared.editorFontSize))")
     }
     editor.togglePreview()
     content.layoutSubtreeIfNeeded()
