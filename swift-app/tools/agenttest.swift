@@ -292,6 +292,42 @@ enum AgentTest {
         check(ClaudeFrameMapper.toolKind("Bash") == "execute"
               && ClaudeFrameMapper.toolKind("Edit") == "edit", "tool kinds mapped")
 
+        print("— codex adapter —")
+        check(AgentRegistry.descriptor(for: "codex")?.binary == "codex", "codex descriptor present")
+        let codexFixture = (CommandLine.arguments.count > 1
+            ? CommandLine.arguments[1] : "tools/fixtures") + "/codex-turn.jsonl"
+        let codexMapper = CodexFrameMapper()
+        var codexEvents: [AgentSessionEvent] = []
+        if let raw = try? String(contentsOfFile: codexFixture, encoding: .utf8) {
+            for line in raw.split(separator: "\n") {
+                guard line.hasPrefix("CX> ") else { continue }
+                guard let data = String(line.dropFirst(4)).data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data),
+                      let frame = json as? [String: Any] else { continue }
+                if let method = frame["method"] as? String {
+                    codexEvents += codexMapper.map(method: method,
+                                                   params: frame["params"] as? [String: Any] ?? [:])
+                }
+            }
+        }
+        check(codexEvents.contains(where: {
+            if case .userChunk(let text) = $0 {
+                return text.contains("HELLO_CODEX")
+            }
+            return false
+        }), "userMessage item maps userChunk (started, no completed dup)")
+        check(codexEvents.contains(where: {
+            if case .messageChunk(let text) = $0 { return text.contains("[codex]") }
+            return false
+        }), "failed turn error surfaces as message")
+        check(codexEvents.contains(where: {
+            if case .turnEnded(let stop) = $0 { return stop == "failed" }
+            return false
+        }), "turn/completed maps turnEnded failed")
+        check(codexMapper.notificationsIgnored >= 5, "reconnect chatter ignored (\(codexMapper.notificationsIgnored))")
+        check(CodexFrameMapper.textOf([["type": "text", "text": "a"], ["type": "text", "text": "b"]]) == "ab",
+              "codex content text join")
+
         try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }
         print("agenttest: all passed")

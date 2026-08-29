@@ -68,7 +68,14 @@ enum AgentRegistry {
                                      "--output-format", "stream-json", "--verbose"],
                               ringBytes: 16_777_216),
             make: { params in ClaudeSession(params: params) }),
-        // codex / pi land with their adapters (plan tasks 4-5).
+        AgentDescriptor(
+            key: "codex",
+            label: "Codex",
+            binary: "codex",
+            spawn: AgentSpawn(command: "codex", args: ["app-server"],
+                              ringBytes: 16_777_216),
+            make: { params in CodexSession(params: params) }),
+        // pi lands with its adapter (plan task 5).
     ]
 
     /// The omp spawn shape shared by the descriptor table above and
