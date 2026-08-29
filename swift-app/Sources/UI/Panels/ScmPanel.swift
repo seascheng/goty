@@ -173,10 +173,11 @@ final class ScmPanelView: NSView, ThemeRefreshable {
             addButton.trailingAnchor.constraint(equalTo: commitButton.leadingAnchor, constant: -6),
             addButton.centerYAnchor.constraint(equalTo: commitButton.centerYAnchor),
             commitButton.trailingAnchor.constraint(equalTo: commitMore.leadingAnchor, constant: 0),
-            commitMore.centerYAnchor.constraint(equalTo: commitButton.centerYAnchor),
             commitMore.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            commitMore.widthAnchor.constraint(equalToConstant: 14),
-            commitMore.heightAnchor.constraint(equalTo: commitButton.heightAnchor),
+            // Split control: Add and Commit read as one group — equal
+            // width (resolves to the wider label, "Commit").
+            addButton.widthAnchor.constraint(equalTo: commitButton.widthAnchor),
+            commitMore.centerYAnchor.constraint(equalTo: commitButton.centerYAnchor),
             listScroll.topAnchor.constraint(equalTo: commitButton.bottomAnchor, constant: 8),
             listScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             listScroll.trailingAnchor.constraint(equalTo: trailingAnchor),

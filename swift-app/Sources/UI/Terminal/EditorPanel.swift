@@ -239,8 +239,15 @@ final class EditorPanelView: NSView, ThemeRefreshable {
             saveButton.trailingAnchor.constraint(equalTo: close.leadingAnchor, constant: -8),
             close.trailingAnchor.constraint(equalTo: headerBackground.trailingAnchor, constant: -6),
             close.centerYAnchor.constraint(equalTo: headerBackground.centerYAnchor),
+            // One group, one width: Save never reads narrower than the
+            // Preview beside it (autolayout resolves to the wider label).
+            saveButton.widthAnchor.constraint(equalTo: previewButton.widthAnchor),
             close.widthAnchor.constraint(equalToConstant: 22),
-            close.heightAnchor.constraint(equalToConstant: 22),
+            // Status-bar group reads as one control row: equal widths
+            // (resolves to the widest label shown).
+            reloadButton.widthAnchor.constraint(equalTo: keepButton.widthAnchor),
+            keepButton.widthAnchor.constraint(equalTo: wrapButton.widthAnchor),
+            wrapButton.widthAnchor.constraint(equalTo: splitButton.widthAnchor),
 
             webView.topAnchor.constraint(equalTo: headerBackground.bottomAnchor),
             webView.leadingAnchor.constraint(equalTo: leadingAnchor),

@@ -17,6 +17,9 @@ enum ControlMetrics {
     /// Button minimum width — one floor so short labels ("OK", "Save")
     /// never read smaller than their row siblings ("Cancel").
     static let buttonMinWidth: CGFloat = 76
+    /// Compact button horizontal padding — bezel-off titles hug their
+    /// text; this much air each side keeps the label off the paint.
+    static let compactButtonPad: CGFloat = 10
 }
 
 /// The themed button — the Dialog card's self-painted recipe promoted
@@ -106,12 +109,14 @@ final class ChromeButton: ClosureButton, ThemeRefreshable {
         }
         applyTheme()
     }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
 
-    required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        applyTheme()
+    /// Compact titles need air: bezel-off intrinsic width hugs the text,
+    /// so widen it by the pad on each side (title centers → padding).
+    override var intrinsicContentSize: NSSize {
+        var size = super.intrinsicContentSize
+        if compact { size.width += ControlMetrics.compactButtonPad * 2 }
+        return size
     }
 
     private func applyTheme() {
