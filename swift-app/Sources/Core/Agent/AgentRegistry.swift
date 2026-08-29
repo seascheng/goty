@@ -54,10 +54,10 @@ enum AgentRegistry {
             binary: "omp",
             spawn: AgentSpawn(command: "omp", args: ["acp"], ringBytes: 67_108_864),
             make: { params in
-                AgentSession(paneId: params.paneId, cwd: params.cwd,
-                             grid: AgentSession.fixedGrid,
-                             environment: params.environment,
-                             spawn: ompSpawn, daemon: params.daemon)
+                OmpSession(paneId: params.paneId, cwd: params.cwd,
+                           grid: AgentPaneDefaults.grid,
+                           environment: params.environment,
+                           spawn: ompSpawn, daemon: params.daemon)
             }),
         AgentDescriptor(
             key: "claude",

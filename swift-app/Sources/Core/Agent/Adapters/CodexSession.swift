@@ -37,7 +37,7 @@ final class CodexSession: AgentSessioning {
         self.cwd = params.cwd
         self.environment = params.environment
         self.daemon = params.daemon
-        self.grid = AgentSession.fixedGrid
+        self.grid = AgentPaneDefaults.grid
         client.onOutbound = { [weak self] in self?.pane?.sendInput($0) }
         client.onUnparseable = { line in
             if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
@@ -284,10 +284,8 @@ final class CodexSession: AgentSessioning {
         } else {
             title = (params["title"] as? String) ?? "codex 请求授权"
         }
-        let prompt = AgentPermissionPrompt(
-            requestID: String(id), toolCallTitle: title,
-            options: [ACPOption(optionId: "allow_once", name: "允许", kind: "allow_once"),
-                      ACPOption(optionId: "reject_once", name: "拒绝", kind: "reject_once")])
+        let prompt = AgentPermissionPrompt.allowOrReject(
+            requestID: String(id), title: title)
         emit([.permissionRequested(prompt)])
     }
 

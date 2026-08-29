@@ -37,7 +37,7 @@ final class PiSession: AgentSessioning {
         self.cwd = params.cwd
         self.environment = params.environment
         self.daemon = params.daemon
-        self.grid = AgentSession.fixedGrid
+        self.grid = AgentPaneDefaults.grid
         channel.onOutbound = { [weak self] in self?.pane?.sendInput($0) }
         channel.onFrame = { [weak self] frame in
             self?.handleFrame(frame)

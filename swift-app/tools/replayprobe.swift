@@ -82,7 +82,7 @@ enum ReplayProbe {
         app.setActivationPolicy(.regular)
 
         let delegate = ProbeDelegate()
-        let session = AgentSession(
+        let session = OmpSession(
             paneId: "replayprobe-\(Int(Date().timeIntervalSince1970))",
             cwd: "/Users/seascheng/Downloads/ai_project/goty-agent-gui",
             grid: SessionGrid(columns: 120, rows: 40, cellWidth: 7, cellHeight: 17),

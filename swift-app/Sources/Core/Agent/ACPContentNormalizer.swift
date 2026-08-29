@@ -14,8 +14,8 @@ import Foundation
 enum ACPContentNormalizer {
     /// Depth-first flatten: unwrap `content` wrappers until leaf items
     /// (those carrying text/path) remain, in wire order.
-    static func flatten(_ raw: [[String: Any]]?) -> [ACPContent] {
-        var out: [ACPContent] = []
+    static func flatten(_ raw: [[String: Any]]?) -> [AgentContent] {
+        var out: [AgentContent] = []
         for item in raw ?? [] {
             flatten(item, into: &out)
         }
@@ -25,21 +25,21 @@ enum ACPContentNormalizer {
     /// Tool-result extraction: `rawOutput.content` leaves; falls back to
     /// omp's `rawOutput.details.displayContent` when the content list is
     /// absent or empty.
-    static func resultItems(rawOutput: Any?) -> [ACPContent] {
+    static func resultItems(rawOutput: Any?) -> [AgentContent] {
         guard let ro = rawOutput as? [String: Any] else { return [] }
         let leaves = flatten(ro["content"] as? [[String: Any]])
         if !leaves.isEmpty { return leaves }
         if let details = ro["details"] as? [String: Any],
            let display = details["displayContent"] as? String {
-            return [ACPContent(type: "text", text: display, path: nil)]
+            return [AgentContent(type: "text", text: display, path: nil)]
         }
         return []
     }
 
-    private static func flatten(_ item: [String: Any], into out: inout [ACPContent]) {
+    private static func flatten(_ item: [String: Any], into out: inout [AgentContent]) {
         // Leaf first: anything carrying text/path is a leaf regardless of
         // its `type` tag; wrappers recurse into their `content` field.
-        if item["text"] is String || item["path"] is String, let leaf = ACPContent(item) {
+        if item["text"] is String || item["path"] is String, let leaf = AgentContent(item) {
             out.append(leaf)
             return
         }

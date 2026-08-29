@@ -81,8 +81,8 @@ final class CodexFrameMapper {
                 id: id, title: command.isEmpty ? "command" : command,
                 kind: "execute",
                 status: completed ? (exitCode == nil || exitCode == 0 ? "completed" : "failed") : "in_progress",
-                content: command.isEmpty ? [] : [ACPContent(type: "text", text: command, path: nil)],
-                output: completed ? [ACPContent(type: "text",
+                content: command.isEmpty ? [] : [AgentContent(type: "text", text: command, path: nil)],
+                output: completed ? [AgentContent(type: "text",
                                                 text: "exit \(exitCode.map(String.init) ?? "?")",
                                                 path: nil)] : [],
                 rawInput: command.isEmpty ? nil : ["command": command],
@@ -93,7 +93,7 @@ final class CodexFrameMapper {
             return [.toolCallUpdate(
                 id: id, title: path.isEmpty ? "file change" : path, kind: "edit",
                 status: completed ? "completed" : "in_progress",
-                content: path.isEmpty ? [] : [ACPContent(type: "path", text: nil, path: path)],
+                content: path.isEmpty ? [] : [AgentContent(type: "path", text: nil, path: path)],
                 output: [], rawInput: path.isEmpty ? nil : ["path": path], oldText: nil)]
         default:
             unknownItemTypes += 1
@@ -101,7 +101,7 @@ final class CodexFrameMapper {
             return [.toolCallUpdate(
                 id: id, title: title, kind: "other",
                 status: completed ? "completed" : "in_progress",
-                content: [ACPContent(type: "text", text: type, path: nil)],
+                content: [AgentContent(type: "text", text: type, path: nil)],
                 output: [], rawInput: nil, oldText: nil)]
         }
     }

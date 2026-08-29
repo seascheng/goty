@@ -3,7 +3,7 @@ import Foundation
 
 /// Hand-written M1 subset of the ACP content shapes (spec: Risk — ACP
 /// v2 drift; we bind to v1 only, loosely, and ignore unknown fields).
-struct ACPContent {
+struct AgentContent {
     let type: String
     let text: String?
     let path: String?
@@ -24,14 +24,14 @@ struct ACPContent {
     }
 }
 
-extension ACPContent {
+extension AgentContent {
     /// Exact JS leaf shape (store.ts ToolContentSchema).
     var jsRepresentation: [String: Any] {
         ["type": type, "text": text ?? NSNull(), "path": path ?? NSNull()]
     }
 }
 
-struct ACPPlanEntry {
+struct AgentPlanEntry {
     let content: String
     let priority: String?
     let status: String?
@@ -44,7 +44,7 @@ struct ACPPlanEntry {
     }
 }
 
-struct ACPOption {
+struct AgentPermissionOption {
     let optionId: String
     let name: String
     let kind: String?
@@ -71,12 +71,21 @@ struct AgentPermissionPrompt {
     /// claude control_request ids are strings natively).
     let requestID: String
     let toolCallTitle: String?
-    let options: [ACPOption]
+    let options: [AgentPermissionOption]
+
+    /// The binary gate adapters synthesize when the wire protocol has no
+    /// option list of its own (claude control_request, codex approval).
+    static func allowOrReject(requestID: String, title: String?) -> AgentPermissionPrompt {
+        AgentPermissionPrompt(requestID: requestID, toolCallTitle: title, options: [
+            AgentPermissionOption(optionId: "allow_once", name: "允许", kind: "allow_once"),
+            AgentPermissionOption(optionId: "reject_once", name: "拒绝", kind: "reject_once"),
+        ])
+    }
 }
 
 /// One `session/set_config_option`-selectable knob (mode / model /
 /// thinking …) as `session/new` and the set response return it.
-struct ACPConfigChoice {
+struct AgentConfigChoice {
     let value: String
     let name: String
     let description: String?
@@ -95,7 +104,7 @@ struct AgentConfigOption {
     let name: String
     let category: String?
     let currentValue: String?
-    let options: [ACPConfigChoice]
+    let options: [AgentConfigChoice]
 
     init?(raw: [String: Any]) {
         guard let id = raw["id"] as? String,
@@ -105,13 +114,13 @@ struct AgentConfigOption {
         self.category = raw["category"] as? String
         self.currentValue = raw["currentValue"] as? String
         self.options = (raw["options"] as? [[String: Any]] ?? [])
-            .compactMap { ACPConfigChoice(raw: $0) }
+            .compactMap { AgentConfigChoice(raw: $0) }
     }
 
     /// Explicit memberwise (failable wire init suppresses the
     /// synthesized one) — native adapters build options directly.
     init(id: String, name: String, category: String?,
-         currentValue: String?, options: [ACPConfigChoice]) {
+         currentValue: String?, options: [AgentConfigChoice]) {
         self.id = id
         self.name = name
         self.category = category
@@ -206,13 +215,13 @@ enum AgentSessionEvent {
     case messageChunk(String)
     case thoughtChunk(String)
     case toolCallUpdate(id: String, title: String?, kind: String?,
-                        status: String?, content: [ACPContent],
+                        status: String?, content: [AgentContent],
                         /// Tool result: `rawOutput.content` leaves (omp
                         /// displayContent fallback). The old flat-only
                         /// reader dropped these — the resume content loss.
-                        output: [ACPContent],
+                        output: [AgentContent],
                         rawInput: [String: Any]?, oldText: String?)
-    case plan([ACPPlanEntry])
+    case plan([AgentPlanEntry])
     case permissionRequested(AgentPermissionPrompt)
     case turnEnded(stopReason: String?)
     /// Full config knob list (session/new + every set_config_option OK).
@@ -294,10 +303,4 @@ extension AgentSessionEvent {
                     "costCurrency": costCurrency ?? NSNull()]
         }
     }
-}
-
-/// Dialect-neutral: the delegate never learns which adapter runs.
-protocol AgentSessionDelegate: AnyObject {
-    func session(_ session: AgentSessioning, didEmit events: [AgentSessionEvent])
-    func sessionDidFail(_ session: AgentSessioning, reason: String)
 }

@@ -1,46 +1,10 @@
 // goty — see CLAUDE.md for the working principles.
 import Foundation
 
-/// What a GUI agent pane needs from ANY agent implementation. The UI
-/// speaks this interface; each agent family adapts its wire dialect
-/// behind it (AgentSession is the ACP one — omp today, spec-strict
-/// agents via adapters later). Events (`AgentSessionEvent`) are the
-/// dialect-neutral currency crossing this seam.
-protocol AgentSessioning: AnyObject {
-    var delegate: AgentSessionDelegate? { get set }
-    var sessionId: String? { get }
-    var isWorking: Bool { get }
-    var configOptions: [AgentConfigOption] { get }
-    var commands: [AgentSlashCommand] { get }
-    /// Working directory — file index and session-store filters.
-    var cwd: String? { get }
-
-    func connect(completion: ((Bool) -> Void)?)
-    func send(_ text: String)
-    func cancel()
-    func respondPermission(requestID: String, optionId: String)
-    func setConfigOption(id: String, value: String)
-    /// Persisted-session directory (session/list) filtered to the pane cwd.
-    func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void)
-    /// Resume a persisted agent session on this connection; replayed
-    /// history arrives as normal session/update events.
-    func load(sessionId: String, completion: ((Bool) -> Void)?)
-    func shutdown()
-}
-
-extension AgentSessioning {
-    /// Ring-replay diagnostics — omp (ACP) is the only adapter with a
-    /// ring to measure; others report zeros.
-    var debugReplayBytes: Int { 0 }
-    var debugReplayFrames: Int { 0 }
-}
-
-
-/// One GUI agent session: an ACP-speaking agent process hosted by
-/// sessiond (attach-or-spawn), driven over the shared frame channel.
+/// omp adapter — ACP over the daemon-hosted pane (attach-or-spawn).
 /// State machine: disconnected → connecting → ready ⇄ working /
 /// awaitingPermission; death surfaces as the daemon's EXITED frame.
-final class AgentSession: AgentSessioning {
+final class OmpSession: AgentSessioning {
     weak var delegate: AgentSessionDelegate?
 
     let cwd: String?
@@ -78,10 +42,6 @@ final class AgentSession: AgentSessioning {
         }
     }
 
-    /// Agent panes are line-agnostic; the grid only exists because the
-    /// daemon sizes every PTY. Fixed sane defaults; resize is never sent.
-    static let fixedGrid = SessionGrid(columns: 120, rows: 40, cellWidth: 8, cellHeight: 16)
-
     func connect(completion: ((Bool) -> Void)? = nil) {
         guard !connected else {
             completion?(true)
@@ -97,9 +57,6 @@ final class AgentSession: AgentSessioning {
             },
             onDisconnect: { [weak self] in
                 guard let self else { return }
-                if ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil {
-                    print("GOTY_DEBUG: pane DISCONNECTED")
-                }
                 self.connected = false
                 self.delegate?.sessionDidFail(self, reason: "daemon 连接断开")
             })
@@ -110,19 +67,12 @@ final class AgentSession: AgentSessioning {
             return
         }
         pane?.start()
-        if ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil {
-            print("GOTY_DEBUG: pane started, sending initialize")
-        }
         client.request("initialize", [
             "protocolVersion": 1,
             "clientCapabilities": ["fs": ["readTextFile": false, "writeTextFile": false]],
         ]) { [weak self] result in
-            if ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil {
-                print("GOTY_DEBUG: initialize returned")
-            }
             guard let self, case .success = result else {
-                self?.delegate?.sessionDidFail(self!, reason: "initialize 失败")
-                completion?(false)
+                self?.failHandshake("initialize 失败", completion)
                 return
             }
             self.client.request("session/new", [
@@ -130,8 +80,7 @@ final class AgentSession: AgentSessioning {
             ]) { [weak self] result in
                 guard let self, case .success(let value) = result,
                       let sessionId = value["sessionId"] as? String else {
-                    self?.delegate?.sessionDidFail(self!, reason: "session/new 失败")
-                    completion?(false)
+                    self?.failHandshake("session/new 失败", completion)
                     return
                 }
                 self.sessionId = sessionId
@@ -141,6 +90,14 @@ final class AgentSession: AgentSessioning {
                 completion?(true)
             }
         }
+    }
+
+    /// Handshake failure path: report and settle the connect completion.
+    /// (The old `sessionDidFail(self!)` crashed when the weak self had
+    /// already gone — argument evaluation runs before optional chaining.)
+    private func failHandshake(_ reason: String, _ completion: ((Bool) -> Void)?) {
+        delegate?.sessionDidFail(self, reason: reason)
+        completion?(false)
     }
 
     private func handleFrame(kind: UInt8, data: Data) {
@@ -340,7 +297,7 @@ final class AgentSession: AgentSessioning {
                let id = message["id"] as? Int,
                let params = message["params"] as? [String: Any] {
                 let options = (params["options"] as? [[String: Any]] ?? [])
-                    .compactMap { ACPOption(raw: $0) }
+                    .compactMap { AgentPermissionOption(raw: $0) }
                 let title = (params["toolCall"] as? [String: Any])?["title"] as? String
                 events.append(.permissionRequested(
                     AgentPermissionPrompt(requestID: String(id), toolCallTitle: title, options: options)))
@@ -350,17 +307,17 @@ final class AgentSession: AgentSessioning {
         }
         switch kind {
         case "user_message_chunk":
-            if let content = (update["content"] as? [String: Any]).flatMap(ACPContent.init),
+            if let content = (update["content"] as? [String: Any]).flatMap(AgentContent.init),
                let text = content.text {
                 events.append(.userChunk(text))
             }
         case "agent_message_chunk":
-            if let content = (update["content"] as? [String: Any]).flatMap(ACPContent.init),
+            if let content = (update["content"] as? [String: Any]).flatMap(AgentContent.init),
                let text = content.text {
                 events.append(.messageChunk(text))
             }
         case "agent_thought_chunk":
-            if let content = (update["content"] as? [String: Any]).flatMap(ACPContent.init),
+            if let content = (update["content"] as? [String: Any]).flatMap(AgentContent.init),
                let text = content.text {
                 events.append(.thoughtChunk(text))
             }
@@ -395,7 +352,7 @@ final class AgentSession: AgentSessioning {
                                               oldText: oldText))
             }
         case "plan":
-            let entries = ((update["entries"] as? [[String: Any]]) ?? []).compactMap(ACPPlanEntry.init)
+            let entries = ((update["entries"] as? [[String: Any]]) ?? []).compactMap(AgentPlanEntry.init)
             if !entries.isEmpty {
                 events.append(.plan(entries))
             }

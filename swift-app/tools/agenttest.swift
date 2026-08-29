@@ -78,7 +78,7 @@ enum AgentTest {
         print("— AgentSession.interpret —")
         var events: [AgentSessionEvent] = []
         let daemon = SessionDaemon(socketPath: "/nonexistent-\(UUID().uuidString)")
-        let session = AgentSession(paneId: "p1", cwd: nil, grid: grid,
+        let session = OmpSession(paneId: "p1", cwd: nil, grid: grid,
                                    environment: [:],
                                    spawn: AgentSpawn(
                                        command: "omp", args: ["acp"],

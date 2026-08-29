@@ -16,7 +16,7 @@ final class ClaudeFrameMapper {
     private struct PendingTool {
         let name: String
         let input: [String: Any]?
-        let summary: [ACPContent]
+        let summary: [AgentContent]
     }
     private var pendingTools: [String: PendingTool] = [:]
 
@@ -177,17 +177,17 @@ final class ClaudeFrameMapper {
 
     // MARK: - shared shaping
 
-    /// tool_result content: string or [{type:"text",text:…}] → ACPContent.
-    static func normalizeContent(_ raw: Any?) -> [ACPContent] {
+    /// tool_result content: string or [{type:"text",text:…}] → AgentContent.
+    static func normalizeContent(_ raw: Any?) -> [AgentContent] {
         if let text = raw as? String {
-            return [ACPContent(type: "text", text: text, path: nil)]
+            return [AgentContent(type: "text", text: text, path: nil)]
         }
         guard let blocks = raw as? [[String: Any]] else { return [] }
-        return blocks.compactMap { ACPContent($0) }
+        return blocks.compactMap { AgentContent($0) }
     }
 
     /// One-line human summary of a tool call (its headline argument).
-    static func toolSummary(name: String, input: [String: Any]?) -> [ACPContent] {
+    static func toolSummary(name: String, input: [String: Any]?) -> [AgentContent] {
         let input = input ?? [:]
         let headline: String
         switch name {
@@ -203,7 +203,7 @@ final class ClaudeFrameMapper {
             else if let desc = input["description"] as? String { headline = desc }
             else { headline = "" }
         }
-        return headline.isEmpty ? [] : [ACPContent(type: "text", text: headline, path: nil)]
+        return headline.isEmpty ? [] : [AgentContent(type: "text", text: headline, path: nil)]
     }
 
     /// ACP-ish kind taxonomy for the tool card icon/tint.

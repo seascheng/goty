@@ -162,26 +162,26 @@ final class PiFrameMapper {
     }
 
     /// pi toolResult content: string, [{type:text,text}], or a raw value.
-    static func resultContent(_ raw: Any?) -> [ACPContent] {
+    static func resultContent(_ raw: Any?) -> [AgentContent] {
         if let text = raw as? String {
-            return [ACPContent(type: "text", text: text, path: nil)]
+            return [AgentContent(type: "text", text: text, path: nil)]
         }
         if let blocks = raw as? [[String: Any]] {
-            return blocks.compactMap { ACPContent($0) }
+            return blocks.compactMap { AgentContent($0) }
         }
         if raw != nil, let json = try? JSONSerialization.data(withJSONObject: raw),
            let text = String(data: json, encoding: .utf8) {
-            return [ACPContent(type: "text", text: text, path: nil)]
+            return [AgentContent(type: "text", text: text, path: nil)]
         }
         return []
     }
 
-    static func headline(name: String, arguments: [String: Any]?) -> [ACPContent] {
+    static func headline(name: String, arguments: [String: Any]?) -> [AgentContent] {
         let arguments = arguments ?? [:]
         let keys = ["command", "file_path", "path", "pattern", "url", "description", "query"]
         for key in keys {
             if let value = arguments[key] as? String, !value.isEmpty {
-                return [ACPContent(type: "text", text: value, path: nil)]
+                return [AgentContent(type: "text", text: value, path: nil)]
             }
         }
         return []

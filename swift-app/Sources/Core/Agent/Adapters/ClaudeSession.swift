@@ -46,7 +46,7 @@ final class ClaudeSession: AgentSessioning {
         self.cwd = params.cwd
         self.environment = params.environment
         self.daemon = params.daemon
-        self.grid = AgentSession.fixedGrid
+        self.grid = AgentPaneDefaults.grid
         channel.onOutbound = { [weak self] in self?.pane?.sendInput($0) }
         channel.onFrame = { [weak self] frame in
             self?.handleFrame(frame)
@@ -249,10 +249,8 @@ final class ClaudeSession: AgentSessioning {
             let title = (payload["tool_name"] as? String)
                 ?? (payload["title"] as? String)
                 ?? "claude 请求授权"
-            let prompt = AgentPermissionPrompt(
-                requestID: requestID, toolCallTitle: title,
-                options: [ACPOption(optionId: "allow_once", name: "允许", kind: "allow_once"),
-                          ACPOption(optionId: "reject_once", name: "拒绝", kind: "reject_once")])
+            let prompt = AgentPermissionPrompt.allowOrReject(
+                requestID: requestID, title: title)
             emit([.permissionRequested(prompt)])
             return
         }
