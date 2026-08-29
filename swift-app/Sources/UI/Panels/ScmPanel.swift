@@ -85,10 +85,8 @@ final class ScmPanelView: NSView, ThemeRefreshable {
     private let listScroll = NSScrollView()
     private let stateLabel = NSTextField(labelWithString: "")
     private let stagedNote = NSTextField(labelWithString: "")
-    /// git add — stage everything (the row/group hover actions stage
-    /// per-path; the COMMIT row carries the always-visible one).
-    private let addButton = ChromeButton(title: "Add", style: .ghost)
-    private let commitButton = ChromeButton(title: "Commit", style: .primary)
+    private let addButton = ChromeButton(title: "Add", style: .ghost, compact: true)
+    private let commitButton = ChromeButton(title: "Commit", style: .primary, compact: true)
     /// its menu (tty7's joined split control).
     private let commitMore = IconButton.make("chevron.down", pointSize: 9)
 

@@ -88,8 +88,8 @@ final class EditorPanelView: NSView, ThemeRefreshable {
     private let splitButton = ChromeButton(title: "Split", style: .ghost, compact: true)
     private let cursorLabel = NSTextField(labelWithString: "")
     private let emptyLabel = NSTextField(labelWithString: "Open a file from the tree")
-    private let saveButton = ChromeButton(title: "Save", style: .primary)
-    private let previewButton = ChromeButton(title: "Preview", style: .ghost)
+    private let saveButton = ChromeButton(title: "Save", style: .primary, compact: true)
+    private let previewButton = ChromeButton(title: "Preview", style: .ghost, compact: true)
 
     /// Test surfaces: chrome wiring the headless suite can assert.
     var findBarEnabledForTest: Bool { true }   // search lives in the page (Mod-F)
@@ -152,7 +152,7 @@ final class EditorPanelView: NSView, ThemeRefreshable {
         dirtyDot.translatesAutoresizingMaskIntoConstraints = false
         headerBackground.addSubview(dirtyDot)
 
-        let close = IconButton.make("xmark", pointSize: 12) { [weak self] in
+        let close = IconButton.make("xmark", pointSize: 11) { [weak self] in
             self?.hide()
         }
         close.toolTip = "Back to terminal (Esc)"
@@ -239,8 +239,8 @@ final class EditorPanelView: NSView, ThemeRefreshable {
             saveButton.trailingAnchor.constraint(equalTo: close.leadingAnchor, constant: -8),
             close.trailingAnchor.constraint(equalTo: headerBackground.trailingAnchor, constant: -6),
             close.centerYAnchor.constraint(equalTo: headerBackground.centerYAnchor),
-            close.widthAnchor.constraint(equalToConstant: 26),
-            close.heightAnchor.constraint(equalToConstant: 26),
+            close.widthAnchor.constraint(equalToConstant: 22),
+            close.heightAnchor.constraint(equalToConstant: 22),
 
             webView.topAnchor.constraint(equalTo: headerBackground.bottomAnchor),
             webView.leadingAnchor.constraint(equalTo: leadingAnchor),
