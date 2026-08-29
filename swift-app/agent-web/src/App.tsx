@@ -523,6 +523,12 @@ function Composer({ working }: { working: boolean }) {
               store.apply({ type: "clearTranscript" });
               setHistOpen(false);
             }} />
+          {store.starting && (
+            <span className="chip starting" title="agent 进程已启动，握手完成前模型/思考等控件不可用">
+              <span className="spin" />
+              <span className="chip-value">正在启动 {store.starting}…</span>
+            </span>
+          )}
           {[...store.configOptions]
             .sort((a, b) => (KNOB_ORDER[a.id] ?? 9) - (KNOB_ORDER[b.id] ?? 9))
             .map((option) => (

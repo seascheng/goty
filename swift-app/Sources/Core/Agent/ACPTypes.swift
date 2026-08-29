@@ -192,6 +192,12 @@ struct AgentSessionSummary {
 /// pre-write snapshot of the target file (edit-like calls, local panes)
 /// so the UI can render a real diff.
 enum AgentSessionEvent {
+    /// The agent process is spawned but its handshake has not completed
+    /// (omp: initialize+session/new; claude: system/init; codex:
+    /// thread/start; pi: get_state). The composer surfaces this as an
+    /// explicit starting chip — a hung MCP server must read as
+    /// "starting", never as silent nothing.
+    case starting(agent: String)
     case ready
     /// `user_message_chunk` — replayed history echoes the user's own
     /// prompts; live turns echo locally instead, so this only fires on
@@ -226,6 +232,8 @@ extension AgentSessionEvent {
     /// the tests; the hand copies here used to drift and lose fields.
     var jsRepresentation: [String: Any] {
         switch self {
+        case .starting(let agent):
+            return ["type": "starting", "agent": agent]
         case .ready:
             return ["type": "status", "text": "就绪"]
         case .userChunk(let text):

@@ -35,10 +35,19 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     private let webView: WKWebView
     private let bridge: AgentWebBridge
     private var pendingPrompt: AgentPermissionPrompt?
+    /// Registry label ("Claude Code", "omp (GUI)" …) for the starting
+    /// chip and timeout diagnostics.
+    private let agentLabel: String
+    /// Flips on the first handshake-complete signal (configChanged /
+    /// ready / transcript events). Until then the composer shows an
+    /// explicit starting chip — a hung MCP server must read as
+    /// "starting", never as silent nothing (the claude+serena hang).
+    private var handshakeDone = false
 
-    init(key: HostKey, session: any AgentSessioning) {
+    init(key: HostKey, session: any AgentSessioning, agentLabel: String) {
         self.hostKey = key
         self.session = session
+        self.agentLabel = agentLabel
 
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(
@@ -113,13 +122,36 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         }
 
         webView.load(URLRequest(url: URL(string: "goty://app/index.html")!))
+        // Phase 1 — starting: the bridge queues pushes until the page
+        // is ready, so this lands as the first chip the composer shows;
+        // it clears on the first handshake-complete event.
+        bridge.push(AgentSessionEvent.starting(agent: agentLabel).jsRepresentation)
+        // Handshake watchdog: every adapter signals completion with
+        // configChanged/ready (omp session/new, claude system/init,
+        // codex thread/start, pi get_state). A pane stuck before that —
+        // claude's serena MCP indexing a huge repo for 10+ minutes —
+        // must surface as an explicit timeout, not silent nothing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self] in
+            guard let self, !self.handshakeDone else { return }
+            self.bridge.push(["type": "status",
+                              "text": "\\(self.agentLabel) 启动超时（90 秒未完成握手）。"
+                                   + "常见原因：该 agent 的 MCP/hooks 启动慢（项目索引、网络拉取）。"
+                                   + "面板已保留，可关闭后重开重试。"])
+            self.bridge.push(["type": "working", "value": false])
+        }
         session.connect { [weak self] ok in
             if ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil {
                 print("GOTY_DEBUG: connect ok=\(ok)")
             }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.bridge.push(["type": "status", "text": ok ? "就绪" : "连接失败"])
+                // NOT "就绪" here: connect ok only means the pane is up
+                // for the non-omp adapters. Readiness is the adapter's
+                // .ready event (status "就绪"), which also clears the
+                // starting chip — the two must not race apart.
+                if !ok {
+                    self.bridge.push(["type": "status", "text": "连接失败"])
+                }
                 if ok, let prompt = self.initialPrompt {
                     self.initialPrompt = nil
                     self.bridge.push(["type": "working", "value": true])
@@ -139,6 +171,16 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     /// the GOTY_AUTOLOAD_SESSION environment variable.
     private func debugAutoload(target: String) {
         print("GOTY_DEBUG: autoload entry connected")
+        // Early phase snapshots: taken once the page can answer (the
+        // bundle takes seconds to boot), while the agent handshake may
+        // still be in flight. Shows the starting chip coming and going.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            self.webView.evaluateJavaScript(
+                "JSON.stringify({starting: window.__gotyStore ? window.__gotyStore.starting : 'no-store'})"
+            ) { r, err in
+                print("GOTY_DEBUG EARLY:", err.map { "ERR \($0)" } ?? (r as? String ?? "nil"))
+            }
+        }
         if target != "newest" {
             runAutoload(sessionId: target, t0: Date())
             return
@@ -163,6 +205,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     self.webView.evaluateJavaScript("""
                         JSON.stringify({
                           revision: window.__gotyStore.revision,
+                          starting: window.__gotyStore.starting,
                           blocks: window.__gotyStore.blocks.length,
                           users: window.__gotyStore.blocks.filter(b => b.kind === 'user').length,
                           tailKind: window.__gotyStore.blocks[window.__gotyStore.blocks.length-1]?.kind ?? 'none',
@@ -223,6 +266,15 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             for event in events {
+                switch event {
+                case .ready, .configChanged, .userChunk, .messageChunk:
+                    // First handshake-complete signal cancels the
+                    // watchdog (configChanged arrives even when an
+                    // adapter omits ready).
+                    self.handshakeDone = true
+                default:
+                    break
+                }
                 if case .permissionRequested(let prompt) = event {
                     self.pendingPrompt = prompt
                     self.onPermissionPending?(true)

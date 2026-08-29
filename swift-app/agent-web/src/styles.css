@@ -281,6 +281,14 @@ body {
 .chip-opt.cur { color: var(--accent-bright); }
 .chip-check { color: var(--accent-bright); }
 .usage { color: var(--fg-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.chip.starting { cursor: default; color: var(--fg-muted); }
+.chip.starting:hover { background: none; border-color: transparent; color: var(--fg-muted); }
+.spin {
+  width: 10px; height: 10px; flex: none; border-radius: 50%;
+  border: 1.5px solid var(--fg-extra-muted); border-top-color: var(--accent-bright);
+  animation: chipspin 0.9s linear infinite;
+}
+@keyframes chipspin { to { transform: rotate(360deg); } }
 .pane-agent-icon {
   width: 15px; height: 15px; flex: none; margin-left: 2px;
 }

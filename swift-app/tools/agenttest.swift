@@ -37,6 +37,12 @@ enum AgentTest {
               "split across chunks")
         check(splitter.feed(Array("x\r\ny\n".utf8)) == ["x", "y"], "CRLF trimmed")
 
+        print("— starting phase —")
+        let startingJS = AgentSessionEvent.starting(agent: "Claude Code").jsRepresentation
+        check(startingJS["type"] as? String == "starting"
+              && startingJS["agent"] as? String == "Claude Code",
+              "starting event maps to JS shape")
+
         print("— JSONRPCChannel echo filter + routing —")
         let client = JSONRPCChannel()
         var notifications: [(String, [String: Any])] = []

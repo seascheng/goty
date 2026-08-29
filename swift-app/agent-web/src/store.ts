@@ -102,6 +102,7 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("permissionResolved") }),
   z.object({ type: z.literal("turnEnded") }),
   z.object({ type: z.literal("working"), value: z.boolean() }),
+  z.object({ type: z.literal("starting"), agent: z.string() }),
   z.object({ type: z.literal("status"), text: z.string() }),
   z.object({ type: z.literal("configOptions"), options: z.unknown().nullish() }),
   z.object({ type: z.literal("commands"), commands: z.unknown().nullish() }),
@@ -154,6 +155,10 @@ class Store {
   files: string[] = [];
   permission: Permission | null = null;
   working = false;
+  /// Agent handshake phase: set on "starting", cleared by the first
+  /// handshake-complete signal (status/configOptions/transcript). The
+  /// composer renders an explicit chip while this is non-null.
+  starting: string | null = null;
   configOptions: ConfigOption[] = [];
   commands: AgentCommand[] = [];
   usage: { used?: number | null; size?: number | null;
@@ -245,10 +250,17 @@ class Store {
     this.revision += 1;
     this.emit();
   }
-
   private applyParsed(event: IncomingEvent) {
+    // Only handshake-complete signals clear the starting chip: status
+    // ("就绪"/failure), config/command directories, or transcript
+    // traffic. theme/meta/sessions/files are unrelated and may land in
+    // the same FIFO batch right after "starting".
+    const handshakeSignals: ReadonlySet<string> = new Set([
+      "status", "configOptions", "commands", "userMessage", "userChunk",
+      "agentChunk", "thoughtChunk", "toolCall", "permission", "turnEnded",
+    ]);
+    if (handshakeSignals.has(event.type)) this.starting = null;
     switch (event.type) {
-      case "userMessage": this.push({ kind: "user", text: event.text }); break;
       case "userChunk":
         this.userTail(event.text); break;
       case "agentChunk":
@@ -282,6 +294,7 @@ class Store {
       case "turnEnded": this.push({ kind: "agent", text: "" }); this.working = false; break;
       case "sessions": this.sessions = coerceList(event.sessions, AgentSessionSummarySchema); break;
       case "working": this.working = event.value; break;
+      case "starting": this.starting = event.agent; break;
       case "status": this.status = event.text; break;
       case "configOptions": this.configOptions = coerceList(event.options, ConfigOptionSchema); break;
       case "commands": this.commands = coerceList(event.commands, AgentCommandSchema); break;

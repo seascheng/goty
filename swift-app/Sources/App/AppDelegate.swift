@@ -469,7 +469,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                       cwd: pane.cwd,
                                                       environment: environment,
                                                       daemon: .shared))
-        let host = AgentPaneHost(key: key, session: session)
+        let host = AgentPaneHost(key: key, session: session, agentLabel: descriptor.label)
         host.onWorkingChange = { [weak self] working in
             self?.coordinator.agentStateUpdated(wsId: ws.id, paneId: pane.id,
                                                 state: working ? .working : .idle)
