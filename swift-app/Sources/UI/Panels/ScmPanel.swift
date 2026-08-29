@@ -53,13 +53,15 @@ enum ScmPanelGroup: CaseIterable {
 final class ScmPanelView: NSView, ThemeRefreshable {
     /// Any op landed → the sidebar's branch/counts are stale too.
     var onGitActivity: (() -> Void)?
+    /// Change-row click → the editor overlay's diff document (routed
+    /// up: only the delegate layer knows the focused workspace).
+    var onOpenDiff: ((_ path: String, _ staged: Bool, _ untracked: Bool) -> Void)?
     /// Latest landed status — the Files tree's badges come from the same
     /// fetch (one git run serves both tabs).
     var onStatus: ((ScmStatus?) -> Void)?
     /// Worktrees row → Open: a terminal in that worktree directory.
     /// Routed up to the coordinator (the panel never spawns tabs).
     var onOpenWorktree: ((String) -> Void)?
-
     private var cwd: String?
     private var host: String?
     private var status: ScmStatus?
@@ -385,6 +387,10 @@ final class ScmPanelView: NSView, ThemeRefreshable {
                                                 conflict: e.conflict))
         let row = ScmEntryRow(path: e.path, origPath: e.origPath,
                               letter: letter, letterColor: color)
+        // tty7: clicking a change row opens the diff overlay.
+        row.onOpen = { [weak self] in
+            self?.onOpenDiff?(e.path, group == .staged, group == .untracked)
+        }
         switch group {
         case .merge:
             // Staging the resolution IS "mark as resolved".

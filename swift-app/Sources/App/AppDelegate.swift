@@ -522,6 +522,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.coordinator.pollGitStatuses()
             }
             self?.wc.rightPanel.refreshScm()   // TTL-guarded; hidden = no-op
+            // Open diff documents follow git's truth (only while the
+            // editor overlay is actually showing them).
+            if self?.editorPanelBacking?.visible == true {
+                self?.editorPanelBacking?.refreshDiffs()
+            }
         }
 
         // Local repo changes arrive as kernel events; each store
@@ -669,6 +674,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rightPanel.onOpenFile = { [weak self] path in
             guard let self, let ws = self.coordinator.store?.focused else { return }
             self.editorPanel().open(path: path, source: FileSources.source(for: ws))
+        }
+
+        rightPanel.onOpenDiff = { [weak self] path, staged, untracked in
+            guard let self, let ws = self.coordinator.store?.focused else { return }
+            let host = ws.isRemote ? ws.sshHost : nil
+            let cwd = self.coordinator.activePane(of: ws)?.cwd
+            guard let root = cwd.flatMap({ ScmStore.shared.repoRoot(cwd: $0, host: host) })
+                  ?? cwd.flatMap({ ScmStore.shared.cachedStatus(cwd: $0, host: host)?.root })
+            else { return }
+            self.editorPanel().openDiff(root: root, host: host, path: path,
+                                        staged: staged, untracked: untracked,
+                                        source: FileSources.source(for: ws))
         }
 
         // Worktrees group → Open: a terminal straight into that

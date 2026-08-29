@@ -39,11 +39,12 @@ enum AgentTheme {
             "border": hex(composited(t.hairline)),
             "border-accent": hex(composited(t.hoverFill)),
             "mode": t.isDark ? "dark" : "light",
+            "diff-added": hex(t.gitAdded),
+            "diff-removed": hex(t.gitRemoved),
         ]
     }
-
     /// Push the current theme into the page.
-    static func push(to bridge: AgentWebBridge) {
+    static func push(to bridge: WebBridge) {
         bridge.push(["type": "theme", "vars": vars()])
     }
 }

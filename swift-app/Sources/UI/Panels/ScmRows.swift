@@ -151,6 +151,8 @@ final class ScmGroupHeaderView: NSView, KeyedRow {
 
 final class ScmEntryRow: NSView, KeyedRow {
     var rowKey: String = "row"
+    /// Click → the diff document (tty7: rows open the diff overlay).
+    var onOpen: (() -> Void)?
     /// tty7 action_strip: constraint-driven, not frame-driven — a
     /// frame-driven subview inside an autolayout row synthesizes its
     /// own zero-size constraints and crushes whatever is tied to it
@@ -213,6 +215,7 @@ final class ScmEntryRow: NSView, KeyedRow {
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.inVisibleRect, .activeAlways,
                                                               .mouseEnteredAndExited],
                                        owner: self, userInfo: nil))
+        addGestureRecognizer(ActionClickRecognizer { [weak self] in self?.onOpen?() })
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }

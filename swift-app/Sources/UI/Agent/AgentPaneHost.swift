@@ -275,10 +275,17 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                                          subdirectory: "agent-web") {
             return bundled.deletingLastPathComponent()
         }
-        let repo = URL(fileURLWithPath: #filePath) // Sources/UI/Agent/AgentPaneHost.swift
-            .deletingLastPathComponent().deletingLastPathComponent() // UI
-            .deletingLastPathComponent().deletingLastPathComponent() // Sources
-            .deletingLastPathComponent().deletingLastPathComponent() // swift-app
+        // #filePath is relative when run-tests compiles from swift-app/ —
+        // complete it with the process cwd (filestest's rule), or the
+        // deletions below fall through "" into "/".
+        var sourcePath = #filePath
+        if !sourcePath.hasPrefix("/") {
+            sourcePath = FileManager.default.currentDirectoryPath + "/" + sourcePath
+        }
+        let repo = URL(fileURLWithPath: sourcePath) // Sources/UI/Agent/AgentPaneHost.swift
+            .deletingLastPathComponent().deletingLastPathComponent() // UI/Agent
+            .deletingLastPathComponent() // Sources
+            .deletingLastPathComponent() // swift-app
         return repo.appendingPathComponent("agent-web/dist")
     }
 

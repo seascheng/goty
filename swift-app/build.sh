@@ -108,6 +108,16 @@ else
     echo "agent-web: npm not found — Agent GUI sessions will not render" >&2
     exit 1
 fi
+
+# Editor/preview/diff web app: same single-file contract as agent-web.
+if [ -d files-web/node_modules ] || command -v npm >/dev/null 2>&1; then
+    ( cd files-web && npm install --no-fund --no-audit && npm run build )
+    mkdir -p "$APP/Contents/Resources/files-web"
+    cp -R files-web/dist/ "$APP/Contents/Resources/files-web/"
+else
+    echo "files-web: npm not found — the editor pane will not render" >&2
+    exit 1
+fi
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

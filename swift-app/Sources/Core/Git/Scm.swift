@@ -553,6 +553,39 @@ final class ScmStore {
         }
     }
 
+    /// One path's unified patch (`git diff` — tty7's flags: no color,
+    /// no textconv, rename detection, -U3). Untracked files diff
+    /// against /dev/null via `--no-index` (git exits 1 when a diff
+    /// exists — that is success here). nil = git produced nothing.
+    func diff(root: String, host: String?, path: String, staged: Bool,
+              untracked: Bool) -> String? {
+        let git = host != nil ? "git" : "/usr/bin/git"
+        let dir = Shell.forceQuoted(root)
+        // `:(literal)` must arrive at git as ONE argv word — `(` is a
+        // shell metacharacter, so the spec rides quoted (ScmOp's
+        // Shell.join rule, applied by hand for these fixed shapes).
+        let spec = Shell.forceQuoted(":(literal)" + path)
+        let command: String
+        if untracked {
+            command = "cd \(dir) && \(git) --no-pager diff --no-color "
+                + "--no-ext-diff --no-textconv -U3 --no-index /dev/null "
+                + Shell.forceQuoted(path)
+        } else if staged {
+            command = "cd \(dir) && \(git) -c core.quotePath=false --no-pager diff "
+                + "--no-color --no-ext-diff --no-textconv -M -U3 --cached -- \(spec)"
+        } else {
+            command = "cd \(dir) && \(git) -c core.quotePath=false --no-pager diff "
+                + "--no-color --no-ext-diff --no-textconv -M -U3 -- \(spec)"
+        }
+        let result = Shell.exec(command, host: host)
+        // --no-index signals "differences found" with exit 1.
+        guard result.code == 0 || (untracked && result.code == 1),
+              let text = String(data: result.stdout, encoding: .utf8),
+              !text.isEmpty
+        else { return nil }
+        return String(text.prefix(1_000_000))
+    }
+
     /// Drop the TTL for every cwd that resolved to this repo, so the next
     /// poll refetches immediately.
     func invalidate(root: String, host: String?) {

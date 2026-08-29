@@ -211,11 +211,15 @@ final class RightPanelView: NSView, ThemeRefreshable {
         didSet { scmView.onGitActivity = onScmActivity }
     }
 
+    /// Change-row click → diff document, routed to the editor overlay.
+    var onOpenDiff: ((_ path: String, _ staged: Bool, _ untracked: Bool) -> Void)? {
+        didSet { scmView.onOpenDiff = onOpenDiff }
+    }
+
     /// Worktrees row → Open, routed to the coordinator.
     var onOpenWorktree: ((String) -> Void)? {
         didSet { scmView.onOpenWorktree = onOpenWorktree }
     }
-
     var onTabChange: ((RightPanelTab) -> Void)?
 
     // MARK: - Internals

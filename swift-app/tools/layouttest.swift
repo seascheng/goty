@@ -900,30 +900,58 @@ func run() {
     window.setContentSize(NSSize(width: 1280, height: 800))
     content.layoutSubtreeIfNeeded()
 
-    // Wrap: On must actually re-wrap — the container tracks the clip,
-    // not the wrap-off pass's max-line width; and a window resize must
-    // move it (the wrap-on-but-content-never-rewraps report).
-    editor.setWrapForTest(true)
-    content.layoutSubtreeIfNeeded()
-    let clipWidth = editor.subviews.first { $0 is NSScrollView }
-        .flatMap { ($0 as? NSScrollView)?.contentView.bounds.width } ?? 0
-    check(abs(editor.textContainerWidthForTest - clipWidth) < 1.5,
-          "wrap on: container tracks the clip (\(editor.textContainerWidthForTest) vs \(clipWidth))")
-    window.setContentSize(NSSize(width: 900, height: 600))
-    content.layoutSubtreeIfNeeded()
-    let narrowClip = editor.subviews.first { $0 is NSScrollView }
-        .flatMap { ($0 as? NSScrollView)?.contentView.bounds.width } ?? 0
-    check(narrowClip < clipWidth - 100
-          && abs(editor.textContainerWidthForTest - narrowClip) < 1.5,
-          "window resize re-wraps (container=\(editor.textContainerWidthForTest), clip=\(narrowClip))")
-    window.setContentSize(NSSize(width: 1280, height: 800))
-    content.layoutSubtreeIfNeeded()
+    // The webview body: the page must come up (ready) and the opened
+    // file's content must round-trip through the bridge INTO the page
+    // (getText reads the live CodeMirror doc — layout-level proof the
+    // load pipeline works, the webview-era replacement for the old
+    // glyph-count assertions).
+    let pageReady = { () -> Bool in
+        for _ in 0..<400 {   // 400 × 50ms = 20s for the bundle to boot
+            if editor.pageReadyForTest { return true }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        return editor.pageReadyForTest
+    }()
+    if !pageReady {
+        var diag = ""
+        var gotDiag = false
+        editor.webViewForTest.evaluateJavaScript(
+            "document.readyState + '/' + document.body.innerHTML.length") { r, e in
+            diag = "readyState=\(r ?? "nil") err=\(e.map { "\($0)" } ?? "none")"
+                + " isLoading=\(editor.webViewForTest.isLoading)"
+                + " url=\(editor.webViewForTest.url?.absoluteString ?? "nil")"
+            gotDiag = true
+        }
+        for _ in 0..<40 {
+            if gotDiag { break }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        print("     page diag: \(diag)")
+    }
+    check(pageReady, "editor page posted ready")
+    if pageReady {
+        for _ in 0..<40 {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        var pageText: String?
+        var got = false
+        editor.webViewForTest.evaluateJavaScript(
+            "window.__goty.getText()") { r, _ in
+            pageText = r as? String
+            got = true
+        }
+        for _ in 0..<100 {
+            if got { break }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        let fixtureText = (try? String(contentsOfFile: mdFixture, encoding: .utf8)) ?? ""
+        check(got && pageText == fixtureText,
+              "file content landed in the page (\(pageText?.count ?? 0) vs \(fixtureText.count) chars)")
+        check(editor.bridgeDeliveredForTest > 0, "bridge delivered document events")
+    }
     editor.togglePreview()
     content.layoutSubtreeIfNeeded()
-    check(editor.renderedGlyphCount > 0,
-          "editor content rendered (\(editor.renderedGlyphCount) glyphs)")
-    check(editor.previewGlyphCount > 0,
-          "preview content rendered (\(editor.previewGlyphCount) glyphs)")
+    check(editor.findBarEnabledForTest, "search armed (page Mod-F)")
 
     // 2026-08-22's real root cause, locked in: the renderer once put an
     // NSColor into a .font slot (ordered-list marker). AppKit's
@@ -1027,22 +1055,42 @@ func run() {
         }
     }
 
-    // Editor chrome (tty7 Input parity): line-number gutter counts the
-    // file's lines, find bar armed, Tab types 4 spaces.
-    let fixtureLines = ((try? String(contentsOfFile: mdFixture, encoding: .utf8)) ?? "")
-        .split(separator: "\n", omittingEmptySubsequences: false).count
-    check(editor.gutterForTest.lineStarts.count == fixtureLines,
-          "gutter counts every logical line (\(editor.gutterForTest.lineStarts.count) vs \(fixtureLines))")
-    check(editor.gutterForTest.requiredWidth >= 34, "gutter has real width")
-    check(editor.findBarEnabledForTest, "find bar armed (⌘F incremental)")
-    let beforeTab = editor.editorTextForTest
-    editor.insertTabForTest()
-    // The caret sits at 0 (activate resets it) — the four spaces land
-    // THERE, not at the end.
-    check(editor.editorTextForTest.count == beforeTab.count + 4
-          && editor.editorTextForTest.hasPrefix("    "),
-          "Tab inserts 4 spaces (tty7 soft tab)")
-    editor.togglePreview()
+    // Diff document (Git tab row click): a real repo fixture, a staged
+    // change, the patch flows into the page like any document.
+    let repo = NSTemporaryDirectory() + "layouttest-diff-\(UUID().uuidString)"
+    try? FileManager.default.createDirectory(atPath: repo, withIntermediateDirectories: true)
+    _ = Shell.exec("cd '\(repo)' && /usr/bin/git init -q && "
+                   + "/usr/bin/git config user.email t@t && /usr/bin/git config user.name t")
+    try? "line one\nline two\n".write(toFile: repo + "/a.txt", atomically: true, encoding: .utf8)
+    _ = Shell.exec("cd '\(repo)' && /usr/bin/git add a.txt")
+    let patch = ScmStore.shared.diff(root: repo, host: nil, path: "a.txt",
+                                     staged: true, untracked: false)
+    check(patch?.contains("+line one") == true && patch?.contains("new file") == true,
+          "ScmStore.diff produces a staged patch")
+    editor.openDiff(root: repo, host: nil, path: "a.txt", staged: true,
+                    untracked: false, source: LocalFileSource())
+    for _ in 0..<40 {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    check(editor.editorTextForTest.contains("+line one"),
+          "diff document loaded into the model")
+    if editor.pageReadyForTest {
+        var diffText = ""
+        var gotDiff = false
+        editor.webViewForTest.evaluateJavaScript(
+            "window.__goty.getText()") { r, _ in
+            diffText = r as? String ?? ""
+            gotDiff = true
+        }
+        for _ in 0..<100 {
+            if gotDiff { break }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        check(gotDiff && diffText.contains("+line one"),
+              "diff patch landed in the page")
+    }
+    check(editor.diffSplitForTest, "diff defaults to split view")
+    try? FileManager.default.removeItem(atPath: repo)
     editor.hide()
     f = frames()
     check(abs(f.terminal.width - beforeEditor.terminal.width) < 0.5,

@@ -36,6 +36,10 @@ final class AgentSchemeHandler: NSObject, WKURLSchemeHandler {
         if relative.hasPrefix("/") { relative.removeFirst() }
 
         let file = root.appendingPathComponent(relative).standardizedFileURL
+        if ProcessInfo.processInfo.environment["GOTY_SCHEME_DEBUG"] != nil {
+            let exists = FileManager.default.fileExists(atPath: file.path)
+            print("goty-scheme: \(url.absoluteString) root=\(root.path) file=\(file.path) exists=\(exists)")
+        }
         if file.path.hasPrefix(root.path), let data = try? Data(contentsOf: file) {
             respond(task, url: url, data: data, file: file)
             return
