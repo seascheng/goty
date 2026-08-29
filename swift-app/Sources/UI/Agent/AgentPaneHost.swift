@@ -68,8 +68,14 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
 
         super.init(frame: .zero)
         wantsLayer = true
-        // Themed placeholder behind the transparent webview.
-        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        // Themed placeholder behind the transparent webview — OPAQUE,
+        // the terminal pane's pre-paint convention (PaneHost). The
+        // steady-state fill is set when the cover drops: the page's
+        // bg-alpha must be the pane's ONLY alpha layer, and a
+        // chromeSurface host under it double-composited the pane to
+        // ~0.96 while terminals sat at 0.8 (the "agent pane opacity
+        // doesn't match" report).
+        layer?.backgroundColor = PaneHost.backdropPlaceholder().cgColor
 
         webView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(webView)
@@ -85,7 +91,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         // cover it. Dropped one beat after the page's ready signal
         // (React 18 commit is scheduled, not synchronous).
         coverView.wantsLayer = true
-        coverView.layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        coverView.layer?.backgroundColor = PaneHost.backdropPlaceholder().cgColor
         coverView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(coverView)
         NSLayoutConstraint.activate([
@@ -104,6 +110,11 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             // first commit is scheduled, not synchronous.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 self?.coverView.removeFromSuperview()
+                // Settle like a terminal pane post-first-paint: clear
+                // when the window is translucent (the page body at
+                // bg-alpha is the single composite), theme background
+                // when opaque.
+                self?.layer?.backgroundColor = PaneHost.backdropTarget()?.cgColor
             }
             if ProcessInfo.processInfo.environment["GOTY_FOCUS_DEBUG"] != nil {
                 self?.dumpFocusState("pageReady")
@@ -261,8 +272,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     }
 
     func retheme() {
-        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
-        coverView.layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        layer?.backgroundColor = PaneHost.backdropTarget()?.cgColor
+        coverView.layer?.backgroundColor = PaneHost.backdropPlaceholder().cgColor
         pushTheme()
         pushMeta()   // the icon tint is theme-derived
     }

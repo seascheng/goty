@@ -104,12 +104,12 @@ final class EditorPanelView: NSView, ThemeRefreshable {
     /// Theme flip: re-bake the panel chrome and push the fresh palette
     /// into the page.
     func retheme() {
-        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        layer?.backgroundColor = PaneHost.backdropTarget()?.cgColor
         headerBackground.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         statusBar.layer?.backgroundColor = chromeContainerFill(Chrome.theme.topBarBackground)?.cgColor
         nameLabel.textColor = currentFile == nil
             ? Chrome.theme.secondaryText : Chrome.theme.foreground
-        coverView.layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        coverView.layer?.backgroundColor = PaneHost.backdropPlaceholder().cgColor
         AgentTheme.push(to: bridge)
     }
 
@@ -127,7 +127,13 @@ final class EditorPanelView: NSView, ThemeRefreshable {
         super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        // OPAQUE placeholder (PaneHost convention); steady state set at
+        // cover drop — the page's bg-alpha must be this overlay's ONLY
+        // alpha layer. A chromeSurface host under the translucent page
+        // double-composited the editor to ~0.96 while terminal panes
+        // sat at the config's 0.8 (agent-pane opacity mismatch, same
+        // root cause — this overlay covers the pane-grid region).
+        layer?.backgroundColor = PaneHost.backdropPlaceholder().cgColor
 
         // Header: filename, dirty dot, close (= back to terminal).
         headerBackground.wantsLayer = true
@@ -177,7 +183,7 @@ final class EditorPanelView: NSView, ThemeRefreshable {
         addSubview(webView)
 
         coverView.wantsLayer = true
-        coverView.layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        coverView.layer?.backgroundColor = PaneHost.backdropPlaceholder().cgColor
         coverView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(coverView)
 
@@ -324,6 +330,10 @@ final class EditorPanelView: NSView, ThemeRefreshable {
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 self.coverView.removeFromSuperview()
+                // Terminal-parity steady state (see the init comment):
+                // clear under a translucent window, theme background
+                // when opaque.
+                self.layer?.backgroundColor = PaneHost.backdropTarget()?.cgColor
             }
         }
         bridge.onSave = { [weak self] in self?.save() }
