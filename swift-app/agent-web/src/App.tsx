@@ -471,6 +471,45 @@ function Composer({ working, phase }: { working: boolean;
   return (
     <div className="composer">
       <div className="composer-box" ref={boxRef}>
+        {(store.reconnecting || store.starting || store.phase != null
+          || store.justFinished || store.error != null) && (
+        <div className="composer-status">
+          {store.reconnecting && (
+            <span className="cstat warn" title="连接断开，正在自动重连；远端进程仍在运行">
+              <span className="spin" />重连中…
+            </span>
+          )}
+          {store.starting && !store.reconnecting && (
+            <span className="cstat" title="agent 进程已启动，握手完成前模型/思考等控件不可用">
+              <span className="spin" />正在启动 {store.starting}…
+            </span>
+          )}
+          {store.phase === "thinking" && (
+            <span className="cstat" title="模型思考中">
+              <span className="spin" />思考中…
+            </span>
+          )}
+          {store.phase === "executing" && (
+            <span className="cstat" title="工具执行中">
+              <span className="spin" />执行中…
+            </span>
+          )}
+          {store.phase === "awaitingPermission" && (
+            <span className="cstat awaiting" title="等待你在下方授权">等待授权</span>
+          )}
+          {store.justFinished && (
+            <span className="cstat done">已完成 ✓</span>
+          )}
+          {store.error != null && (
+            <span className="cstat error" title={store.error}>
+              {store.error}
+              <button className="chip-retry"
+                onClick={() => window.webkit?.messageHandlers.goty.postMessage(
+                  { type: "reconnect" })}>重试</button>
+            </span>
+          )}
+        </div>
+        )}
         <textarea
           ref={ref}
           value={text}
@@ -541,46 +580,6 @@ function Composer({ working, phase }: { working: boolean;
               store.apply({ type: "clearTranscript" });
               setHistOpen(false);
             }} />
-          {store.reconnecting && (
-            <span className="chip starting" title="连接断开，正在自动重连；远端进程仍在运行">
-              <span className="spin" />
-              <span className="chip-value">重连中…</span>
-            </span>
-          )}
-          {store.starting && !store.reconnecting && (
-            <span className="chip starting" title="agent 进程已启动，握手完成前模型/思考等控件不可用">
-              <span className="spin" />
-              <span className="chip-value">正在启动 {store.starting}…</span>
-            </span>
-          )}
-          {store.phase === "thinking" && (
-            <span className="chip phase" title="模型思考中">
-              <span className="spin" />
-              <span className="chip-value">思考中…</span>
-            </span>
-          )}
-          {store.phase === "executing" && (
-            <span className="chip phase" title="工具执行中">
-              <span className="spin" />
-              <span className="chip-value">执行中…</span>
-            </span>
-          )}
-          {store.phase === "awaitingPermission" && (
-            <span className="chip phase awaiting" title="等待你在下方授权">
-              <span className="chip-value">等待授权</span>
-            </span>
-          )}
-          {store.justFinished && (
-            <span className="chip done">已完成 ✓</span>
-          )}
-          {store.error != null && (
-            <span className="chip error" title={store.error}>
-              <span className="chip-value">{store.error}</span>
-              <button className="chip-retry"
-                onClick={() => window.webkit?.messageHandlers.goty.postMessage(
-                  { type: "reconnect" })}>重试</button>
-            </span>
-          )}
           {[...store.configOptions]
             .sort((a, b) => (KNOB_ORDER[a.id] ?? 9) - (KNOB_ORDER[b.id] ?? 9))
             .map((option) => (
