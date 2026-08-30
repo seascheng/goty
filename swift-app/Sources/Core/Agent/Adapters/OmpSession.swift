@@ -56,25 +56,36 @@ final class OmpSession: AgentSessioning {
             return
         }
         connected = true
+        resume(completion)
+    }
+
+    /// Restore-or-start, always on a FRESH process: kill any pane left
+    /// under this id, spawn anew, initialize, then session/load the last
+    /// live session (omp's authoritative history — user prompts included;
+    /// the ACP update stream never echoes them, so attach ring replay
+    /// alone loses the user's side of old turns). session/load against an
+    /// in-process active session is a no-op, which is exactly why the
+    /// respawn is mandatory: only a fresh process reloads from disk.
+    /// Trade-off: an in-flight model call at restore time is dropped.
+    private func resume(_ completion: ((Bool) -> Void)?) {
+        daemon.killPane(id: paneId)
         guard let opened = openTransport() else {
             connected = false
             delegate?.sessionDidFail(self, reason: "sessiond 不可用")
             completion?(false)
             return
         }
-        if debugFramesEnabled {
-            print("GOTY_DEBUG omp openTransport attached=\(opened.attachedExisting)")
+        handshake { [weak self] ok in
+            guard let self, ok else {
+                completion?(ok)
+                return
+            }
+            if let restore = self.lastSessionId, restore != self.sessionId {
+                self.load(sessionId: restore) { _ in completion?(true) }
+            } else {
+                completion?(true)
+            }
         }
-        if opened.attachedExisting {
-            // The pane's process already owns a session; its ring replay
-            // rebuilds the transcript and the orphan-result hook re-learns
-            // the sessionId. A fresh handshake here would create a SECOND
-            // omp session and orphan the live turn.
-            emit([.ready])
-            completion?(true)
-            return
-        }
-        handshake(completion)
     }
 
     private func openTransport() -> SessionDaemon.OpenPaneResult? {
@@ -112,46 +123,41 @@ final class OmpSession: AgentSessioning {
                 self?.failHandshake("initialize 失败", completion)
                 return
             }
-            self.client.request("session/new", [
-                "cwd": self.cwd ?? NSNull(), "mcpServers": [],
-            ]) { [weak self] result in
-                guard let self, case .success(let value) = result,
-                      let sessionId = value["sessionId"] as? String else {
-                    self?.failHandshake("session/new 失败", completion)
-                    return
+            // A previous live session resumes INSTEAD of session/new —
+            // session/new here would mint an empty zombie session per
+            // restore. If the load fails (session purged upstream), fall
+            // back to a fresh session so the pane stays usable.
+            if let restore = self.lastSessionId {
+                self.load(sessionId: restore) { ok in
+                    if ok { completion?(true) }
+                    else { self.sessionNew(completion) }
                 }
-                self.sessionId = sessionId
-                let configs = AgentConfigOption.list(value["configOptions"])
-                self.configOptions = configs
-                self.emit(configs.isEmpty ? [.ready] : [.configChanged(configs), .ready])
-                completion?(true)
+            } else {
+                self.sessionNew(completion)
             }
         }
     }
 
-    func reconnect(completion: ((Bool) -> Void)? = nil) {
-        pane?.close()
-        pane = nil
-        connected = true
-        guard let opened = openTransport() else {
-            connected = false
-            completion?(false)
-            return
-        }
-        if opened.attachedExisting {
-            emit([.ready])
-            completion?(true)
-            return
-        }
-        // Fresh process: the old session id is gone from the wire; the
-        // caller restores the conversation via load(lastSessionId).
-        handshake { [weak self] ok in
-            guard let self, ok, let restore = self.lastSessionId else {
-                completion?(ok)
+    private func sessionNew(_ completion: ((Bool) -> Void)?) {
+        client.request("session/new", [
+            "cwd": cwd ?? NSNull(), "mcpServers": [],
+        ]) { [weak self] result in
+            guard let self, case .success(let value) = result,
+                  let sessionId = value["sessionId"] as? String else {
+                self?.failHandshake("session/new 失败", completion)
                 return
             }
-            self.load(sessionId: restore) { _ in completion?(true) }
+            self.sessionId = sessionId
+            let configs = AgentConfigOption.list(value["configOptions"])
+            self.configOptions = configs
+            self.emit(configs.isEmpty ? [.ready] : [.configChanged(configs), .ready])
+            completion?(true)
         }
+    }
+
+    func reconnect(completion: ((Bool) -> Void)? = nil) {
+        connected = true
+        resume(completion)
     }
 
     /// Handshake failure path: report and settle the connect completion.
@@ -183,6 +189,23 @@ final class OmpSession: AgentSessioning {
             // handshake — ACPClient drops those in replay mode — while the
             // session/update notifications rebuild the transcript.
             client.feed([UInt8](data), replay: true)
+            // The ring never carries the USER's prompts (omp does not echo
+            // them in ACP updates — live echo is the page's job, which dies
+            // with the page). Rebuild from the authoritative store instead:
+            // clear the provisional replay, then session/load replays the
+            // full history INCLUDING user turns and settles state to idle
+            // (its own .ready) — a replayed messageChunk can never leave
+            // the pane stuck on "thinking" for a turn that ended long ago.
+            if let sid = sessionId {
+                emit([.transcriptReset])
+                load(sessionId: sid) { [weak self] ok in
+                    if !ok { self?.emit([.ready]) }
+                }
+            } else {
+                // Ring rotated past the handshake: no session id to load —
+                // keep the provisional replay and settle to idle.
+                emit([.ready])
+            }
         case SessionOutputKind.exited:
             delegate?.sessionDidFail(self, reason: "agent 进程已退出")
         default:

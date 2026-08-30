@@ -460,7 +460,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     // adapter omits ready).
                     self.handshakeDone = true
                 case .turnEnded, .plan, .commandsChanged, .usageUpdate,
-                     .permissionRequested, .thoughtChunk, .starting:
+                     .permissionRequested, .thoughtChunk, .starting,
+                     .transcriptReset:
                     break
                 }
                 switch event {

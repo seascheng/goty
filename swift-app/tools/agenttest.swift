@@ -42,6 +42,9 @@ enum AgentTest {
         check(startingJS["type"] as? String == "starting"
               && startingJS["agent"] as? String == "Claude Code",
               "starting event maps to JS shape")
+        let resetJS = AgentSessionEvent.transcriptReset.jsRepresentation
+        check(resetJS["type"] as? String == "clearTranscript",
+              "transcriptReset maps to the store's clearTranscript")
 
         print("— JSONRPCChannel echo filter + routing —")
         let client = JSONRPCChannel()

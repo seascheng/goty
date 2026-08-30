@@ -122,6 +122,16 @@ enum AgentProbe {
                             }
                             check(session.sessionId == sessionBefore,
                                   "reattach adopts the SAME live session id (before=\(sessionBefore ?? "nil") after=\(session.sessionId ?? "nil"))")
+                            // The attach auto-load replays the AUTHORITATIVE
+                            // history — turn 1's user prompt must come back
+                            // (the ring alone never carries user prompts).
+                            let loadDeadline = Date().addingTimeInterval(25)
+                            while !collector.userChunks.contains(where: { $0.contains("HELLO_") }),
+                                  Date() < loadDeadline {
+                                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                            }
+                            check(collector.userChunks.contains(where: { $0.contains("HELLO_") }),
+                                  "reattach auto-load restores the user's own prompt")
                             session.send(prompt)
                         }
                     }

@@ -224,6 +224,11 @@ enum AgentSessionEvent {
     case plan([AgentPlanEntry])
     case permissionRequested(AgentPermissionPrompt)
     case turnEnded(stopReason: String?)
+    /// The adapter replaced the provisional transcript (ring replay)
+    /// with an authoritative rebuild (session/load) — the page must
+    /// clear before the authoritative events land. Maps to the
+    /// store's existing "clearTranscript".
+    case transcriptReset
     /// Full config knob list (session/new + every set_config_option OK).
     case configChanged([AgentConfigOption])
     /// Agent slash-command directory (available_commands_update).
@@ -277,6 +282,8 @@ extension AgentSessionEvent {
                          "name": option.name,
                          "kind": option.kind ?? NSNull()] as [String: Any]
                     }]
+        case .transcriptReset:
+            return ["type": "clearTranscript"]
         case .turnEnded:
             return ["type": "turnEnded"]
         case .configChanged(let options):
