@@ -372,9 +372,13 @@ final class EditorPanelView: NSView, ThemeRefreshable {
         files.indices.contains(active) ? files[active] : nil
     }
 
-    /// Mono size for the editor (⌘+ / ⌘- / ⌘0), persisted.
-    private var fontSize: Double = AppPreferences.shared.editorFontSize {
-        didSet { AppPreferences.shared.editorFontSize = fontSize }
+    /// Mono size for the editor (⌘+ / ⌘- / ⌘0), persisted — proxied to
+    /// the preference, never a creation-time copy: a copy went stale when
+    /// the preference changed elsewhere (Settings, tests) and zoom then
+    /// computed against the old value (stuck at the clamp ceiling).
+    private var fontSize: Double {
+        get { AppPreferences.shared.editorFontSize }
+        set { AppPreferences.shared.editorFontSize = newValue }
     }
     /// CSS px for the page (pt × 96/72).
     private var fontSizePx: Int { Int((fontSize * 96.0 / 72.0).rounded()) }

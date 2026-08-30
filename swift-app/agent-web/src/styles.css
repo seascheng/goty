@@ -232,53 +232,37 @@ body {
   padding: 12px 6px 4px; min-height: 58px; display: block;
 }
 .composer textarea::placeholder { color: var(--fg-extra-muted); }
+/* — composer toolbar: pill knobs (left) · meta/usage/action (right) — */
 .composer-toolbar {
   display: flex; align-items: center; gap: 6px;
-  padding: 4px 4px 0;
+  padding: 6px 8px 8px;
 }
-.toolbar-left { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.toolbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
-.chip {
-  display: inline-flex; gap: 4px; align-items: center;
-  background: none; border: 1px solid transparent; color: var(--fg-muted);
-  border-radius: 6px; padding: 2px 6px; font-size: 11.5px; cursor: pointer;
-}
-.chip:hover, .chip.open { background: var(--surface2); border-color: var(--border-accent); color: var(--foreground); }
-.chip svg { color: var(--fg-extra-muted); }
-.chip:hover svg, .chip.open svg { color: var(--accent-bright); }
-.chip-value { font-weight: 500; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.icon-btn { padding: 3px 7px; display: inline-flex; align-items: center; }
-.icon-btn svg { width: 11px; height: 11px; }
+.toolbar-left { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.toolbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; min-width: 0; }
 
-.chip-opt.hist { display: grid; grid-template-columns: 1fr auto; row-gap: 2px; }
-.hist-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.hist-meta { color: var(--fg-extra-muted); font-size: 11px; align-self: center; }
-
-/* — dual-state action button (paseo style) — */
-.action-btn {
-  flex: none; width: 26px; height: 26px; border-radius: 50%;
-  display: inline-flex; align-items: center; justify-content: center;
-  border: none; cursor: pointer; padding: 0;
-}
-.action-btn.send { background: var(--accent); color: #fff; }
-.action-btn.send:hover:not(:disabled) { background: var(--accent-bright); }
-.action-btn.send:disabled { background: var(--surface3); color: var(--fg-extra-muted); cursor: default; }
-.action-btn.stop { background: var(--destructive); color: #fff; animation: pulse 1.2s ease-in-out infinite; }
-.action-btn.stop:hover { background: var(--stop-hover); }
-
-/* — statusbar: config chips left, usage/state right — */
-.statusbar-left { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.statusbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 .chip-wrap { position: relative; }
-.chip {
-  display: inline-flex; gap: 5px; align-items: center;
-  background: var(--surface2); border: 1px solid var(--border); color: var(--foreground);
-  border-radius: 6px; padding: 2px 8px; font-size: 11.5px; cursor: pointer;
+
+/* One pill design for every toolbar button. The whole surface is the
+   click target; decorative svg/caret never intercept the pointer. */
+.chip, .icon-chip {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  height: 24px; padding: 0 9px;
+  background: transparent; border: 1px solid var(--border); border-radius: 999px;
+  color: var(--fg-muted); font-size: 11.5px; cursor: pointer;
+  transition: background .12s ease, border-color .12s ease, color .12s ease;
 }
-.chip:hover, .chip.open { border-color: var(--accent-bright); }
+.icon-chip { width: 24px; height: 24px; padding: 0; }
+.chip:hover, .icon-chip:hover { background: var(--surface2); color: var(--foreground); }
+.chip.open, .icon-chip.open {
+  background: var(--surface3); border-color: var(--accent-bright); color: var(--foreground);
+}
+.chip svg, .icon-chip svg { color: var(--fg-extra-muted); pointer-events: none; flex: none; }
+.chip:hover svg, .chip.open svg,
+.icon-chip:hover svg, .icon-chip.open svg { color: var(--accent-bright); }
 .chip-name { color: var(--fg-muted); }
-.chip-value { font-weight: 600; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chip-caret { color: var(--fg-extra-muted); font-size: 9px; }
+.chip-value { font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-caret { color: var(--fg-extra-muted); font-size: 9px; pointer-events: none; }
+
 .chip-pop {
   position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 20;
   min-width: 200px; max-height: 260px; overflow-y: auto; overscroll-behavior: contain;
@@ -293,9 +277,28 @@ body {
 .chip-opt:hover { background: var(--surface3); }
 .chip-opt.cur { color: var(--accent-bright); }
 .chip-check { color: var(--accent-bright); }
+.chip-opt.hist { display: grid; grid-template-columns: 1fr auto; row-gap: 2px; }
+.hist-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.hist-meta { color: var(--fg-extra-muted); font-size: 11px; align-self: center; }
+
+.pane-meta {
+  color: var(--fg-extra-muted); font-size: 11px;
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .usage { color: var(--fg-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-.chip.starting { cursor: default; color: var(--fg-muted); }
-.chip.starting:hover { background: none; border-color: transparent; color: var(--fg-muted); }
+
+/* — dual-state action button (paseo style) — */
+.action-btn {
+  flex: none; width: 26px; height: 26px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; cursor: pointer; padding: 0;
+}
+.action-btn.send { background: var(--accent); color: #fff; }
+.action-btn.send:hover:not(:disabled) { background: var(--accent-bright); }
+.action-btn.send:disabled { background: var(--surface3); color: var(--fg-extra-muted); cursor: default; }
+.action-btn.stop { background: var(--destructive); color: #fff; animation: pulse 1.2s ease-in-out infinite; }
+.action-btn.stop:hover { background: var(--stop-hover); }
+
 .spin {
   width: 10px; height: 10px; flex: none; border-radius: 50%;
   border: 1.5px solid var(--fg-extra-muted); border-top-color: var(--accent-bright);

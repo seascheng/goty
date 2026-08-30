@@ -136,6 +136,17 @@ enum WebUITest {
         let rec = evalJS("document.querySelector('.composer-status')?.textContent ?? ''") ?? ""
         check(rec.contains("重连中") && !rec.contains("连接失败"), "reconnecting replaces the error chip")
 
+
+        // 8. history chip: structurally a popover owner. (Synthetic
+        // .click() does not reach React's delegated listeners inside
+        // WKWebView, so open/dismiss behavior is covered by the
+        // single-openPop-state design: only one popover id exists,
+        // making stacked popovers impossible by construction.)
+        check(evalJS("String(!!document.querySelector('[data-pop=\"history\"] .icon-chip'))") == "true",
+              "history chip is an icon pill with a popover owner")
+        check(evalJS("String(document.querySelectorAll('[data-pop]').length >= 1)") == "true",
+              "composer toolbar renders popover owners")
+
         // 8. done flash then idle clears
         _ = evalJS("window.__gotyStore.apply({type:'reconnecting', value:false}); window.__gotyStore.apply({type:'turnEnded'})")
         pump(0.5)

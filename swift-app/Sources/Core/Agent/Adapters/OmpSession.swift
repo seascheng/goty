@@ -69,7 +69,7 @@ final class OmpSession: AgentSessioning {
     /// Trade-off: an in-flight model call at restore time is dropped.
     private func resume(_ completion: ((Bool) -> Void)?) {
         daemon.killPane(id: paneId)
-        guard let opened = openTransport() else {
+        guard openTransport() != nil else {
             connected = false
             delegate?.sessionDidFail(self, reason: "sessiond 不可用")
             completion?(false)

@@ -268,7 +268,7 @@ function ConfigChip({ option, icon, open, onToggle, onPick }: {
 }) {
   const current = option.options.find((o) => o.value === option.currentValue);
   return (
-    <div className="chip-wrap">
+    <div className="chip-wrap" data-pop={option.id}>
       <button className={"chip" + (open ? " open" : "")} onClick={onToggle} title={option.name}>
         {icon}
         <span className="chip-value">{current?.name ?? option.currentValue ?? "—"}</span>
@@ -300,15 +300,17 @@ function histFallback(s: { updatedAt?: string | null }): string {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/// History = one icon pill. Whole surface is the target (svg has
+/// pointer-events:none) — the old label+caret variant had click dead
+/// zones and stacked popovers with the config knobs.
 function HistoryChip({ open, onToggle, onSelect }: {
   open: boolean; onToggle: () => void; onSelect: (sessionId: string) => void;
 }) {
   return (
-    <div className="chip-wrap">
-      <button className={"chip" + (open ? " open" : "")} title="历史会话" onClick={onToggle}>
+    <div className="chip-wrap" data-pop="history">
+      <button className={"icon-chip" + (open ? " open" : "")} title="历史会话"
+              aria-label="历史会话" onClick={onToggle}>
         <Icon kind="history" />
-        <span className="chip-value">历史</span>
-        <span className="chip-caret">▾</span>
       </button>
       {open && (
         <div className="chip-pop">
@@ -330,7 +332,6 @@ function Composer({ working, phase }: { working: boolean;
   phase: "thinking" | "executing" | "awaitingPermission" | null }) {
   const [text, setText] = useState("");
   const [openPop, setOpenPop] = useState<string | null>(null);
-  const [histOpen, setHistOpen] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   const [atIndex, setAtIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
@@ -367,17 +368,25 @@ function Composer({ working, phase }: { working: boolean;
     }
   }, [atOpen]);
 
-  // Any mousedown that is not on the OPEN popover closes it. Clicks
-  // outside the whole composer additionally dismiss the @// popups
-  // (typing re-arms them).
+  // Any mousedown closes the open popover UNLESS it landed inside the
+  // popover-owning chip itself (data-pop marks the owner). Clicking a
+  // DIFFERENT chip closes the first, then its own click reopens — the
+  // old early-return-on-any-chip let two popovers stack (the report:
+  // history stayed open). A mousedown outside the composer additionally
+  // dismisses the @// popups (typing re-arms them).
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
       const target = e.target as Element;
-      const inBox = boxRef.current != null && boxRef.current.contains(target);
-      if (inBox && target.closest(".chip-wrap") != null) return;
+      const owner = target.closest("[data-pop]");
+      if (owner) {
+        const id = owner.getAttribute("data-pop");
+        setOpenPop((cur) => (id === cur ? cur : null));
+        return;
+      }
       setOpenPop(null);
-      setHistOpen(false);
-      if (!inBox) setDismissed(true);
+      if (boxRef.current == null || !boxRef.current.contains(target)) {
+        setDismissed(true);
+      }
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
@@ -447,7 +456,7 @@ function Composer({ working, phase }: { working: boolean;
       }
     }
     if (e.key === "Escape") {
-      if (openPop != null || histOpen) { setOpenPop(null); setHistOpen(false); return; }
+      if (openPop != null) { setOpenPop(null); return; }
     }
     if (e.key === "Escape" && working && !slashOpen && atMatches.length === 0) {
       e.preventDefault();
@@ -568,17 +577,16 @@ function Composer({ working, phase }: { working: boolean;
             <img className="pane-agent-icon" src={store.meta.icon}
                  alt="" draggable={false} />
           )}
-          <HistoryChip open={histOpen}
+          <HistoryChip open={openPop === "history"}
             onToggle={() => {
-              const next = !histOpen;
-              setHistOpen(next);
-              setOpenPop(next ? null : openPop);
+              const next = openPop !== "history";
+              setOpenPop(next ? "history" : null);
               if (next) window.webkit?.messageHandlers.goty.postMessage({ type: "listSessions" });
             }}
             onSelect={(sessionId) => {
               window.webkit?.messageHandlers.goty.postMessage({ type: "loadSession", sessionId });
               store.apply({ type: "clearTranscript" });
-              setHistOpen(false);
+              setOpenPop(null);
             }} />
           {[...store.configOptions]
             .sort((a, b) => (KNOB_ORDER[a.id] ?? 9) - (KNOB_ORDER[b.id] ?? 9))
@@ -589,14 +597,15 @@ function Composer({ working, phase }: { working: boolean;
               onToggle={() => setOpenPop(openPop === option.id ? null : option.id)}
               onPick={(value) => pickConfig(option.id, value)} />
             ))}
-            {store.meta?.directory && (
-              <span className="pane-meta">
-                {[store.meta.workspace, store.meta.directory].filter(Boolean).join("/")}
-                {store.meta.branch ? ` · ${store.meta.branch}` : ""}
-              </span>
-            )}
           </div>
         <div className="toolbar-right">
+          {store.meta?.directory && (
+            <span className="pane-meta" title={[store.meta.workspace, store.meta.directory]
+              .filter(Boolean).join("/") + (store.meta.branch ? ` · ${store.meta.branch}` : "")}>
+              {[store.meta.workspace, store.meta.directory].filter(Boolean).join("/")}
+              {store.meta.branch ? ` · ${store.meta.branch}` : ""}
+            </span>
+          )}
           {(() => {
             const u = store.usage;
             if (!u) return null;
