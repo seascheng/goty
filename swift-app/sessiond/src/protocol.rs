@@ -89,6 +89,13 @@ pub struct SpawnRequest {
     /// (their input echoes back through the PTY anyway).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ring_input: bool,
+    /// Bytes written to the PTY master IMMEDIATELY after exec — before
+    /// the child's first read. Some agent runtimes (omp's Bun) only
+    /// process stdin buffered at boot; post-startup writes are never
+    /// surfaced by their event loop, so handshake commands must ride
+    /// this pre-write to reach the boot buffer (2026-08-31).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prewrite: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

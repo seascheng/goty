@@ -136,10 +136,22 @@ final class PiSession: AgentSessioning {
         case .pi:
             if let sessionId { args += ["--session", sessionId] }
         }
+        // omp: the handshake rides the daemon's spawn prewrite — omp's
+        // Bun stdin only processes input buffered at boot (post-startup
+        // writes are never surfaced by its event loop, probed
+        // 2026-08-31), so negotiate+get_state must already be in the PTY
+        // when the process starts. The responses arrive through the
+        // channel as ordinary id-matched frames; register their pending
+        // completions BEFORE the spawn so nothing races.
+        var prewrite: String?
+        if harness == .omp {
+            prewrite = bootHandshakePrewrite(completion: completion)
+        }
         guard let opened = daemon.openPaneWithAttachment(
             id: paneId, cwd: cwd, shell: harness.shell, args: args,
             environment: environment, grid: grid,
             noEcho: true, ringBytes: 16_777_216,
+            prewrite: prewrite,
             onFrame: { [weak self] kind, data in
                 self?.handleTransportFrame(kind: kind, data: data)
             },
@@ -156,17 +168,13 @@ final class PiSession: AgentSessioning {
         }
         opened.session.start()
         pane = opened.session
-        // pi answers get_state immediately after spawn. omp sends its
-        // handshake IMMEDIATELY too: omp's Bun stdin reader on this
-        // machine only processes input already buffered at boot —
-        // post-startup writes are never surfaced by its event loop
-        // (probed 2026-08-31), while pre-boot writes always answer.
-        // The ready frame stays as a fallback trigger for environments
-        // where the early write is eaten by the pane wrapper.
+        // pi answers get_state immediately after spawn. omp's handshake
+        // already rode the spawn prewrite; the ready frame stays as a
+        // fallback trigger for environments where the prewrite was
+        // eaten by the pane wrapper.
         if harness == .omp {
             handshakeStarted = false
             readyCompletion = completion
-            handshake(completion: completion)
             // A pane left over from the pre-migration ACP era speaks a
             // DIFFERENT protocol: its output has no ready frame, so the
             // handshake would never fire and the GUI would stall into
@@ -185,6 +193,10 @@ final class PiSession: AgentSessioning {
         }
     }
 
+    /// omp's spawn prewrite: negotiate + get_state as two JSONL lines.
+    /// The ids are registered in `pendingResponses` first (see openPane)
+    /// so the daemon-pre-written responses route like any other.
+
     /// The ready frame never arrived: the pane is either an old ACP
     /// process or a dead process the daemon still lists. Respawn once
     /// with the current harness argv; the next openPane's ready frame
@@ -200,8 +212,68 @@ final class PiSession: AgentSessioning {
         openPane(resume: resumeSessionId, completion: readyCompletion)
     }
 
-    private func handshake(completion: ((Bool) -> Void)?) {
+    /// Shared get_state handler: the pi immediate handshake and the omp
+    /// spawn-prewrite response both land here.
+    private func handleStateResponse(_ response: [String: Any],
+                                     completion: ((Bool) -> Void)?) {
+        guard response["success"] as? Bool == true,
+              let state = response["data"] as? [String: Any] else {
+            delegate?.sessionDidFail(self, reason: "\(harness.shell) get_state 失败")
+            completion?(false)
+            return
+        }
+        handshakeStarted = true
+        sessionId = state["sessionId"] as? String ?? sessionId
+        applyState(state)
+        // omp: the ring is signal-only; the authoritative transcript
+        // comes from the session store (user side included, aborted
+        // turns settled). pi: the ring replay already rendered through
+        // the mapper (replaying mode emits the user echo).
+        if harness == .omp {
+            isWorking = state["isStreaming"] as? Bool ?? false
+            ompStoreReplay()
+        }
+        var events: [AgentSessionEvent] = [.ready]
+        if !configOptions.isEmpty {
+            events.append(.configChanged(configOptions))
+        }
+        emit(events)
+        if harness == .pi {
+            fetchCommands()
+        }
+        completion?(true)
+    }
 
+    /// omp's spawn prewrite: negotiate + get_state as two JSONL lines.
+    /// Their pending completions are registered BEFORE the spawn (see
+    /// openPane) so the daemon-pre-written responses route like any
+    /// other id-matched frame.
+    private func bootHandshakePrewrite(completion: ((Bool) -> Void)?) -> String {
+        let negotiate = ["id": "boot-1", "type": "negotiate_protocol",
+                         "protocolVersion": 2] as [String: Any]
+        let state = ["id": "boot-2", "type": "get_state"] as [String: Any]
+        responseLock.lock()
+        pendingResponses["boot-1"] = { [weak self] response in
+            guard let self else { return }
+            if response["success"] as? Bool != true {
+                self.delegate?.sessionDidFail(self, reason: "omp 不支持 RPC v2，请升级 CLI")
+                completion?(false)
+            }
+        }
+        pendingResponses["boot-2"] = { [weak self] response in
+            guard let self else { return }
+            self.handleStateResponse(response, completion: completion)
+        }
+        responseLock.unlock()
+        func line(_ obj: [String: Any]) -> String {
+            (try? JSONSerialization.data(withJSONObject: obj)).flatMap {
+                String(data: $0, encoding: .utf8)
+            } ?? ""
+        }
+        return line(negotiate) + "\n" + line(state) + "\n"
+    }
+
+    private func handshake(completion: ((Bool) -> Void)?) {
         // The host's 90s watchdog is disarmed by our early .ready (the
         // session-name render); a genuinely broken handshake must still
         // fail loudly — 20s ceiling here.
@@ -219,50 +291,9 @@ final class PiSession: AgentSessioning {
             failAfter.cancel()
             completion?(ok)
         }
-        func stateStep() {
-            request("get_state") { [weak self] response in
-                guard let self else { return }
-                guard response["success"] as? Bool == true,
-                      let state = response["data"] as? [String: Any] else {
-                    self.delegate?.sessionDidFail(self, reason: "\(self.harness.shell) get_state 失败")
-                    finish(false)
-                    return
-                }
-                self.sessionId = state["sessionId"] as? String ?? self.sessionId
-                self.applyState(state)
-                // omp: the ring is signal-only; the authoritative
-                // transcript comes from the session store (user side
-                // included, aborted turns settled). pi: the ring replay
-                // already rendered through the mapper (replaying mode
-                // emits the user echo).
-                if self.harness == .omp {
-                    self.isWorking = state["isStreaming"] as? Bool ?? false
-                    self.ompStoreReplay()
-                }
-                var events: [AgentSessionEvent] = [.ready]
-                if !self.configOptions.isEmpty {
-                    events.append(.configChanged(self.configOptions))
-                }
-                self.emit(events)
-                if self.harness == .pi {
-                    self.fetchCommands()
-                }
-                finish(true)
-            }
-        }
-        // omp runs a versioned protocol: agree on v2 before anything
-        // else (60s ceiling mirrors the reference runtime).
-        if harness == .omp {
-            request("negotiate_protocol", ["protocolVersion": 2]) { response in
-                guard response["success"] as? Bool == true else {
-                    self.delegate?.sessionDidFail(self, reason: "omp 不支持 RPC v2，请升级 CLI")
-                    finish(false)
-                    return
-                }
-                stateStep()
-            }
-        } else {
-            stateStep()
+        request("get_state") { [weak self] response in
+            guard let self else { return }
+            self.handleStateResponse(response, completion: finish)
         }
     }
 

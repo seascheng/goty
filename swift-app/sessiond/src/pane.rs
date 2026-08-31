@@ -249,7 +249,14 @@ impl Pane {
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);
         let reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
+        let mut writer = pair.master.take_writer()?;
+        // Pre-write handshake bytes before the child's first read: omp's
+        // Bun stdin only processes input buffered at boot (2026-08-31),
+        // so the RPC handshake must already be in the PTY queue here.
+        if let Some(pre) = request.prewrite.as_deref() {
+            writer.write_all(pre.as_bytes())?;
+            writer.flush()?;
+        }
         let pane = Arc::new(Self {
             id: request.pane_id.clone(),
             replay_enabled: request.replay,
@@ -591,7 +598,14 @@ fn echo_off_wrapper(shell: &str, args: &[String]) -> (String, Vec<String>) {
     fn quote(token: &str) -> String {
         format!("'{}'", token.replace('\'', "'\\''"))
     }
-    let mut line = String::from("stty -echo 2>/dev/null; exec ");
+    // RAW + no echo: agent runtimes (omp's Bun) read stdin in one
+    // boot-time drain — canonical line buffering would hand them ONE
+    // pre-written line per read and silently drop the rest (edge-
+    // triggered events never fire for residual data on this host,
+    // 2026-08-31). Raw mode makes each read return everything
+    // buffered, so multi-command handshakes (and resume prompts) ride
+    // the spawn prewrite intact.
+    let mut line = String::from("stty raw -echo 2>/dev/null; exec ");
     line.push_str(&quote(shell));
     for arg in args {
         line.push(' ');
@@ -809,7 +823,7 @@ mod tests {
         let (shell, args) = echo_off_wrapper("omp", &["acp".to_string()]);
         assert_eq!(shell, "/bin/sh");
         assert_eq!(args[0], "-c");
-        assert_eq!(args[1], "stty -echo 2>/dev/null; exec 'omp' 'acp'");
+        assert_eq!(args[1], "stty raw -echo 2>/dev/null; exec 'omp' 'acp'");
         let (_, args) = echo_off_wrapper(
             "/usr/local/bin/claude",
             &["-r".to_string(), "it's id".to_string()],
