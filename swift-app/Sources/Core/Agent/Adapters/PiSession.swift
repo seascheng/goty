@@ -44,6 +44,11 @@ final class PiSession: AgentSessioning {
     private let channel = LineChannel()
     private let mapper: PiFrameMapper
     private var pane: PaneSession?
+    /// omp handshake gate: the ready frame (not spawn) starts
+    /// negotiate+get_state — see openPane.
+    private var handshakeStarted = false
+    private var readyCompletion: ((Bool) -> Void)?
+
     private var connected = false
     private var resumeSessionId: String?
     private var nextRequestID = 1
@@ -138,10 +143,18 @@ final class PiSession: AgentSessioning {
         }
         opened.session.start()
         pane = opened.session
-        // Ready = state answered: session id captured, config known.
-        // get_state is a query — safe against the live process an
-        // attach just reconnected to.
-        handshake(completion: completion)
+        // pi answers get_state immediately after spawn. omp must WAIT
+        // for its ready frame first: commands written before omp boots
+        // its rpc loop sit unanswered in the PTY while the giant
+        // available_commands_update drains — the 90s handshake timeout
+        // (probed: racing negotiate in right after ready answers in
+        // ~1.4s; sending at t=0 never answers).
+        if harness == .omp {
+            handshakeStarted = false
+            readyCompletion = completion
+        } else {
+            handshake(completion: completion)
+        }
     }
 
     private func handshake(completion: ((Bool) -> Void)?) {
@@ -322,6 +335,15 @@ final class PiSession: AgentSessioning {
                 isWorking = false
                 emit([.turnEnded(stopReason: nil)])
             }
+            // The pane's process is gone (crash, user exit, or a pane
+            // spawned by an older build's argv). Reset everything so a
+            // retry reconnects and RESPAWNS — connect() used to return
+            // early on the stale `connected` flag and the retry button
+            // did nothing (2026-08-31).
+            connected = false
+            pane?.close()
+            pane = nil
+            daemon.killPane(id: paneId)
             delegate?.sessionDidFail(self, reason: "\(harness.shell) 进程已退出")
         default:
             break
@@ -336,6 +358,16 @@ final class PiSession: AgentSessioning {
             }
             return
         }
+        if suppressReplay { return }
+        if frame["type"] as? String == "ready",
+           harness == .omp, !handshakeStarted {
+            handshakeStarted = true
+            let completion = readyCompletion
+            readyCompletion = nil
+            handshake(completion: completion)
+            return
+        }
+
         if suppressReplay { return }
         if frame["type"] as? String == "response",
            let id = frame["id"] as? String {
