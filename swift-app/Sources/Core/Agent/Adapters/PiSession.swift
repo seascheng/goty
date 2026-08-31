@@ -156,15 +156,17 @@ final class PiSession: AgentSessioning {
         }
         opened.session.start()
         pane = opened.session
-        // pi answers get_state immediately after spawn. omp must WAIT
-        // for its ready frame first: commands written before omp boots
-        // its rpc loop sit unanswered in the PTY while the giant
-        // available_commands_update drains — the 90s handshake timeout
-        // (probed: racing negotiate in right after ready answers in
-        // ~1.4s; sending at t=0 never answers).
+        // pi answers get_state immediately after spawn. omp sends its
+        // handshake IMMEDIATELY too: omp's Bun stdin reader on this
+        // machine only processes input already buffered at boot —
+        // post-startup writes are never surfaced by its event loop
+        // (probed 2026-08-31), while pre-boot writes always answer.
+        // The ready frame stays as a fallback trigger for environments
+        // where the early write is eaten by the pane wrapper.
         if harness == .omp {
             handshakeStarted = false
             readyCompletion = completion
+            handshake(completion: completion)
             // A pane left over from the pre-migration ACP era speaks a
             // DIFFERENT protocol: its output has no ready frame, so the
             // handshake would never fire and the GUI would stall into
