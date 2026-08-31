@@ -48,6 +48,8 @@ final class PiSession: AgentSessioning {
     /// negotiate+get_state — see openPane.
     private var handshakeStarted = false
     private var readyCompletion: ((Bool) -> Void)?
+    private var readyTimeoutScheduled = false
+    private var respawnedForReadyTimeout = false
 
     private var connected = false
     private var resumeSessionId: String?
@@ -109,6 +111,17 @@ final class PiSession: AgentSessioning {
     }
 
     private func openPane(resume sessionId: String?, completion: ((Bool) -> Void)?) {
+        // The resumed session's identity is known before the handshake:
+        // set it up front so the host's disk-backed title lookup can
+        // render the session name immediately (matching the sidebar,
+        // which reads the same store).
+        if let sessionId {
+            self.sessionId = sessionId
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.delegate?.session(self, didEmit: [.ready])
+            }
+        }
         var args = ["--mode", "rpc"]
         switch harness {
         case .omp:
@@ -152,19 +165,65 @@ final class PiSession: AgentSessioning {
         if harness == .omp {
             handshakeStarted = false
             readyCompletion = completion
+            // A pane left over from the pre-migration ACP era speaks a
+            // DIFFERENT protocol: its output has no ready frame, so the
+            // handshake would never fire and the GUI would stall into
+            // the 90s timeout. Attaching to it can't be distinguished
+            // from a slow-booting rpc process up front — give the ready
+            // frame a short window, then respawn with the rpc argv and
+            // --resume (the session itself lives in the store file).
+            if !readyTimeoutScheduled {
+                readyTimeoutScheduled = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                    self?.handleReadyTimeout()
+                }
+            }
         } else {
             handshake(completion: completion)
         }
     }
 
+    /// The ready frame never arrived: the pane is either an old ACP
+    /// process or a dead process the daemon still lists. Respawn once
+    /// with the current harness argv; the next openPane's ready frame
+    /// (or the pane's exit) resolves the situation.
+    private func handleReadyTimeout() {
+        guard harness == .omp, !handshakeStarted else { return }
+        if respawnedForReadyTimeout { return }
+        respawnedForReadyTimeout = true
+        NSLog("GOTY pi-session: ready timeout — respawning %@ pane", harness.shell)
+        pane?.close()
+        pane = nil
+        daemon.killPane(id: paneId)
+        openPane(resume: resumeSessionId, completion: readyCompletion)
+    }
+
     private func handshake(completion: ((Bool) -> Void)?) {
+
+        // The host's 90s watchdog is disarmed by our early .ready (the
+        // session-name render); a genuinely broken handshake must still
+        // fail loudly — 20s ceiling here.
+        var finished = false
+        let failAfter = DispatchWorkItem { [weak self] in
+            guard let self, !finished else { return }
+            finished = true
+            self.delegate?.sessionDidFail(self, reason: "\(self.harness.shell) 握手超时")
+            completion?(false)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: failAfter)
+        func finish(_ ok: Bool) {
+            guard !finished else { return }
+            finished = true
+            failAfter.cancel()
+            completion?(ok)
+        }
         func stateStep() {
             request("get_state") { [weak self] response in
                 guard let self else { return }
                 guard response["success"] as? Bool == true,
                       let state = response["data"] as? [String: Any] else {
                     self.delegate?.sessionDidFail(self, reason: "\(self.harness.shell) get_state 失败")
-                    completion?(false)
+                    finish(false)
                     return
                 }
                 self.sessionId = state["sessionId"] as? String ?? self.sessionId
@@ -186,7 +245,7 @@ final class PiSession: AgentSessioning {
                 if self.harness == .pi {
                     self.fetchCommands()
                 }
-                completion?(true)
+                finish(true)
             }
         }
         // omp runs a versioned protocol: agree on v2 before anything
@@ -195,7 +254,7 @@ final class PiSession: AgentSessioning {
             request("negotiate_protocol", ["protocolVersion": 2]) { response in
                 guard response["success"] as? Bool == true else {
                     self.delegate?.sessionDidFail(self, reason: "omp 不支持 RPC v2，请升级 CLI")
-                    completion?(false)
+                    finish(false)
                     return
                 }
                 stateStep()
