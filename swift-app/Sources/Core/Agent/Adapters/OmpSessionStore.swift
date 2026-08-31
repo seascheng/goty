@@ -39,6 +39,17 @@ enum OmpSessionStore {
         return nil
     }
 
+    /// First `bytes` of a store file — the title slot and the session
+    /// line both live at the head. The store holds hundreds of files
+    /// (100+ MB total); reading each IN FULL for a list query stalled
+    /// the history panel for seconds.
+    private static func readHead(of file: URL, bytes: Int = 4096) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: bytes) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     /// History list for one workspace: every store file under the
     /// sessions root, filtered by the pane cwd prefix, newest first.
     /// The title comes from the title line (omp rewrites a 256-byte slot
@@ -57,7 +68,7 @@ enum OmpSessionStore {
                 guard let underscore = name.lastIndex(of: "_") else { continue }
                 let sid = String(name[name.index(after: underscore)...])
                 guard sid.contains("-"), sid.count >= 30 else { continue }
-                guard let raw = try? String(contentsOf: file, encoding: .utf8),
+                guard let raw = readHead(of: file),
                       let first = raw.split(separator: "\n").first,
                       let data = first.data(using: .utf8),
                       let json = try? JSONSerialization.jsonObject(with: data),
@@ -185,7 +196,7 @@ enum OmpSessionStore {
     /// aborted session has an empty title in its store.
     static func sessionTitle(sessionId: String) -> String? {
         guard let url = fileURL(sessionId: sessionId),
-              let raw = try? String(contentsOf: url, encoding: .utf8),
+              let raw = readHead(of: url, bytes: 512),
               let first = raw.split(separator: "\n").first,
               let data = first.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

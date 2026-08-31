@@ -90,6 +90,14 @@ struct AgentConfigChoice {
     let name: String
     let description: String?
 
+    /// Explicit memberwise — the failable wire init suppresses the
+    /// synthesized one; native adapters build choices directly.
+    init(value: String, name: String, description: String?) {
+        self.value = value
+        self.name = name
+        self.description = description
+    }
+
     init?(raw: [String: Any]) {
         guard let value = raw["value"] as? String,
               let name = raw["name"] as? String else { return nil }

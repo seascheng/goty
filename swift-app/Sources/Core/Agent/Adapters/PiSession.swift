@@ -42,6 +42,13 @@ final class PiSession: AgentSessioning {
     private let daemon: SessionDaemon
     private let grid: SessionGrid
     private let channel = LineChannel()
+
+    /// get_state's model descriptor — the thinking-level ladder is
+    /// model-specific (thinking.efforts), so applyState needs it when
+    /// get_available_models lands.
+    private var currentModelDescriptor: [String: Any]?
+    private var thinkingLevelCache: String?
+    private var cachedModelCatalog: [[String: Any]] = []
     private let mapper: PiFrameMapper
     private var pane: PaneSession?
     /// omp handshake gate: the ready frame (not spawn) starts
@@ -200,8 +207,11 @@ final class PiSession: AgentSessioning {
         NSLog("GOTY pi-session: ready timeout — respawning %@ pane", harness.shell)
         pane?.close()
         pane = nil
-        daemon.killPane(id: paneId)
-        openPane(resume: resumeSessionId, completion: readyCompletion)
+        // Acknowledged kill, same as load(): an unacknowledged one races
+        // the respawn's ATTACH probe and resurrects the dead pane.
+        daemon.killPaneAndWait(id: paneId) { [weak self] _ in
+            self?.openPane(resume: self?.resumeSessionId, completion: self?.readyCompletion)
+        }
     }
 
     /// Shared get_state handler: the pi immediate handshake and the omp
@@ -216,6 +226,8 @@ final class PiSession: AgentSessioning {
         }
         handshakeStarted = true
         sessionId = state["sessionId"] as? String ?? sessionId
+        currentModelDescriptor = state["model"] as? [String: Any]
+        thinkingLevelCache = state["thinkingLevel"] as? String
         applyState(state)
         // omp: the ring is signal-only; the authoritative transcript
         // comes from the session store (user side included, aborted
@@ -232,8 +244,39 @@ final class PiSession: AgentSessioning {
         emit(events)
         if harness == .pi {
             fetchCommands()
+        } else {
+            fetchAvailableModels()
         }
         completion?(true)
+    }
+
+    /// omp: the config buttons' dropdown contents. get_state carries
+    /// only the CURRENT model; the selectable list comes from
+    /// get_available_models (model ids as provider/id selectors — the
+    /// same shape set_model takes — and the current model's
+    /// thinking.efforts ladder).
+    private func fetchAvailableModels() {
+        request("get_available_models") { [weak self] response in
+            guard let self,
+                  response["success"] as? Bool == true,
+                  let data = response["data"] as? [String: Any],
+                 let models = data["models"] as? [[String: Any]] else { return }
+            self.cachedModelCatalog = models
+            self.rebuildConfigOptions()
+        }
+    }
+
+    /// Rebuild + republish the config options from the cached model
+    /// descriptor / thinking level (after get_available_models lands or
+    /// a set_model / set_thinking_level response moves a value).
+    private func rebuildConfigOptions() {
+        var state: [String: Any] = [:]
+        if let model = currentModelDescriptor { state["model"] = model }
+        if let thinking = thinkingLevelCache { state["thinkingLevel"] = thinking }
+        applyState(state, availableModels: cachedModelCatalog)
+        if !configOptions.isEmpty {
+            emit([.configChanged(configOptions)])
+        }
     }
 
     /// ready-gated handshake, one command in flight at a time. omp's
@@ -323,14 +366,44 @@ final class PiSession: AgentSessioning {
         channel.send(["type": "abort"])
     }
 
+    func setConfigOption(id: String, value: String) {
+        guard harness == .omp else { return }
+        switch id {
+        case "model":
+            // value is the provider/id selector applyState built; set_model
+            // takes it split (verified live). Bare ids pass through.
+            let parts = value.split(separator: "/", maxSplits: 1).map(String.init)
+            var extra: [String: Any] = [:]
+            if parts.count == 2 {
+                extra["provider"] = parts[0]
+                extra["modelId"] = parts[1]
+            } else {
+                extra["modelId"] = value
+            }
+            request("set_model", extra) { [weak self] response in
+                guard let self, response["success"] as? Bool == true else { return }
+                if let data = response["data"] as? [String: Any] {
+                    self.currentModelDescriptor = (data["model"] as? [String: Any])
+                        ?? self.currentModelDescriptor
+                }
+                self.rebuildConfigOptions()
+            }
+        case "thinking":
+            request("set_thinking_level", ["level": value]) { [weak self] response in
+                guard let self, response["success"] as? Bool == true else { return }
+                self.thinkingLevelCache = value
+                self.rebuildConfigOptions()
+            }
+        default:
+            break
+        }
+    }
+
     func respondPermission(requestID: String, optionId: String) {
         // rpc mode auto-approves per the agent's own config in v1; no
         // permission requests are mapped, so an answer here is a no-op.
     }
 
-    func setConfigOption(id: String, value: String) {
-        // v1: display-only (configChanged reports model + thinking level).
-    }
 
     func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
@@ -347,36 +420,41 @@ final class PiSession: AgentSessioning {
         // Both harnesses swap sessions the same way: kill the pane (or
         // the reopen would ATTACH to the old process), respawn with the
         // resume flag, and let the handshake path render — omp from the
-        // store, pi from get_messages.
+        // store, pi from get_messages. The kill must be ACKNOWLEDGED
+        // (daemon-side registry removal) before the respawn: the plain
+        // fire-and-forget kill races the new openPane's ATTACH probe,
+        // which then re-attaches the very pane being killed and the
+        // selected session silently never loads.
         resumeSessionId = sessionId
         self.sessionId = sessionId
         pane?.close()
         pane = nil
-        daemon.killPane(id: paneId)
-        openPane(resume: sessionId) { [weak self] ok in
-            guard let self, ok else {
-                completion?(false)
-                return
-            }
-            if self.harness == .pi {
-                self.request("get_messages") { [weak self] response in
-                    guard let self,
-                          response["success"] as? Bool == true,
-                          let data = response["data"] as? [String: Any],
-                          let messages = data["messages"] as? [[String: Any]] else {
-                        completion?(false)
-                        return
+        daemon.killPaneAndWait(id: paneId) { [weak self] _ in
+            self?.openPane(resume: sessionId) { [weak self] ok in
+                guard let self, ok else {
+                    completion?(false)
+                    return
+                }
+                if self.harness == .pi {
+                    self.request("get_messages") { [weak self] response in
+                        guard let self,
+                              response["success"] as? Bool == true,
+                              let data = response["data"] as? [String: Any],
+                              let messages = data["messages"] as? [[String: Any]] else {
+                            completion?(false)
+                            return
+                        }
+                        let replayMapper = PiFrameMapper()
+                        var events: [AgentSessionEvent] = []
+                        for message in messages {
+                            events += replayMapper.mapReplayedMessage(message)
+                        }
+                        self.emit(events)
+                        completion?(true)
                     }
-                    let replayMapper = PiFrameMapper()
-                    var events: [AgentSessionEvent] = []
-                    for message in messages {
-                        events += replayMapper.mapReplayedMessage(message)
-                    }
-                    self.emit(events)
+                } else {
                     completion?(true)
                 }
-            } else {
-                completion?(true)
             }
         }
     }
@@ -514,17 +592,41 @@ final class PiSession: AgentSessioning {
         return try? JSONSerialization.jsonObject(with: joined) as? [String: Any]
     }
 
-    private func applyState(_ state: [String: Any]) {
+    private func applyState(_ state: [String: Any],
+                            availableModels: [[String: Any]] = []) {
         var options: [AgentConfigOption] = []
+        let modelChoices: [AgentConfigChoice] = availableModels.compactMap { raw in
+            guard let id = raw["id"] as? String else { return nil }
+            let value = (raw["provider"] as? String).map { "\($0)/\(id)" } ?? id
+            return AgentConfigChoice(value: value,
+                                     name: (raw["name"] as? String) ?? id,
+                                     description: nil)
+        }
+        var currentModelId: String?
         if let model = state["model"] as? [String: Any] {
-            let name = (model["name"] as? String)
-                ?? (model["id"] as? String) ?? ""
-            options.append(AgentConfigOption(id: "model", name: "模型", category: nil,
-                                             currentValue: name, options: []))
+            let id = model["id"] as? String ?? ""
+            currentModelId = id
+            let provider = model["provider"] as? String
+            let selector = provider.map { "\($0)/\(id)" } ?? id
+            let display = (model["name"] as? String) ?? id
+            options.append(AgentConfigOption(
+                id: "model", name: "模型", category: nil,
+                currentValue: modelChoices.isEmpty ? display : selector,
+                options: modelChoices))
         }
         if let thinking = state["thinkingLevel"] as? String {
-            options.append(AgentConfigOption(id: "thinking", name: "思考", category: nil,
-                                             currentValue: thinking, options: []))
+            // The ladder is per-model (thinking.efforts on the current
+            // model's descriptor); fall back to the standard budget
+            // ladder when the catalog has not landed yet.
+            let descriptor = availableModels
+                .first { ($0["id"] as? String) == currentModelId }
+            let efforts = descriptor?["thinking"] as? [String: Any]
+            let ladder = (efforts?["efforts"] as? [String])
+                ?? ["minimal", "low", "medium", "high"]
+            options.append(AgentConfigOption(
+                id: "thinking", name: "思考", category: nil,
+                currentValue: thinking,
+                options: ladder.map { AgentConfigChoice(value: $0, name: $0, description: nil) }))
         }
         configOptions = options
     }
@@ -543,6 +645,12 @@ final class PiSession: AgentSessioning {
         for (key, value) in extra { frame[key] = value }
         channel.send(frame)
     }
+
+    /// Restore is self-managed: connect() spawns with the resume flag
+    /// and the handshake replays the store, so the host must NOT issue
+    /// a second load() on top (it would kill and respawn the pane the
+    /// handshake is running on).
+    var selfManagesRestore: Bool { true }
 
     private func emit(_ events: [AgentSessionEvent]) {
         guard !events.isEmpty else { return }
