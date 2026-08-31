@@ -90,6 +90,11 @@ final class PiSession: AgentSessioning {
         self.grid = AgentPaneDefaults.grid
         self.mapper = PiFrameMapper(terminalOnAgentEnd: harness == .omp)
         self.resumeSessionId = params.restoredSessionId
+        // The catalog rides the FIRST configChanged: without it the
+        // models dropdown waits on a second emit that queues behind the
+        // transcript replay's render — seconds of "empty models" for a
+        // command that itself answers in 10ms.
+        self.cachedModelCatalog = Self.loadCachedCatalog()
         channel.onOutbound = { [weak self] in self?.pane?.sendInput($0) }
         channel.onFrame = { [weak self] frame, _ in
             self?.handleFrame(frame)
@@ -260,10 +265,34 @@ final class PiSession: AgentSessioning {
             guard let self,
                   response["success"] as? Bool == true,
                   let data = response["data"] as? [String: Any],
-                 let models = data["models"] as? [[String: Any]] else { return }
+                  let models = data["models"] as? [[String: Any]] else { return }
             self.cachedModelCatalog = models
+            Self.persistCatalog(models)
             self.rebuildConfigOptions()
         }
+    }
+
+    /// Disk cache for the model catalog: the first configChanged of a
+    /// fresh PiSession carries full dropdown choices without waiting
+    /// for the (10ms, but render-queued) catalog round-trip. Refreshed
+    /// on every successful handshake.
+    private static var catalogCacheURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("goty/omp-model-catalog.json")
+    }
+
+    private static func loadCachedCatalog() -> [[String: Any]] {
+        guard let data = try? Data(contentsOf: catalogCacheURL),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["v"] as? Int == 1,
+              let models = obj["models"] as? [[String: Any]] else { return [] }
+        return models
+    }
+
+    private static func persistCatalog(_ models: [[String: Any]]) {
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: ["v": 1, "models": models]) else { return }
+        try? data.write(to: catalogCacheURL, options: .atomic)
     }
 
     /// Rebuild + republish the config options from the cached model
