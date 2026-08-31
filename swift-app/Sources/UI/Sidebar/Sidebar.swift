@@ -182,6 +182,8 @@ final class SidebarView: NSView {
     var onNewTabInDir: ((String?) -> Void)?
     /// Per-space "+" → Agent GUI entry (flat: one item per manifest).
     var onNewAgentSessionInDir: ((String, String?) -> Void)?
+    /// Availability for the + menu's agent entries; nil = local PATH.
+    var agentAvailable: ((String) -> Bool)?
     /// Per-space "+" → "New Worktree…" — the git-repo-only entry of the
     /// space menu. Fires with the section's directory.
     var onNewWorktreeInDir: ((String?) -> Void)?
@@ -291,12 +293,12 @@ final class SidebarView: NSView {
         }
     }
 
-    /// The per-space '+' flyout when the section's directory is a git
-    /// repo: a new terminal (same as before), or a worktree beside the
-    /// repo. Built pure so tests can inspect and fire it like the host
-    /// picker; non-repo sections never build it — they keep the direct
-    /// terminal behavior.
-    func spacePlusMenu(dir: String) -> NSMenu {
+    /// The per-space '+' flyout — EVERY space gets the same list now
+    /// (2026-08-31 rule change; non-repos used to skip the menu and open
+    /// a terminal directly): New Terminal, the focused workspace's
+    /// available agents, and — for a git repo — a worktree beside it.
+    /// Built pure so tests can inspect and fire it like the host picker.
+    func spacePlusMenu(dir: String?, isGit: Bool) -> NSMenu {
         let menu = NSMenu()
         let term = NSMenuItem(title: "New Terminal",
                               action: #selector(spacePlusTerminalAction(_:)),
@@ -304,23 +306,26 @@ final class SidebarView: NSView {
         term.target = self
         term.representedObject = dir
         term.image = menuItemIcon("terminal", pointSize: 10)
-        let worktree = NSMenuItem(title: "New Worktree…",
-                                  action: #selector(spacePlusWorktreeAction(_:)),
-                                  keyEquivalent: "")
-        worktree.target = self
-        worktree.representedObject = dir
-        worktree.image = menuItemIcon("arrow.triangle.branch", pointSize: 10)
         menu.addItem(term)
-        menu.addItem(worktree)
+        if isGit {
+            let worktree = NSMenuItem(title: "New Worktree…",
+                                      action: #selector(spacePlusWorktreeAction(_:)),
+                                      keyEquivalent: "")
+            worktree.target = self
+            worktree.representedObject = dir
+            worktree.image = menuItemIcon("arrow.triangle.branch", pointSize: 10)
+            menu.addItem(worktree)
+        }
         menu.addItem(.separator())
-        let path = UserShellEnv.asDictionary["PATH"] ?? ""
-        for entry in AgentRegistry.pickerEntries(path: path) {
+        let available = agentAvailable ?? { key in
+            AgentRegistry.descriptor(for: key)?
+                .isAvailable(path: UserShellEnv.asDictionary["PATH"] ?? "") ?? false
+        }
+        for entry in AgentRegistry.pickerEntries(isAvailable: available) where entry.available {
             let item = NSMenuItem(title: entry.label, action: #selector(spacePlusAgentAction(_:)),
                                   keyEquivalent: "")
             item.target = self
-            item.isEnabled = entry.available
-            if !entry.available { item.toolTip = "\(entry.key) 不在 PATH" }
-            item.representedObject = [entry.key, dir]
+            item.representedObject = [entry.key, dir ?? ""]
             item.image = AgentBrandIcons.menuImage(for: entry.key)
             menu.addItem(item)
         }
@@ -562,7 +567,7 @@ final class SidebarView: NSView {
             let git = tab.panes.first?.cwd.flatMap { gitFor?($0) }
             let status = running ? statusFor?(tab) : nil
             let title = titleFor?(tab)
-            let display = tab.userTitle ?? spec?.label ?? title ?? tab.name
+            let display = tab.userTitle ?? tab.agentTitle ?? spec?.label ?? title ?? tab.name
             // The SPACE key (repo root when inside one), not the raw
             // cwd: cd-ing into a subdir or another worktree of the same
             // repo must not re-fire the render — only a real space move
@@ -609,13 +614,14 @@ final class SidebarView: NSView {
                     gap.heightAnchor.constraint(equalToConstant: 10).isActive = true
                     desired.append(gap)
                 }
-                // The group's "+" opens a new space straight into this
-                // SPACE (the repo root when the section is a repo), next
-                // to the space count — and when the space is a git repo,
-                // a menu offering a worktree beside it. `isGit` is
-                // captured at render cadence: git events re-render the
-                // sections, so the flag tracks the store without
-                // SidebarView holding another closure.
+                // The group's "+" opens the SAME add menu for every
+                // space (2026-08-31 rule change): New Terminal, the
+                // available agents, and — for a git repo — a worktree
+                // beside it; non-repos used to open a terminal
+                // directly, no menu. `isGit` is captured at render
+                // cadence: git events re-render the sections, so the
+                // flag tracks the store without SidebarView holding
+                // another closure.
                 let isGit = dir.flatMap { gitFor?($0) } != nil
                 // Fold key = the section's directory ROOT, not the
                 // display name — tail names grow on collision ("goty"
@@ -631,15 +637,11 @@ final class SidebarView: NSView {
                 header.configure(text: name,
                                  plus: { [weak self] anchor in
                     guard let self else { return }
-                    if isGit, let dir {
-                        let menu = self.spacePlusMenu(dir: dir)
-                        menu.popUp(positioning: nil,
-                                   at: NSPoint(x: anchor.bounds.width,
-                                               y: anchor.bounds.height),
-                                   in: anchor)
-                    } else {
-                        self.onNewTabInDir?(dir)
-                    }
+                    let menu = self.spacePlusMenu(dir: dir, isGit: isGit)
+                    menu.popUp(positioning: nil,
+                               at: NSPoint(x: anchor.bounds.width,
+                                           y: anchor.bounds.height),
+                               in: anchor)
                 }, count: section.tabIndexs.count,
                    toggle: { [weak self] in self?.toggleSpaceFold(foldKey) },
                    expanded: !spaceFolds.contains(foldKey))
@@ -674,7 +676,7 @@ final class SidebarView: NSView {
                 // own window title (OSC 0/2 through ghostty); else the
                 // default counter. One channel for local and remote.
                 let title = titleFor?(tab)
-                let displayName = tab.userTitle ?? spec?.label ?? title ?? tab.name
+                let displayName = tab.userTitle ?? tab.agentTitle ?? spec?.label ?? title ?? tab.name
                 // Live TUI status (agent-style badge); no passive
                 // evidence (or a plain shell) shows nothing.
                 let status = running ? statusFor?(tab) : nil

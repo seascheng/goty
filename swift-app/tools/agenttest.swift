@@ -27,7 +27,12 @@ enum AgentTest {
             grid: grid, noEcho: false, ringBytes: nil)
         check(plain["no_echo"] == nil && plain["ring_bytes"] == nil,
               "terminal panes serialize without the new keys")
-        check((plain["size"] as? [String: UInt16])?["cols"] == 120, "grid passes through")
+        // The size dict is protocol.rs's WinSize: all four fields are
+        // REQUIRED on the daemon side — a partial dict fails its serde
+        // and every spawn (terminal and agent alike) comes back ERROR.
+        check((plain["size"] as? [String: UInt16])
+                  == ["cols": 120, "rows": 40, "cell_w": 8, "cell_h": 16],
+              "size carries the full WinSize contract (cols/rows/cell_w/cell_h)")
 
         print("— NdjsonSplitter —")
         var splitter = NdjsonSplitter()
@@ -262,6 +267,24 @@ enum AgentTest {
         check(pendingDone && orphans.count == 2,
               "matched response completes pending, skips orphan hook")
 
+        print("— JSONRPCChannel replayed request surface (user prompt recovery) —")
+        let rcPrompt = JSONRPCChannel()
+        var promptReplays: [(Int, String, [String: Any])] = []
+        rcPrompt.onReplayRequest = { (id: Int, method: String, params: [String: Any]) in
+            promptReplays.append((id, method, params))
+        }
+        // ring_input panes re-stream the user's own session/prompt wire —
+        // the reattached adapter rebuilds the user's side of the history
+        // from exactly these lines (omp never echoes prompts in updates).
+        rcPrompt.feed(Array("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"live-s1\",\"prompt\":[{\"type\":\"text\",\"text\":\"修复这个bug\"}]}}\n".utf8), replay: true)
+        check(promptReplays.count == 1 && promptReplays[0].1 == "session/prompt"
+              && (promptReplays[0].2["prompt"] as? [[String: Any]])?.first?["text"] as? String == "修复这个bug",
+              "replayed session/prompt surfaces via onReplayRequest")
+        // A LIVE prompt request line is this client's own traffic — never
+        // surfaced as replay.
+        rcPrompt.feed(Array("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"session/prompt\",\"params\":{}}\n".utf8))
+        check(promptReplays.count == 1, "live prompt request does not surface as replay")
+
         print("— integrity counters —")
         check(session.bytesFed == 0 && session.eventsEmitted > 0,
               "events counted without frames fed")
@@ -310,6 +333,35 @@ enum AgentTest {
             if case .usageUpdate(let used, _, _, _, _, _) = $0 { return used != nil }
             return false
         }), "usage mapped")
+        // Partial streaming (--include-partial-messages): deltas map to
+        // chunks; the interleaved COMPLETE assistant frames repeat the
+        // same content and must dedup against what deltas delivered.
+        // Shape recorded from a live claude run (claude-stream.jsonl).
+        let streamFixture = (CommandLine.arguments.count > 1
+            ? CommandLine.arguments[1] : "tools/fixtures") + "/claude-stream.jsonl"
+        let streamMapper = ClaudeFrameMapper()
+        var streamTextChunks: [String] = []
+        var streamThoughtChunks: [String] = []
+        if let lines = try? String(contentsOfFile: streamFixture, encoding: .utf8) {
+            for line in lines.split(separator: "\n") {
+                guard let data = String(line).data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data),
+                      let frame = json as? [String: Any] else { continue }
+                for event in streamMapper.map(frame) {
+                    switch event {
+                    case .messageChunk(let text): streamTextChunks.append(text)
+                    case .thoughtChunk(let text): streamThoughtChunks.append(text)
+                    case .toolCallUpdate: break
+                    default: break
+                    }
+                }
+            }
+        }
+        check(streamTextChunks == ["1\n", "2\n", "3"],
+              "text deltas stream as separate chunks, complete frame does not duplicate (got \(streamTextChunks))")
+        check(streamThoughtChunks == ["The user wants a count."],
+              "thinking delta streams once, interleaved frame deduped (got \(streamThoughtChunks))")
+        check(streamTextChunks.joined() == "1\n2\n3", "streamed text reassembles")
         // History replay: the store file carries the asking side.
         let claudeHistory = ClaudeSessionStore.history(sessionId: "2123c193-59d5-4165-a29c-80372472a3f0")
         check(!claudeHistory.isEmpty, "claude store finds the probe session")

@@ -166,7 +166,7 @@ final class SessionDaemon {
     /// constant. Daemons are singleton and detached, so a machine can
     /// serve an old build indefinitely; this is how the client tells.
     /// nil = no daemon / unusable handshake, NOT "old".
-    static let expectedCapability = 3
+    static let expectedCapability = 5
 
     func pingCapability() -> Int? {
         let fd = Self.connect(path: socketPath)
@@ -213,7 +213,7 @@ final class SessionDaemon {
     func openPaneWithAttachment(id: String, cwd: String?, shell: String,
                                 args: [String], environment: [String: String],
                                 grid: SessionGrid, noEcho: Bool = false,
-                                ringBytes: UInt64? = nil,
+                                ringBytes: UInt64? = nil, ringInput: Bool = false,
                                 onFrame: @escaping (UInt8, Data) -> Void,
                                 onDisconnect: @escaping () -> Void) -> OpenPaneResult? {
         guard ensureRunning() else { return nil }
@@ -238,7 +238,7 @@ final class SessionDaemon {
             guard fd >= 0 else { return nil }
             var request = Self.agentSpawnPayload(
                 cwd: cwd, shell: shell, args: args, environment: environment,
-                grid: grid, noEcho: noEcho, ringBytes: ringBytes)
+                grid: grid, noEcho: noEcho, ringBytes: ringBytes, ringInput: ringInput)
             request["pane_id"] = id
             guard let data = try? JSONSerialization.data(withJSONObject: request),
                   Self.writeFrame(fd: fd, kind: SessionFrame.spawn, payload: data),
@@ -272,7 +272,8 @@ final class SessionDaemon {
     /// gate on supportsAgentSessions() instead of relying on that.
     static func agentSpawnPayload(cwd: String?, shell: String, args: [String],
                                   environment: [String: String], grid: SessionGrid,
-                                  noEcho: Bool, ringBytes: UInt64?) -> [String: Any] {
+                                  noEcho: Bool, ringBytes: UInt64?,
+                                  ringInput: Bool = false) -> [String: Any] {
         var request: [String: Any] = [
             "pane_id": "", // caller overwrites; kept for a single shape
             "cwd": cwd ?? NSNull(),
@@ -281,12 +282,19 @@ final class SessionDaemon {
             "env": environment.map { [$0.key, $0.value] },
             "size": [
                 "cols": grid.columns, "rows": grid.rows,
+                // WinSize is four REQUIRED fields in protocol.rs — a
+                // payload without the cell metrics fails the daemon's
+                // serde and every spawn comes back ERROR (blank panes).
                 "cell_w": grid.cellWidth, "cell_h": grid.cellHeight,
             ],
             "replay": true,
         ]
         if noEcho { request["no_echo"] = true }
         if let ringBytes { request["ring_bytes"] = ringBytes }
+        // Agent panes only (ring_input): the reattach replay then carries
+        // the user's own prompt requests — the recovered transcript keeps
+        // the user's side of the conversation, not just the agent's.
+        if ringInput { request["ring_input"] = true }
         return request
     }
 
@@ -318,12 +326,55 @@ final class SessionDaemon {
         }
     }
 
+    /// Fire-and-forget pane removal for ordinary callers.
     func killPane(id: String) {
         guard ensureRunning() else { return }
         let fd = Self.connect(path: socketPath)
         guard fd >= 0 else { return }
         _ = Self.writeFrame(fd: fd, kind: SessionFrame.kill, payload: Data(id.utf8))
         Darwin.close(fd)
+    }
+
+    /// Async acknowledgement for a caller that must reuse the same pane id.
+    /// The bounded wait never blocks AppKit's main thread.
+    func killPaneAndWait(id: String, completion: @escaping (Bool) -> Void) {
+        DispatchQueue.global(qos: .utility).async { [self] in
+            let ok = self.killPaneAndWait(id: id)
+            DispatchQueue.main.async {
+                completion(ok)
+            }
+        }
+    }
+
+    @discardableResult
+    private func killPaneAndWait(id: String) -> Bool {
+        guard ensureRunning() else { return false }
+        let fd = Self.connect(path: socketPath)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+        guard Self.writeFrame(fd: fd, kind: SessionFrame.kill, payload: Data(id.utf8))
+        else { return false }
+        return Self.waitForEOF(fd: fd, timeout: 2)
+    }
+
+    /// KILL is command-only: the daemon closes this socket after it removes
+    /// the pane and signals the child. POLLHUP/EOF is therefore the only
+    /// ordering proof a client needs before reusing the pane id.
+    private static func waitForEOF(fd: Int32, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let remaining = max(1, Int32(deadline.timeIntervalSinceNow * 1_000))
+            guard poll(&descriptor, 1, remaining) > 0 else { return false }
+            if descriptor.revents & Int16(POLLERR | POLLNVAL) != 0 { return false }
+            if descriptor.revents & Int16(POLLHUP) != 0 { return true }
+            guard descriptor.revents & Int16(POLLIN) != 0 else { continue }
+            var byte: UInt8 = 0
+            let count = Darwin.read(fd, &byte, 1)
+            if count == 0 { return true }
+            if count < 0 && errno != EINTR { return false }
+        }
+        return false
     }
 
     private func canConnect() -> Bool {

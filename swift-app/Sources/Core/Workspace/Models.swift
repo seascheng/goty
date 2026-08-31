@@ -39,6 +39,11 @@ struct PaneState: Codable {
     /// Terminal pane vs GUI agent session. Absent in older state.json —
     /// decodes as .terminal so no migration is ever needed.
     var kind: PaneKind = .terminal
+    /// Agent pane: the session the user last had loaded here (history
+    /// pick or new turn). Persisted so reopening the app re-loads the
+    /// SAME conversation instead of a blank pane. Absent in older
+    /// state.json — decodes as nil.
+    var agentSessionId: String?
 
     init(id: String, cwd: String?, kind: PaneKind = .terminal,
          left: Int = 0, top: Int = 0, width: Int = 1, height: Int = 1) {
@@ -60,6 +65,7 @@ struct PaneState: Codable {
         width = try container.decodeIfPresent(Int.self, forKey: .width) ?? 1
         height = try container.decodeIfPresent(Int.self, forKey: .height) ?? 1
         kind = try container.decodeIfPresent(PaneKind.self, forKey: .kind) ?? .terminal
+        agentSessionId = try container.decodeIfPresent(String.self, forKey: .agentSessionId)
     }
 }
 
@@ -72,6 +78,12 @@ struct TabState: Codable {
     /// older state.json without the key decodes as nil. Local and
     /// remote panes both flow through the one title channel.
     var userTitle: String? = nil
+    /// Live agent-session title (omp's auto-generated name, or the
+    /// loaded history entry's name). Display sits BETWEEN userTitle and
+    /// the agent label: automatic naming must follow the session, but a
+    /// manual rename always outranks it. Persisted like userTitle;
+    /// absent keys in older state.json decode as nil.
+    var agentTitle: String? = nil
     var panes: [PaneState]
     /// Command the space was spawned with (nil = plain shell) — drives the
     /// agent badge: an agent space shows its brand while it runs.
@@ -92,6 +104,13 @@ struct WorkspaceState: Codable {
     /// this host (config alias); nil = the local sessiond. Persisted, so
     /// a restart restores the workspace list and re-attaches each remote.
     var sshHost: String?
+    /// The right-panel side terminal's panes — zero or more per server,
+    /// created lazily on the first Terminal-tab open (spec 2026-08-30;
+    /// split-capable since the 2026-08-31 revision). Same cell geometry
+    /// as tab panes; standard sessiond panes (attach, replay, reconnect
+    /// like any other) that belong to NO TabState, so nothing that walks
+    /// tabs sees them. Empty = never opened.
+    var auxTerminalPanes: [PaneState] = []
 
     var focusedTab: TabState? {
         tabs.indices.contains(focusedTabIndex) ? tabs[focusedTabIndex] : nil
@@ -102,6 +121,34 @@ struct WorkspaceState: Codable {
     /// Display name: the host alias for servers, "Local" for this Mac —
     /// derived, never stored, so no state migration can ever be needed.
     var displayName: String { isRemote ? name : "Local" }
+}
+
+extension WorkspaceState {
+    /// v1 stored ONE pane id (`auxTerminalPaneId`); the split-capable
+    /// revision stores the pane array. The legacy id migrates into one
+    /// full-rect pane at decode — in the initializer (not the store's
+    /// migration pass) so every decode path, parked workspaces included,
+    /// lands migrated.
+    private enum LegacyKeys: String, CodingKey {
+        case auxTerminalPaneId
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        tabs = try c.decode([TabState].self, forKey: .tabs)
+        focusedTabIndex = try c.decode(Int.self, forKey: .focusedTabIndex)
+        sshHost = try c.decodeIfPresent(String.self, forKey: .sshHost)
+        if let panes = try c.decodeIfPresent([PaneState].self, forKey: .auxTerminalPanes) {
+            auxTerminalPanes = panes
+        } else if let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+            .decodeIfPresent(String.self, forKey: .auxTerminalPaneId) {
+            auxTerminalPanes = [PaneState(id: legacy, cwd: nil)]
+        } else {
+            auxTerminalPanes = []
+        }
+    }
 }
 
 // MARK: - Space grouping (tty7 sidebar model)

@@ -146,16 +146,46 @@ function DiffView({ call }: { call: ToolCall }) {
   );
 }
 
-const STATUS_ICON: Record<string, string> = {
-  pending: "○", in_progress: "◐", completed: "✓", error: "✗",
-};
+/// Uniform 12×12 stroke glyphs (lucide geometry) — unicode fallbacks
+/// rendered at wildly different sizes across kinds.
+function ToolGlyph({ kind }: { kind: string }) {
+  const common = { width: 12, height: 12, viewBox: "0 0 24 24", fill: "none",
+                   stroke: "currentColor", strokeWidth: 2.2,
+                   strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  switch (kind) {
+    case "execute":
+      return <svg {...common}><polyline points="4 17 10 11 4 5" /><line x1="12" x2="20" y1="19" y2="19" /></svg>;
+    case "read":
+      return <svg {...common}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /></svg>;
+    case "edit":
+      return <svg {...common}><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /></svg>;
+    case "search":
+      return <svg {...common}><circle cx="11" cy="11" r="7" /><line x1="21" x2="16.5" y1="21" y2="16.5" /></svg>;
+    case "agent":
+      return <svg {...common}><rect x="5" y="8" width="14" height="12" rx="2" /><path d="M12 8V4" /><circle cx="12" cy="3" r="1" /><circle cx="9" cy="13" r="0.5" /><circle cx="15" cy="13" r="0.5" /></svg>;
+    case "fetch":
+      return <svg {...common}><circle cx="12" cy="12" r="9" /><path d="M3 12h18" /><path d="M12 3a15 15 0 0 1 0 18 a15 15 0 0 1 0-18" /></svg>;
+    default:
+      return <svg {...common}><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" /></svg>;
+  }
+}
 
 function ToolCard({ id }: { id: string }) {
   const call = store.tools.get(id)!;
   const isDiff = call.kind != null && editKinds.has(call.kind);
-  const [open, setOpen] = useState(call.status === "in_progress" || isDiff);
+  // Tools stay folded by default (the header carries status + glyph);
+  // a card the user opened while running folds on clean completion.
+  const [open, setOpen] = useState(false);
+  const seenStatus = useRef(call.status);
+  if (call.status !== seenStatus.current) {
+    const was = seenStatus.current;
+    seenStatus.current = call.status;
+    if ((was === "in_progress" || was === "pending")
+        && call.status === "completed" && !isDiff) {
+      setOpen(false);
+    }
+  }
   const running = call.status === "in_progress" || call.status === "pending";
-  const icon = STATUS_ICON[call.status ?? ""] ?? "○";
   const statusLabel = call.status === "completed" ? "完成"
     : call.status === "in_progress" ? "运行中"
     : call.status === "pending" ? "等待"
@@ -163,13 +193,16 @@ function ToolCard({ id }: { id: string }) {
     : (call.status ?? "");
   const showDiff = isDiff || (call.rawInput?.content != null);
   const textContent = call.content.filter((c) => c.text).map((c) => c.text).join("\n");
+  const kind = call.kind ?? "other";
   return (
     <div className={"tool" + (open ? " open" : "") + (running ? " run" : "")}>
       <button className="tool-head" onClick={() => setOpen(!open)}>
         <span className={"chevron" + (open ? " up" : "")}>▸</span>
-        <span className={"tool-icon " + (call.status ?? "")}>{icon}</span>
+        <span className="tool-kind" aria-hidden><ToolGlyph kind={kind} /></span>
         <span className="tool-title">{toolDisplayTitle(call)}</span>
-        <span className={"tool-status" + (running ? " running" : "")}>{statusLabel}</span>
+        <span className={"tool-status st-" + (call.status ?? "")}>
+          <span className="dot" aria-hidden>●</span> {statusLabel}
+        </span>
       </button>
       {open && (
         <div className="tool-body">
@@ -392,6 +425,17 @@ function Composer({ working, phase }: { working: boolean;
     return () => document.removeEventListener("mousedown", onDown);
   }, []);
 
+  // Auto-fit height on EVERY text change — programmatic ones included
+  // (submit, Escape, ↑/↓ history recall, @-file insert). The old
+  // onChange-only sizing left a stale grown height on the cleared box:
+  // dead space above the toolbar until the next keystroke.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+  }, [text]);
+
   const pickSlash = (name: string) => {
     setText("/" + name + " ");
     ref.current?.focus();
@@ -416,8 +460,8 @@ function Composer({ working, phase }: { working: boolean;
     setHist((h) => (h[h.length - 1] === trimmed ? h : [...h, trimmed]));
     histIdx.current = null;
     setText("");
-    ref.current?.style.setProperty("height", "auto");
   };
+
 
   const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // TUI-style input recall: empty composer + ↑/↓ walks the history
@@ -480,8 +524,7 @@ function Composer({ working, phase }: { working: boolean;
   return (
     <div className="composer">
       <div className="composer-box" ref={boxRef}>
-        {(store.reconnecting || store.starting || store.phase != null
-          || store.justFinished || store.error != null) && (
+        {(store.reconnecting || store.starting || store.error != null) && (
         <div className="composer-status">
           {store.reconnecting && (
             <span className="cstat warn" title="连接断开，正在自动重连；远端进程仍在运行">
@@ -492,22 +535,6 @@ function Composer({ working, phase }: { working: boolean;
             <span className="cstat" title="agent 进程已启动，握手完成前模型/思考等控件不可用">
               <span className="spin" />正在启动 {store.starting}…
             </span>
-          )}
-          {store.phase === "thinking" && (
-            <span className="cstat" title="模型思考中">
-              <span className="spin" />思考中…
-            </span>
-          )}
-          {store.phase === "executing" && (
-            <span className="cstat" title="工具执行中">
-              <span className="spin" />执行中…
-            </span>
-          )}
-          {store.phase === "awaitingPermission" && (
-            <span className="cstat awaiting" title="等待你在下方授权">等待授权</span>
-          )}
-          {store.justFinished && (
-            <span className="cstat done">已完成 ✓</span>
           )}
           {store.error != null && (
             <span className="cstat error" title={store.error}>
@@ -530,9 +557,6 @@ function Composer({ working, phase }: { working: boolean;
             setAtIndex(0);
             setDismissed(false);
             histIdx.current = null;
-            const el = e.target;
-            el.style.height = "auto";
-            el.style.height = Math.min(el.scrollHeight, 160) + "px";
           }}
           onKeyDown={onComposerKeyDown}
         />
@@ -576,6 +600,11 @@ function Composer({ working, phase }: { working: boolean;
           {store.meta?.icon && (
             <img className="pane-agent-icon" src={store.meta.icon}
                  alt="" draggable={false} />
+          )}
+          {store.sessionTitle && (
+            <span className="pane-session-title" title={store.sessionTitle}>
+              {store.sessionTitle}
+            </span>
           )}
           <HistoryChip open={openPop === "history"}
             onToggle={() => {
@@ -669,6 +698,44 @@ const BlockView = React.memo(
   },
 );
 
+/// Turn status lives at the TAIL of the transcript (orca statusbar
+/// model): live phase chips while the model works, then the turn's
+/// duration (+token usage when the agent reports it) once it settles.
+function StatusLine() {
+  const s = store;
+  const chips: React.ReactNode[] = [];
+  if (s.phase === "thinking") {
+    chips.push(<span key="th" className="cstat" title="模型思考中"><span className="spin" />思考中…</span>);
+  } else if (s.phase === "executing") {
+    // Live tool telemetry: name the tool actually running (claude TUI
+    // parity — a bare 执行中 hides which of the turn's tools is active).
+    let running: ToolCall | null = null;
+    for (let i = s.toolOrder.length - 1; i >= 0; i--) {
+      const t = s.tools.get(s.toolOrder[i]);
+      if (t && (t.status === "in_progress" || t.status === "pending")) { running = t; break; }
+    }
+    chips.push(
+      <span key="ex" className="cstat" title="工具执行中">
+        <span className="spin" />执行中{running ? ` · ${toolDisplayTitle(running)}` : ""}…
+      </span>);
+  } else if (s.phase === "awaitingPermission") {
+    chips.push(<span key="ap" className="cstat awaiting" title="等待你在下方授权">等待授权</span>);
+  }
+  // Settled turn: duration stats stick around until the next turn.
+  if (chips.length === 0 && !s.working && s.lastTurnMs != null) {
+    const u = s.usage;
+    const parts: string[] = [`⏱ ${(s.lastTurnMs / 1000).toFixed(1)}s`];
+    if (u?.input != null) parts.push(`↑${fmtTokens(u.input)}`);
+    if (u?.output != null) parts.push(`↓${fmtTokens(u.output)}`);
+    if (u?.costAmount != null) {
+      parts.push(`$${u.costAmount < 1 ? u.costAmount.toFixed(4) : u.costAmount.toFixed(2)}`);
+    }
+    chips.push(<span key="ts" className="cstat done">{parts.join(" · ")}</span>);
+  }
+  if (chips.length === 0) return null;
+  return <div className="composer-status">{chips}</div>;
+}
+
 export function App() {
   useSyncExternalStore(
     (onChange) => store.subscribe(onChange),
@@ -676,6 +743,20 @@ export function App() {
   );
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+
+  // Esc ANYWHERE in the pane stops a working agent — not only while
+  // the composer is focused (its own handler covers that case).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if ((e.target as HTMLElement | null)?.tagName === "TEXTAREA") return;
+      if (!store.working) return;
+      e.preventDefault();
+      window.webkit?.messageHandlers.goty.postMessage({ type: "stop" });
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
 
   // Render window: the store holds the whole transcript, but only the
   // newest INITIAL_WINDOW blocks mount. Scrolling near the top pages
@@ -726,6 +807,7 @@ export function App() {
           <div className="history-more" ref={sentinelRef}>加载更早消息…</div>
         )}
         {visible.map((block) => <BlockView key={block.id} block={block} />)}
+        <StatusLine />
       </div>
       {store.permission && (
         <div className="permission">

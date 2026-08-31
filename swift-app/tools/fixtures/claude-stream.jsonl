@@ -1,0 +1,17 @@
+{"type":"system","subtype":"hook_started","hook_id":"h1","hook_name":"SessionStart:startup","hook_event":"SessionStart","session_id":"stream-1"}
+{"type":"system","subtype":"hook_response","hook_id":"h1","hook_name":"SessionStart:startup","hook_event":"SessionStart","output":"","exit_code":0,"outcome":"success","session_id":"stream-1"}
+{"type":"system","subtype":"init","session_id":"stream-1","model":"glm-5.2","slash_commands":["compact","design-html"]}
+{"type":"stream_event","event":{"type":"message_start"}}
+{"type":"stream_event","event":{"type":"content_block_start","index":0}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user wants a count."}}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants a count."}]}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+{"type":"stream_event","event":{"type":"content_block_start","index":1}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"1\n"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"2\n"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"3"}}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants a count."},{"type":"text","text":"1\n2\n3"}]}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":1}}
+{"type":"stream_event","event":{"type":"message_delta","delta":{}}}
+{"type":"stream_event","event":{"type":"message_stop"}}
+{"type":"result","subtype":"success","session_id":"stream-1","is_error":false,"result":"1\n2\n3","usage":{"input_tokens":10,"output_tokens":3}}

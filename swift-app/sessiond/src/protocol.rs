@@ -5,16 +5,23 @@ pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 
 /// Capability level the VERSION reply carries. Bump when the wire GAINS
 /// meaning the client depends on; clients must treat a lower level as a
-/// degraded daemon, never as an equal. History: 1 = spawn/attach/list
-/// with cwd; 2 = PaneInfo.fg + PaneInfo.agent + the extension report
-/// server + GOTY_GUI_* env injection on spawn; 4 = SpawnRequest.no_echo
-/// + ring_bytes.
+/// degraded daemon, never as an equal. History:
+///
+/// - 1 = spawn/attach/list with cwd
+/// - 2 = PaneInfo.fg + PaneInfo.agent + the extension report server +
+///   GOTY_GUI_* env injection on spawn
+/// - 4 = SpawnRequest.no_echo + ring_bytes
+/// - 5 = SpawnRequest.ring_input — the reattach replay carries the
+///   user's own prompt requests, which the client depends on to rebuild
+///   the user's side of a recovered conversation. An older daemon
+///   silently omits them (2026-08-31: recovered transcripts lost the
+///   user's "继续" and the composer could not tell working from idle).
 ///
 /// Daemons are singleton and detached (sessions outlive the GUI), so a
 /// host can keep serving an old build indefinitely — this is the only
 /// way the client can tell (2026-08-24: remote workspaces silently
 /// lost agent logo/status to exactly this).
-pub const CAPABILITY: u8 = 4;
+pub const CAPABILITY: u8 = 5;
 
 pub mod kind {
     pub const SPAWN: u8 = 1;
@@ -75,6 +82,13 @@ pub struct SpawnRequest {
     /// CAPABILITY 4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ring_bytes: Option<u64>,
+    /// Ring the pane's INPUT wire too (agent panes): the reattach replay
+    /// then carries the user's own prompt requests interleaved with the
+    /// output in true chronological order — the rebuilt transcript keeps
+    /// the user's side of the conversation. Terminal panes never set it
+    /// (their input echoes back through the PTY anyway).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ring_input: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

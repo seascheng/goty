@@ -36,6 +36,45 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     /// transition funnels through here — the sidebar badge, the composer
     /// chips and the dock attention are all downstream of one source.
     var onTurnState: ((AgentTurnState) -> Void)?
+    /// Current session title (main thread). Fires on change only —
+    /// handshake, history load, and omp's post-turn auto-naming.
+    var onSessionTitle: ((String?) -> Void)?
+    /// The pane's live session id — persisted per pane so reopening the
+    /// app re-loads the SAME conversation. Fires when it settles.
+    var onSessionId: ((String?) -> Void)?
+    /// The daemon this pane lives in — the authority for the agent's
+    /// REAL state (the omp extension reports working/blocked/idle to
+    /// it, surviving client restarts). The composer's working switch is
+    /// seeded and corrected from here; client-side isWorking is only a
+    /// refinement (thinking vs executing) while the authority says on.
+    var daemonRef: SessionDaemon?
+    /// Session to re-load after the initial connect (from PaneState) —
+    /// for adapters that don't self-manage restore (claude).
+    var restoredSessionId: String?
+    /// Last title pushed to the page / sidebar; dedups list refreshes.
+    private var lastSessionTitle: String?
+
+    /// Look up the live session's title via the adapter's session
+    /// directory and push it to the page + host owner. omp names a
+    /// session itself seconds AFTER the first turn ends, so callers
+    /// re-run this once more past that delay.
+    private func refreshSessionTitle() {
+        guard let sid = session.sessionId else { return }
+        session.listSessions { [weak self] summaries in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // The session may have been swapped while the listing
+                // was in flight — only a title for the CURRENT id lands.
+                guard self.session.sessionId == sid else { return }
+                let title = summaries.first { $0.sessionId == sid }?.title
+                guard title != self.lastSessionTitle else { return }
+                self.lastSessionTitle = title
+                self.bridge.push(["type": "sessionTitle",
+                                  "title": title ?? NSNull()])
+                self.onSessionTitle?(title)
+            }
+        }
+    }
     /// True while the reconnect backoff runs (didDisconnect → success).
     private var isReconnecting = false
     private var reconnectAttempt = 0
@@ -64,6 +103,51 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             bridge.push(["type": "error", "text": reason])
         }
         onTurnState?(state)
+    }
+
+    /// THE working switch, fed by the daemon's extension report — the
+    /// same value the tab badge reads, reported by the agent process
+    /// itself and immune to client restarts. Rules: a working report
+    /// lifts only a pane still STARTING (attach settle owns the rest);
+    /// idle stops a working pane; blocked shows the permission card.
+    /// Stale reports can't resurrect a stopped agent — the user's stop
+    /// is authoritative (2026-08-31 upgrade-dialog storm lesson).
+    func applyReportedState(_ activity: AgentActivity?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isReconnecting else { return }
+            switch activity {
+            case .working:
+                if self.turnState == .starting {
+                    self.setTurnState(.thinking)
+                }
+            case .idle:
+                if self.turnState == .thinking || self.turnState == .executing {
+                    self.setTurnState(.idle)
+                }
+            case .blocked:
+                if self.session.isWorking, self.turnState != .awaitingPermission {
+                    self.setTurnState(.awaitingPermission)
+                }
+            case .unknown, .error, nil:
+                break // no report — nothing authoritative to apply
+            }
+        }
+    }
+
+    /// One authoritative seed right after connect: the daemon holds the
+    /// extension's last report for this pane, so a reattach mid-turn
+    /// lands on the stop button immediately and an attach to an idle
+    /// pane never fakes working while the first chunks are in flight.
+    private func seedReportedState() {
+        guard let daemon = daemonRef else { return }
+        let paneRuntimeId = hostKey.runtimeId
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let reported = daemon.listPanes().first { $0.id == paneRuntimeId }?
+                .agent.flatMap(AgentActivity.init)
+            DispatchQueue.main.async {
+                self?.applyReportedState(reported)
+            }
+        }
     }
 
     /// Transport dropped: the process may still be mid-turn (the daemon
@@ -262,7 +346,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             // A load swaps the conversation under the pane: the page
             // starts from the replayed history alone.
             self.bridge.push(["type": "clearTranscript"])
-            self.session.load(sessionId: sessionId) { _ in }
+            self.session.load(sessionId: sessionId) { [weak self] _ in
+                DispatchQueue.main.async { self?.refreshSessionTitle() }
+            }
         }
         bridge.onListFiles = { [weak self] reply in
             guard let self, let cwd = self.session.cwd else { return reply([]) }
@@ -301,21 +387,29 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             if ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil {
                 print("GOTY_DEBUG: connect ok=\(ok)")
             }
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                // NOT "就绪" here: connect ok only means the pane is up
-                // for the non-omp adapters. Readiness is the adapter's
-                // .ready event (status "就绪"), which also clears the
-                // starting chip — the two must not race apart.
                 if !ok {
                     self.setTurnState(.errored("连接失败"))
+                }
+                // Restored pane: re-load the session the user last had
+                // here (omp session/load). Adapters that self-manage
+                // restore (claude: store replay + --resume respawn)
+                // already handled it inside connect.
+                if ok, let restore = self.restoredSessionId,
+                   !self.session.selfManagesRestore {
+                    self.session.load(sessionId: restore) { _ in }
                 }
                 if ok, let prompt = self.initialPrompt {
                     self.initialPrompt = nil
                     self.setTurnState(.thinking)
                     self.session.send(prompt)
                 }
-                // GOTY_AUTOLOAD_SESSION=newest|<sessionId>: diagnostic —
+                // Authority seed: align the composer with the process's
+                // real state before the first live frames decide it.
+                if ok {
+                    self.seedReportedState()
+                }
                 // resume a persisted session right after connect and dump
                 // the page store. Set only when launching from a terminal.
                 if ok, let target = ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] {
@@ -460,16 +554,48 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     // adapter omits ready).
                     self.handshakeDone = true
                 case .turnEnded, .plan, .commandsChanged, .usageUpdate,
-                     .permissionRequested, .thoughtChunk, .starting,
-                     .transcriptReset:
+                     .permissionRequested, .thoughtChunk, .starting:
                     break
+                case .transcriptReset:
+                    // Adapter rebuild incoming (death healing): drop the
+                    // dead ring's transcript or the fresh history load
+                    // would duplicate every block.
+                    self.bridge.push(["type": "clearTranscript"])
                 }
                 switch event {
                 case .ready:
-                    self.setTurnState(.idle)
+                    // A PENDING PERMISSION outranks everything: the agent
+                    // is blocked waiting for the user's answer. Overriding
+                    // awaitingPermission with thinking/idle (2026-08-31)
+                    // hid the revival card on reattach and left the agent
+                    // blocked forever behind a lying "思考中".
+                    if self.pendingPrompt != nil {
+                        self.setTurnState(.awaitingPermission)
+                    } else if self.session.isWorking {
+                        // claude's SDK `init` frame re-fires at EVERY turn
+                        // start; a ready with isWorking set is the attach
+                        // settle for a live turn — stop button, not idle.
+                        self.setTurnState(.thinking)
+                    } else {
+                        self.setTurnState(.idle)
+                    }
+                    // Handshake settled the session id — new sessions have
+                    // no title yet, adopted ones (reattach) may.
+                    self.onSessionId?(self.session.sessionId)
+                    self.refreshSessionTitle()
                 case .messageChunk, .thoughtChunk:
-                    self.setTurnState(.thinking)
+                    // Replay/history chunks also arrive as these events
+                    // (ring reattach, session load). Only a LIVE turn
+                    // (the adapter's isWorking) means 思考中 — history
+                    // must leave the pane idle, never stuck thinking.
+                    if self.session.isWorking {
+                        self.setTurnState(.thinking)
+                    }
                 case .toolCallUpdate(_, _, _, let status, _, _, _, _):
+                    // Same replay rule as the chunk cases above: a
+                    // settled replayed tool (ring reattach) used to flip
+                    // the pane back to thinking forever.
+                    guard self.session.isWorking else { break }
                     // pending/in_progress = a tool runs; a settled tool
                     // hands the floor back to the model (until turn end).
                     self.setTurnState(
@@ -477,8 +603,19 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                         ? .executing : .thinking)
                 case .turnEnded:
                     self.setTurnState(.idle)
+                    self.onSessionId?(self.session.sessionId)
+                    // omp's title-generator lands the name seconds after
+                    // the turn; query now and once more past the delay.
+                    self.refreshSessionTitle()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                        self?.refreshSessionTitle()
+                    }
                 case .permissionRequested(let prompt):
                     self.pendingPrompt = prompt
+                    // NO isWorking gate: a reattach replays the pending
+                    // permission request BEFORE the ready event settles
+                    // isWorking — gating it silently dropped the revival
+                    // card and left the agent blocked forever.
                     self.setTurnState(.awaitingPermission)
                 default:
                     break

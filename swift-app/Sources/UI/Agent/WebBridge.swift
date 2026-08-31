@@ -83,14 +83,14 @@ class WebBridge: NSObject, WKScriptMessageHandler {
                 self.dispatch(limit: Self.maxSliceEvents, retries: 0)
             case .failure(let error):
                 self.sendFailures += 1
-                print("goty: push of \(slice.count) events failed:", error)
+                NSLog("GOTY bridge: push of %ld events failed: %@", slice.count, error.localizedDescription)
                 if retries < 2 {
                     self.dispatch(limit: limit, retries: retries + 1)
                 } else if limit > 1 {
                     self.dispatch(limit: limit / 2, retries: 0)
                 } else {
                     self.droppedPoison += 1
-                    print("goty: dropped poison event:", slice.first?["type"] ?? "?")
+                    NSLog("GOTY bridge: dropped poison event %@", slice.first?["type"] as? String ?? "?")
                     self.queue.removeFirst(min(1, self.queue.count))
                     guard !self.queue.isEmpty else {
                         self.sending = false

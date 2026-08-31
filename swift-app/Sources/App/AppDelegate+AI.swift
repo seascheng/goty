@@ -131,6 +131,20 @@ extension AppDelegate {
         return UserShellEnv.asDictionary
     }
 
+    /// Availability for the FOCUSED workspace — what the + menus and the
+    /// New Agent Session submenu offer. Local: this Mac's user PATH. A
+    /// ready remote link answers from its connect-time probe (the same
+    /// merged PATH the remote pane spawns with); a connecting/failing
+    /// link offers nothing — the list reshapes the moment it lands.
+    func agentAvailable(key: String) -> Bool {
+        guard let store = coordinator.store, let ws = store.focused, ws.isRemote else {
+            return AgentRegistry.descriptor(for: key)?
+                .isAvailable(path: UserShellEnv.asDictionary["PATH"] ?? "") ?? false
+        }
+        guard let link = remoteLinks[ws.id], link.state == .ready else { return false }
+        return link.isAgentAvailable(key: key)
+    }
+
     func startRemoteLink(_ workspace: WorkspaceState) {
         guard let host = workspace.sshHost else { return }
         // Replacing an existing link (defensive: today's callers never
@@ -144,6 +158,9 @@ extension AppDelegate {
                 case .ready:
                     self.coordinator.workspaceConnected(workspace.id)
                     self.refresh()
+                    // The probe result is in: reshape the menu-bar agent
+                    // submenu (+ menus read availability live at pop-up).
+                    self.buildMainMenu()
                 case .outdated:
                     // Old daemon instance still serving (fixed socket +
                     // singleton): panes work, agent logo/status don't.
@@ -152,9 +169,13 @@ extension AppDelegate {
                     // silent-remote-degradation root cause) and is
                     // REMEMBERED per host, so the prompt is one nag per
                     // daemon build, not one per launch.
-                    if let capability = link.reportedCapability,
-                       self.prefs.daemonUpgradeDeclined(key: workspace.name,
-                                                        capability: capability) {
+                    let capability = link.reportedCapability ?? 0
+                    // Loop guard: an upgrade attempt that still lands on
+                    // the same capability must not re-prompt forever —
+                    // degrade silently; the sidebar reconnect retries it.
+                    if self.outdatedPrompted[workspace.id] == capability
+                        || self.prefs.daemonUpgradeDeclined(key: workspace.name,
+                                                            capability: capability) {
                         link.acceptOutdated()
                         break
                     }
@@ -167,14 +188,16 @@ extension AppDelegate {
                             + "live status won't work until it's upgraded. Restarting it closes "
                             + "the \(sessions) session(s) currently running there.",
                         action: "Restart Daemon") {
+                        self.outdatedPrompted[workspace.id] = capability
                         link.upgradeDaemon()
                     } else {
                         self.prefs.declineDaemonUpgrade(key: workspace.name,
-                                                        capability: link.reportedCapability ?? 0)
+                                                        capability: capability)
                         link.acceptOutdated()
                     }
                 case .failed:
                     self.coordinator.workspaceDisconnected(workspace.id)
+                    self.buildMainMenu()
                 case .connecting:
                     break
                 }

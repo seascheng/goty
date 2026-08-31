@@ -88,11 +88,14 @@ body {
 .user-row { display: flex; justify-content: flex-end; margin: 10px 0 14px; }
 .user {
   max-width: 78%; white-space: pre-wrap; padding: 8px 14px;
+  /* Unbroken runs (long URLs, paths, hashes) must fold, not force a
+     horizontal scrollbar on the whole transcript. */
+  overflow-wrap: anywhere;
   background: var(--surface2); border: 1px solid var(--border-accent);
   border-radius: 14px 14px 4px 14px;
 }
 
-.agent { margin: 6px 0 14px; }
+.agent { margin: 6px 0 14px; overflow-wrap: anywhere; }
 .agent > *:first-child { margin-top: 0; }
 .agent > *:last-child { margin-bottom: 0; }
 .agent h1, .agent h2, .agent h3, .agent h4 { margin: 14px 0 6px; line-height: 1.35; }
@@ -106,7 +109,7 @@ body {
 }
 .agent pre {
   background: var(--surface-sidebar); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 10px 12px; overflow-x: auto; margin: 10px 0;
+  border-radius: var(--radius); padding: 10px 12px; margin: 10px 0;
 }
 .agent pre code { background: none; padding: 0; font-size: 12px; }
 .agent blockquote {
@@ -115,10 +118,10 @@ body {
 }
 .agent table { border-collapse: collapse; margin: 10px 0; }
 .agent th, .agent td { border: 1px solid var(--border); padding: 5px 10px; }
-
 .thought {
   color: var(--fg-muted); font-size: 12px; margin: 8px 0 12px;
   border-left: 2px solid var(--surface3); padding-left: 12px;
+  overflow-wrap: anywhere;
 }
 .thought > *:first-child { margin-top: 0; }
 .thought > *:last-child { margin-bottom: 0; }
@@ -130,20 +133,34 @@ body {
   overflow: hidden;
 }
 .tool-head {
-  display: flex; align-items: center; gap: 8px; width: 100%;
+  display: flex; align-items: center; gap: 7px; width: 100%;
   background: none; border: none; color: var(--foreground);
-  padding: 7px 12px; cursor: pointer; font: inherit; text-align: left;
+  padding: 4px 12px; cursor: pointer; font: inherit; text-align: left;
 }
 .tool-head:hover { background: var(--surface2); }
-.chevron { color: var(--fg-extra-muted); font-size: 11px; transition: transform 0.12s; }
+.chevron { color: var(--fg-extra-muted); font-size: 10px; transition: transform 0.12s; }
 .chevron.up { transform: rotate(90deg); }
-.tool-icon { font-size: 12px; }
-.tool-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tool-status { color: var(--fg-extra-muted); font-size: 11px; }
-.tool-status.running { color: var(--accent-bright); }
+.tool-kind {
+  width: 14px; height: 14px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--fg-muted);
+}
+.tool-kind svg { display: block; }
+.tool-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.tool-status { color: var(--fg-extra-muted); font-size: 10.5px; white-space: nowrap; }
+.tool-status .dot { font-size: 7px; vertical-align: 1px; }
+/* Traffic lights: pending gray · running amber · done green · error red */
+.st-pending { color: #94A3B8; }
+.st-in_progress { color: #D97706; }
+.st-in_progress .dot { animation: pulse 1.2s ease-in-out infinite; }
+.st-completed { color: #16A34A; }
+.st-error { color: #DC2626; }
+[data-theme="dark"] .st-in_progress { color: #F5A524; }
+[data-theme="dark"] .st-completed { color: #2FBF71; }
+[data-theme="dark"] .st-error { color: #F25555; }
 .tool-body { border-top: 1px solid var(--border); padding: 8px 12px; }
 .tool-body pre {
-  margin: 0; padding: 8px 10px; overflow-x: auto;
+  margin: 6px 0; padding: 8px 10px;
   background: var(--surface-sidebar); border-radius: 6px;
   font-family: "SF Mono", Menlo, monospace; font-size: 12px;
 }
@@ -152,7 +169,17 @@ body {
   margin-top: 6px; font-size: 11px; color: var(--fg-extra-muted);
   text-transform: uppercase; letter-spacing: 0.4px;
 }
-
+/* One rule for EVERY code block in the transcript (agent markdown,
+   thought markdown, tool bodies): fold long lines instead of letting
+   a single container's <pre> scroll the whole pane sideways. The
+   thought <pre> gap was the "think 文本不换行" report. */
+.transcript pre {
+  white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden;
+}
+.transcript pre code { white-space: inherit; }
+/* Markdown tables and images are the other two width-pushers. */
+.transcript th, .transcript td { overflow-wrap: anywhere; }
+.transcript img { max-width: 100%; }
 /* — plan — */
 .plan {
   margin: 8px 0 14px; background: var(--surface1);
@@ -193,19 +220,7 @@ body {
 .diff-row.del .tx { color: var(--diff-del-tx); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--diff-del-tx) 50%, transparent); }
 .diff-row .tx { white-space: pre-wrap; word-break: break-all; padding-right: 10px; }
 .diff-row .mark-ins { background: var(--mark-ins); border-radius: 2px; }
-.diff-row .mark-del { background: var(--mark-del); border-radius: 2px; }
-.diff-gap {
-  display: block; width: 100%; text-align: center; padding: 2px 0;
-  background: var(--surface0); color: var(--fg-extra-muted); font-size: 11px;
-  border: 0; cursor: pointer;
-}
 .diff-gap:hover { color: var(--fg-muted); }
-
-/* — tool status icons — */
-.tool-icon { font-size: 12px; width: 15px; flex: none; color: var(--fg-extra-muted); }
-.tool-icon.in_progress { color: var(--accent-bright); animation: pulse 1.2s ease-in-out infinite; }
-.tool-icon.completed { color: var(--accent-bright); }
-.tool-icon.error { color: var(--destructive); }
 .tool.run { border-color: var(--border-accent); }
 
 /* — permission card — */
@@ -277,7 +292,11 @@ body {
 .chip-opt:hover { background: var(--surface3); }
 .chip-opt.cur { color: var(--accent-bright); }
 .chip-check { color: var(--accent-bright); }
-.chip-opt.hist { display: grid; grid-template-columns: 1fr auto; row-gap: 2px; }
+.pane-session-title {
+  color: var(--fg-muted); font-size: 12px; font-weight: 500;
+  max-width: 230px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .hist-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .hist-meta { color: var(--fg-extra-muted); font-size: 11px; align-self: center; }
 
@@ -330,10 +349,10 @@ body {
   padding: 6px 12px 0;
   font-size: 11.5px; color: var(--fg-muted);
 }
-.cstat { display: inline-flex; gap: 6px; align-items: center; }
+.cstat { display: inline-flex; gap: 6px; align-items: center; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cstat.warn { color: var(--accent-bright); }
 .cstat.awaiting { color: var(--accent-bright); animation: pulse 1.2s ease-in-out infinite; }
-.cstat.done { color: var(--accent-bright); animation: chipfade 2.5s ease forwards; }
+.cstat.done { color: var(--accent-bright); }
 .cstat.error { color: var(--destructive); }
 .cstat.error .chip-retry { margin-left: 4px; }
 .pane-agent-icon {

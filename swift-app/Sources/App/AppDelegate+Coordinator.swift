@@ -29,6 +29,7 @@ extension AppDelegate {
         case .agent:
             refreshSidebarSpaces()   // status dots only — no pane-grid churn
             updateRightPanel()
+            pushReportedAgentStates()   // the composer follows the process
         case .title:
             refreshSidebarSpaces()   // display name only — cheapest path
         }
@@ -189,6 +190,25 @@ extension AppDelegate {
         renderTabSurfaces(ws: ws, offline: state == .disconnected)
     }
 
+    /// The composer's working switch follows the daemon's extension
+    /// report — the SAME value the tab badge reads — so the two can
+    /// never disagree again. Coarse by design (start/stop a working
+    /// state); client events refine the phase between report ticks.
+    private func pushReportedAgentStates() {
+        guard let store = coordinator.store else { return }
+        for ws in store.workspaces {
+            for tab in ws.tabs {
+                for pane in tab.panes {
+                    guard case .agent = pane.kind,
+                          let host = hostPool[HostKey(workspace: ws.id, pane: pane.id)]
+                              as? AgentPaneHost else { continue }
+                    host.applyReportedState(
+                        coordinator.reportedActivity(wsId: ws.id, paneId: pane.id))
+                }
+            }
+        }
+    }
+
     /// Live TUI status for a space row's badge: activity + seen, plus
     /// the braille spinner character when the surface title (ghostty's
     /// OSC 0/2 — omp carries one while working) has one.
@@ -199,6 +219,11 @@ extension AppDelegate {
             guard let s = ch.unicodeScalars.first else { return false }
             return (0x2800...0x28FF).contains(s.value)
         }
+        // The badge follows the COMPOSER's state machine (host.onTurnState
+        // → agentStateUpdated) — one source for tab and input. The daemon
+        // extension report is NOT consulted here: omp's extension kept
+        // reporting "working" after its own turn was aborted (2026-08-31
+        // storm), which is exactly the tab/composer split this reverted.
         return SpaceStatus(activity: status.state, seen: status.seen, spinner: spinner)
     }
 }

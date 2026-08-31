@@ -40,6 +40,11 @@ enum AgentProbe {
                             print("PROBE  ready")
                         case .messageChunk(let text):
                             self.chunks.append(text)
+                            print("PROBE  msg \(text.count)B: \(text.prefix(40).replacingOccurrences(of: "\n", with: "⏎"))")
+                        case .thoughtChunk(let text):
+                            print("PROBE  think \(text.count)B: \(text.prefix(40).replacingOccurrences(of: "\n", with: "⏎"))")
+                        case .toolCallUpdate(let id, let title, _, let status, _, _, _, _):
+                            print("PROBE  tool \(status ?? "?") \(title ?? "?") \(id.prefix(6))")
                         case .userChunk(let text):
                             self.userChunks.append(text)
                             print("PROBE  userChunk (\(text.count)B)")
@@ -82,14 +87,22 @@ enum AgentProbe {
         }
         func conclude() -> Never {
             print(failures == 0 ? "PROBE PASS" : "PROBE FAIL")
+            // The daemon keeps panes alive by design; a probe that exits
+            // without killing its pane leaks an omp process forever (36
+            // accumulated before this cleanup existed).
+            SessionDaemon.shared.killPane(id: paneId)
             exit(failures == 0 ? 0 : 1)
         }
         func pump(_ seconds: TimeInterval) {
+            // reattach runs TWO turns (history first, then post-reconnect
+            // continuation) — a single-turn break would cut the probe off
+            // while the reconnect verification is still in flight.
+            let turnsNeeded = mode == "reattach" ? 2 : 1
             let deadline = Date().addingTimeInterval(seconds)
             while Date() < deadline {
                 RunLoop.current.run(until: Date().addingTimeInterval(0.2))
                 if mode == "live" || mode == "reattach",
-                   collector.turnsEnded > 0 || collector.failure != nil {
+                   collector.turnsEnded >= turnsNeeded || collector.failure != nil {
                     break
                 }
             }
@@ -102,29 +115,49 @@ enum AgentProbe {
             DispatchQueue.main.async {
                 print("PROBE  connect ok=\(ok)")
                 switch mode {
+                case "idle":
+                    // Fresh-pane contract: ready must come from the
+                    // SPAWN (claude emits nothing before the first user
+                    // turn in SDK mode — waiting for init tripped the
+                    // 90s watchdog with claude healthy). No send here.
+                    let deadline = Date().addingTimeInterval(25)
+                    while !collector.ready && collector.failure == nil,
+                          Date() < deadline {
+                        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                    }
+                    check(collector.ready, "\(key) reaches ready WITHOUT any user turn")
+                    conclude()
                 case "live":
                     session.send(prompt)
                 case "reattach":
-                    // The keep/recover contract, end to end: detach the
-                    // transport (the daemon keeps the pane + its live
-                    // process), reattach, adopt the session from the ring
-                    // replay, then keep working on the SAME session.
+                    // Turn 1 FIRST: keep/recover only means something
+                    // with history to keep. The reconnect below must
+                    // preserve the session id and restore this prompt
+                    // via the respawn's session/load replay.
+                    session.send(prompt)
+                    let turnDeadline = Date().addingTimeInterval(120)
+                    while collector.turnsEnded < 1 && collector.failure == nil,
+                          Date() < turnDeadline {
+                        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                    }
+                    check(collector.turnsEnded >= 1, "turn 1 concluded before reattach")
                     let sessionBefore = session.sessionId
                     session.reconnect { ok2 in
                         DispatchQueue.main.async {
                             print("PROBE  reconnect ok=\(ok2)")
                             check(ok2, "reattach reopens the transport")
-                            // sessionId is re-learned from the replayed
-                            // orphan response — wait for the ring bytes.
+                            // sessionId survives via the respawn's
+                            // session/load — wait for its completion.
                             let deadline = Date().addingTimeInterval(15)
                             while session.sessionId == nil, Date() < deadline {
                                 RunLoop.current.run(until: Date().addingTimeInterval(0.2))
                             }
                             check(session.sessionId == sessionBefore,
                                   "reattach adopts the SAME live session id (before=\(sessionBefore ?? "nil") after=\(session.sessionId ?? "nil"))")
-                            // The attach auto-load replays the AUTHORITATIVE
-                            // history — turn 1's user prompt must come back
-                            // (the ring alone never carries user prompts).
+                            // The respawn's session/load replays the
+                            // AUTHORITATIVE history — turn 1's user prompt
+                            // must come back (the ring alone never carries
+                            // user prompts).
                             let loadDeadline = Date().addingTimeInterval(25)
                             while !collector.userChunks.contains(where: { $0.contains("HELLO_") }),
                                   Date() < loadDeadline {

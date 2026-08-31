@@ -171,6 +171,27 @@ import Foundation
               "manifest key fires after a passthrough line")
         _ = lt.filter([0x03])
 
+        // @tty: same spawn family as @omp, payload-less — the third
+        // directive kind (a terminal tab in the pane's cwd).
+        var ttyFired = 0
+        lt.onTTYTrigger = { ttyFired += 1 }
+        type("@tty\r")
+        check(ttyFired == 1, "bare @tty fires (spawn a terminal)")
+        type("@tty with stray words\r")
+        check(ttyFired == 2, "@tty payload is ignored, still fires")
+        _ = lt.filter([0x03])
+        lt.agentArmed = false
+        type("@tty\r")
+        check(ttyFired == 2, "@tty shares the agent prompt gate (agentArmed)")
+        lt.agentArmed = true
+        _ = lt.filter([0x03])
+        check(LineTrigger.classify(Array("@tty".utf8))?.kind == .tty,
+              "classify maps @tty to its kind")
+        check(LineTrigger.matchFromScreenRow("➜  goty ✗ @tty")?.kind == .tty,
+              "screen-row @tty matches (history recall)")
+        check(LineTrigger.matchFromScreenRow("➜  ✗ echo \"@tty x\"") == nil,
+              "quoted @tty passes through")
+
         // History recall (↑/ctrl-r): the recalled text lives only on
         // the rendered screen, so the enter is swallowed pending a
         // cursor-row check (onPendingEnter) — it never reaches the

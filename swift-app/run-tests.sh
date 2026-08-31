@@ -158,10 +158,14 @@ run_guarded() {
     return $st
 }
 
-# All four entry points compile+link in parallel (each is one file);
-# they only share the read-only cache archive.
+# Entry points compile+link in parallel (each is one file); they only
+# share the read-only cache archive. DISABLED for now (2026-08-31):
+# settingstest pops the real Settings window and webuitest drives the
+# agent GUI in a real WKWebView — window-opening tests are off until
+# they can run without landing windows on the user's screen. The files
+# stay in tools/ for when they come back.
 FAILED=""
-for t in layouttest filestest settingstest aitest agenttest webuitest; do
+for t in layouttest filestest aitest agenttest; do
     if ! swiftc -parse-as-library -enable-bare-slash-regex \
             tools/$t.swift "${CC_FLAGS[@]}" "${LINK_FLAGS[@]}" \
             -o "$B"/goty-$t-test 2>"$B/$t.err"; then
@@ -174,7 +178,5 @@ done
 # Tests run sequentially (they share UserDefaults and real windows).
 run_guarded "$B"/goty-layouttest-test
 run_guarded "$B"/goty-filestest-test
-run_guarded "$B"/goty-settingstest-test
 run_guarded "$B"/goty-aitest-test
 run_guarded "$B"/goty-agenttest-test
-run_guarded "$B"/goty-webuitest-test

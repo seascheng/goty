@@ -264,7 +264,8 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         sidebar.setServersExpanded(!prefs.serversCollapsed)
         sidebar.setFoldedSpaces(Set(prefs.foldedSpaces))
         terminalArea.setTabStripVisible(prefs.sidebarCollapsed)
-        rightPanel.setWidth(prefs.rightPanelWidth)
+        rightPanel.adoptWidths(tool: prefs.rightPanelWidth,
+                               terminal: prefs.terminalPanelWidth)
         rightPanel.setCollapsed(!prefs.rightPanelVisible)
         rightPanel.activate(tab: prefs.rightPanelTab)
 
@@ -425,9 +426,8 @@ final class TerminalAreaView: NSView {
     private let stripBackdrop = StripBandView()
 
     /// The collapsed-sidebar tab surface (Ghostty-style top bar).
-    /// Lives INSIDE the region's top strip, below every overlay a
-    /// full-bleed presentation (the editor) puts above it — the
-    /// region map never moves.
+    /// Lives INSIDE the region's top strip, below every presented
+    /// overlay (editor, offline cover) — the region map never moves.
     let tabStrip = TabStripView()
 
     /// What the overlay slot currently holds — one slot, several owners
@@ -513,11 +513,14 @@ final class TerminalAreaView: NSView {
     }
 
 
-    /// Present a view covering the terminal region. `coversGrid` false
-    /// keeps the grid visible for translucent covers; `fullBleed` also
-    /// covers the top strip — the editor reaches the window's top edge.
+    /// Present a view covering the WHOLE terminal region, top strip
+    /// included — every presentation (the editor, the offline cover)
+    /// reaches the window's top edge. A cover inset below the strip
+    /// left the strip band (or the bare window backdrop, sidebar
+    /// expanded + translucent) visible above it — the "top bar that
+    /// ignores the page color" report.
     func presentOverlay(_ view: NSView, kind: OverlayKind = .offline,
-                        coversGrid: Bool = true, fullBleed: Bool = false) {
+                        coversGrid: Bool = true) {
         dismissOverlay()
         overlayKind = kind
         view.translatesAutoresizingMaskIntoConstraints = false
@@ -525,10 +528,10 @@ final class TerminalAreaView: NSView {
         NSLayoutConstraint.activate([
             view.leadingAnchor.constraint(equalTo: leadingAnchor),
             view.trailingAnchor.constraint(equalTo: trailingAnchor),
-            view.topAnchor.constraint(equalTo: topAnchor,
-                                      constant: fullBleed ? 0 : Self.topStrip),
+            view.topAnchor.constraint(equalTo: topAnchor),
             view.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
+
         overlay = view
         if coversGrid {
             paneGrid.isHidden = true
@@ -553,4 +556,6 @@ final class TerminalAreaView: NSView {
     }
 
     var isShowingOverlay: Bool { overlay != nil }
+    /// Test surface: the cover's frame after layout (full-region proof).
+    var overlayFrameForTest: NSRect? { overlay?.frame }
 }

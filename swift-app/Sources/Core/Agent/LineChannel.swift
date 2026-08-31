@@ -13,8 +13,10 @@ import Foundation
 /// never fired inside the lock, and unparseable lines COUNTED — never
 /// silently dropped.
 final class LineChannel {
-    /// Every parsed inbound frame, on the pane's reader thread.
-    var onFrame: (([String: Any]) -> Void)?
+    /// Every parsed inbound frame, on the pane's reader thread. The
+    /// Bool marks ring-replay frames: adapters must not drive TURN
+    /// state (working/thinking) from history — only from live frames.
+    var onFrame: (([String: Any], _ replay: Bool) -> Void)?
     /// Non-JSON output lines (agent stderr merges into the pane). These
     /// are COUNTED always; the callback lets adapters surface death
     /// messages instead of losing them to the garbage guard.
@@ -30,10 +32,8 @@ final class LineChannel {
     private(set) var framesRouted = 0
     private(set) var unparseableLines = 0
 
-    /// `replay` is accepted for symmetry with JSONRPCChannel (ring
-    /// reattach); unlike JSON-RPC there are no stale-response id
-    /// collisions to suppress — every replayed frame routes normally and
-    /// the adapter decides what history means.
+    /// Ring-reattach replay: frames carry the replay flag (see
+    /// onFrame) — history must not be mistaken for a live turn.
     func feed(_ bytes: [UInt8], replay: Bool = false) {
         lock.lock()
         var frames: [[String: Any]] = []
@@ -51,7 +51,7 @@ final class LineChannel {
         }
         lock.unlock()
         for frame in frames {
-            onFrame?(frame)
+            onFrame?(frame, replay)
         }
     }
 

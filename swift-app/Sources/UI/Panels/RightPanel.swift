@@ -38,10 +38,14 @@ final class RightPanelView: NSView, ThemeRefreshable {
     private var infoStack: NSStackView!
     private var filesView: FilesView!
     private var scmView: ScmPanelView!
+    private var terminalView: SideTerminalPanelView!
 
     static let defaultWidth: CGFloat = 260
     static let minWidth: CGFloat = 216
     static let maxWidth: CGFloat = 460
+    /// The Terminal tab's own default (a shell at tool width is a
+    /// sliver; spec 2026-08-30). Its width memory is per-tab.
+    static let terminalDefaultWidth: CGFloat = 400
 
     /// Build-time-baked colors, re-baked by the theme fan-out walk.
     private var infoLabels: [NSTextField] = []
@@ -64,15 +68,18 @@ final class RightPanelView: NSView, ThemeRefreshable {
         let infoTab = PanelTabButton(label: "Info", symbol: "info.circle")
         let gitTab = PanelTabButton(label: "Git", symbol: "arrow.triangle.branch")
         let filesTab = PanelTabButton(label: "Files", symbol: "folder.fill")
+        let terminalTab = PanelTabButton(label: "Terminal", symbol: "terminal")
         infoTab.onClick = { [weak self] in self?.show(tab: .info) }
         gitTab.onClick = { [weak self] in self?.show(tab: .git) }
         filesTab.onClick = { [weak self] in self?.show(tab: .files) }
+        terminalTab.onClick = { [weak self] in self?.show(tab: .terminal) }
         // Files first — it is what the panel is opened for; Info last,
         // the machine facts it shows are reference, not workflow.
         tabBar.addArrangedSubview(filesTab)
         tabBar.addArrangedSubview(gitTab)
+        tabBar.addArrangedSubview(terminalTab)
         tabBar.addArrangedSubview(infoTab)
-        panelTabs = [filesTab, gitTab, infoTab]
+        panelTabs = [filesTab, gitTab, terminalTab, infoTab]
         filesTab.isActive = true
 
         infoStack = makeInfoStack()
@@ -96,6 +103,11 @@ final class RightPanelView: NSView, ThemeRefreshable {
         }
         addSubview(scmView)
         scmView.isHidden = true
+
+        terminalView = SideTerminalPanelView()
+        terminalView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(terminalView)
+        terminalView.isHidden = true
 
         let hairline = HairlineView()
         hairline.translatesAutoresizingMaskIntoConstraints = false
@@ -122,6 +134,10 @@ final class RightPanelView: NSView, ThemeRefreshable {
             scmView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scmView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scmView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            terminalView.topAnchor.constraint(equalTo: tabBar.bottomAnchor, constant: 4),
+            terminalView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            terminalView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            terminalView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         installResizeHandle()
     }
@@ -139,24 +155,49 @@ final class RightPanelView: NSView, ThemeRefreshable {
     // MARK: - Public state
 
     private var storedWidth = RightPanelView.defaultWidth
+    /// The Terminal tab's width slot (spec 2026-08-30): a shell wants
+    /// more room than the tool tabs, and its drags must not move the
+    /// Files/Git width.
+    private var storedTerminalWidth = RightPanelView.terminalDefaultWidth
+    private var collapsedNow = false
 
-    /// Clamp-and-store; drag handle and preferences both come through
-    /// here. `onWidthChange` lets the owner persist the value.
-    var onWidthChange: ((CGFloat) -> Void)?
+    /// The width of whichever tab is showing.
+    private var activeWidth: CGFloat {
+        currentTab == .terminal ? storedTerminalWidth : storedWidth
+    }
+
+    /// Clamp-and-store into the ACTIVE tab's slot; drag handle and
+    /// preferences both come through here. `onWidthChange` carries the
+    /// tab so the owner persists into the matching preference.
+    var onWidthChange: ((RightPanelTab?, CGFloat) -> Void)?
 
     func setWidth(_ w: CGFloat) {
-        storedWidth = min(max(w, Self.minWidth), Self.maxWidth)
-        widthConstraint.constant = storedWidth
+        let clamped = min(max(w, Self.minWidth), Self.maxWidth)
+        if currentTab == .terminal {
+            storedTerminalWidth = clamped
+        } else {
+            storedWidth = clamped
+        }
+        if !collapsedNow { widthConstraint.constant = clamped }
         needsLayout = true
-        onWidthChange?(storedWidth)
+        onWidthChange?(currentTab, clamped)
     }
 
     /// Fully hidden = zero width (tty7 model; the terminal reclaims the
-    /// space). Uncollapsed restores the stored width.
+    /// space). Uncollapsed restores the active tab's width and reports
+    /// the reveal — the side terminal's creation gate re-runs with the
+    /// panel actually shown.
+    var onReveal: (() -> Void)?
+
     func setCollapsed(_ collapsed: Bool) {
-        widthConstraint.constant = collapsed ? 0 : storedWidth
+        let wasCollapsed = collapsedNow
+        collapsedNow = collapsed
+        widthConstraint.constant = collapsed ? 0 : activeWidth
         isHidden = collapsed
         needsLayout = true
+        // Only a real show fires the reveal (not the startup restore,
+        // whose wiring may not exist yet).
+        if !collapsed, wasCollapsed { onReveal?() }
     }
 
     var width: CGFloat { widthConstraint.constant }
@@ -222,6 +263,36 @@ final class RightPanelView: NSView, ThemeRefreshable {
     }
     var onTabChange: ((RightPanelTab) -> Void)?
 
+    // MARK: Side terminal (Terminal tab; spec 2026-08-30)
+
+    var onNewSideTerminal: (() -> Void)? {
+        didSet { terminalView.onNewTerminal = onNewSideTerminal }
+    }
+    var onCloseSideTerminal: (() -> Void)? {
+        didSet { terminalView.onCloseTerminal = onCloseSideTerminal }
+    }
+    var onCdSideTerminal: (() -> Void)? {
+        didSet { terminalView.onCdToSpace = onCdSideTerminal }
+    }
+    /// The click monitor's side-terminal leg: the live pane hosts.
+    var sideTerminalHosts: [any PaneHosting] { terminalView.visibleHosts }
+
+    func setTerminalPanes(_ entries: [(paneKey: HostKey, host: any PaneHosting,
+                                        fraction: NSRect)]) {
+        terminalView.setPanes(entries)
+    }
+    func setTerminalCwd(_ path: String?) { terminalView.setCwd(path) }
+    func setTerminalCd(enabled: Bool) { terminalView.setCdEnabled(enabled) }
+
+    /// Seed the two width memories from preferences (before the
+    /// persisted tab activates; setWidth would route by currentTab).
+    func adoptWidths(tool: CGFloat, terminal: CGFloat) {
+        storedWidth = min(max(tool, Self.minWidth), Self.maxWidth)
+        storedTerminalWidth = min(max(terminal, Self.minWidth), Self.maxWidth)
+        if !collapsedNow { widthConstraint.constant = activeWidth }
+        needsLayout = true
+    }
+
     // MARK: - Internals
 
     private var currentTab: RightPanelTab?
@@ -244,7 +315,10 @@ final class RightPanelView: NSView, ThemeRefreshable {
         infoStack.isHidden = tab != .info
         filesView.isHidden = tab != .files
         scmView.isHidden = tab != .git
-        let names: [RightPanelTab: String] = [.info: "Info", .git: "Git", .files: "Files"]
+        terminalView.isHidden = tab != .terminal
+        if !collapsedNow { widthConstraint.constant = activeWidth }
+        let names: [RightPanelTab: String] = [.info: "Info", .git: "Git",
+                                              .files: "Files", .terminal: "Terminal"]
         for case let button as PanelTabButton in tabBarSubviews() {
             button.isActive = names[tab] == button.labelText
         }

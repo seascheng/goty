@@ -23,6 +23,17 @@ enum Shell {
         argv.map(forceQuoted).joined(separator: " ")
     }
 
+    /// True for nil (a spawned shell) and the plain shell basenames —
+    /// matches what sessiond's foreground report spells at a prompt.
+    /// Lives here (Core) so the workspace coordinator can gate on it
+    /// without touching the UI layer's PaneHost.
+    static func isShellPromptCommand(_ command: String?) -> Bool {
+        guard let command, !command.isEmpty else { return true }
+        var base = (command as NSString).lastPathComponent
+        if base.hasPrefix("-") { base = String(base.dropFirst()) }
+        return ["zsh", "bash", "sh", "fish", "dash", "ash"].contains(base)
+    }
+
     /// THE process-execution seam: run one command locally (`/bin/sh -c`)
     /// or remotely (`ssh <host> <command>`), blocking, and collect
     /// stdout/stderr/exit status. Six near-identical hand-rolled

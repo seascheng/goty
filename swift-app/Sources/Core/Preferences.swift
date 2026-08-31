@@ -9,7 +9,7 @@ import Foundation
 
 /// Which right-panel tab is showing — layout chrome, so it persists.
 enum RightPanelTab: String {
-    case info, files, git
+    case info, files, git, terminal
 }
 /// store — never raw UserDefaults strings scattered in the delegate.
 final class AppPreferences {
@@ -24,6 +24,7 @@ final class AppPreferences {
         static let rightPanelVisible = "rightPanelVisible"
         static let rightPanelWidth = "rightPanelWidth"
         static let rightPanelTab = "rightPanelTab"
+        static let terminalPanelWidth = "terminalPanelWidth"
         static let daemonUpgradeDeclined = "daemonUpgradeDeclined"
         static let aiBaseUrl = "aiBaseUrl"
         static let aiModel = "aiModel"
@@ -46,6 +47,10 @@ final class AppPreferences {
         editorFontSize = (9...24).contains(ef) ? ef : 12.5
         let pw = defaults.double(forKey: Key.rightPanelWidth)
         rightPanelWidth = pw >= 216 ? pw : 260
+        // The Terminal tab wants more room than the tool tabs (a shell
+        // at tool width is a sliver); its own width memory.
+        let tw = defaults.double(forKey: Key.terminalPanelWidth)
+        terminalPanelWidth = tw >= 216 ? tw : 400
         let tab = defaults.string(forKey: Key.rightPanelTab)
         rightPanelTab = RightPanelTab(rawValue: tab ?? "") ?? .files
         daemonDeclines = (defaults.data(forKey: Key.daemonUpgradeDeclined))
@@ -77,6 +82,10 @@ final class AppPreferences {
     }
     var rightPanelWidth: Double {
         didSet { defaults.set(rightPanelWidth, forKey: Key.rightPanelWidth) }
+    }
+    /// The right panel's width while the Terminal tab is the active one.
+    var terminalPanelWidth: Double {
+        didSet { defaults.set(terminalPanelWidth, forKey: Key.terminalPanelWidth) }
     }
 
     /// Editor mono size (⌘+ / ⌘- / ⌘0 in the editor; clamped 9…24).

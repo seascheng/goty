@@ -40,6 +40,19 @@ func run() {
             }
         }
 
+        // — Offline cover: full-region, top strip included (the
+        //   "top bar ignores the page color" report) —
+        do {
+            let area = TerminalAreaView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
+            let cover = ServerStatusView(wsName: "box", phase: .unreachable) {}
+            area.presentOverlay(cover, kind: .offline)
+            area.layoutSubtreeIfNeeded()
+            check(area.overlayFrameForTest == area.bounds,
+                  "offline cover spans the whole region incl. the top strip (got \(area.overlayFrameForTest.map { NSStringFromRect($0) } ?? "nil"))")
+            area.dismissOverlay(kind: .offline)
+            check(area.overlayFrameForTest == nil, "dismiss clears the cover slot")
+        }
+
         // — Sidebar SERVERS fold: chevron hides the rows, not the header —
         do {
             let sidebar = SidebarView()
@@ -848,7 +861,7 @@ func run() {
     let editor = EditorPanelView()
     editor.onVisibilityChange = { visible in
         if visible {
-            wc.terminalArea.presentOverlay(editor, fullBleed: true)
+            wc.terminalArea.presentOverlay(editor)
         } else if wc.terminalArea.isShowingOverlay {
             wc.terminalArea.dismissOverlay()
         }
@@ -860,8 +873,9 @@ func run() {
           && abs(f.panel.width - beforeEditor.panel.width) < 0.5
           && abs(f.terminal.width - beforeEditor.terminal.width) < 0.5,
           "regions unchanged with editor presented")
-    // fullBleed: the editor's top IS the region's top — no titlebar-height
-    // margin above its header (user request 2026-08-22).
+    // Full-bleed by default now: the editor's top IS the region's top
+    // — no titlebar-height margin above its header (user request
+    // 2026-08-22; every presentation covers the top strip).
     check(editor.frame.minY < 0.5 && editor.frame.width > 400 && editor.frame.height > 400,
           "editor flush to top, real frame (\(editor.frame.width)x\(editor.frame.height))")
     // The PREVIEW path (user-reported crash): open a real markdown file,
@@ -1458,8 +1472,9 @@ func run() {
     }
     let repoSub = spaceTab("s", "/work/goty/swift-app")
     let repoWt = spaceTab("w", "/work/goty-wt2")
-    let plainDir = spaceTab("p", "/tmp/notes")
-    let spaceSecs = SpaceGrouping.sections(for: [repoSub, repoWt, plainDir],
+    let plainTab = spaceTab("p", "/tmp/notes")
+    let plainDir = "/tmp/notes"   // the '+'-menu block below wants the path
+    let spaceSecs = SpaceGrouping.sections(for: [repoSub, repoWt, plainTab],
                                             spaceRoot: { cwd in
         cwd.hasPrefix("/work/goty") ? "/work/goty" : nil
     })
@@ -1469,28 +1484,38 @@ func run() {
           "one git repo is one space: subdir + worktree share a section, "
               + "non-repo paths stay their own")
 
-    // Sidebar "+" menu: built pure, fired like the host picker.
-    // Flat shape: terminal + worktree + separator + one entry per ACP
-    // agent (AgentRegistry).
+    // Sidebar "+" menu: built pure, fired like the host picker. Every
+    // space gets the same list (2026-08-31): terminal + available ACP
+    // agents; a repo additionally offers the worktree entry.
     var plusDirs: [String?] = []
     var wtDirs: [String?] = []
     var agentDirs: [(key: String, dir: String?)] = []
     wc.sidebar.onNewTabInDir = { plusDirs.append($0) }
     wc.sidebar.onNewWorktreeInDir = { wtDirs.append($0) }
     wc.sidebar.onNewAgentSessionInDir = { agentDirs.append(($0, $1)) }
-    let plusMenu = wc.sidebar.spacePlusMenu(dir: repoDir)
+    wc.sidebar.agentAvailable = { _ in true }  // count assertions assume every agent listed
+    let plusMenu = wc.sidebar.spacePlusMenu(dir: repoDir, isGit: true)
     let agentCount = AgentRegistry.descriptors.count
     check(plusMenu.items.count == 3 + agentCount
           && plusMenu.items[0].title == "New Terminal"
           && plusMenu.items[1].title == "New Worktree…",
-          "space '+' menu: terminal + worktree + flat agent entries")
+          "repo space '+' menu: terminal + worktree + flat agent entries")
+    let plainMenu = wc.sidebar.spacePlusMenu(dir: plainDir, isGit: false)
+    check(plainMenu.items.count == 2 + agentCount
+          && plainMenu.items[0].title == "New Terminal"
+          && !plainMenu.items.contains { $0.title == "New Worktree…" },
+          "non-repo space '+' menu: same list minus the worktree entry")
     for item in plusMenu.items where item.action != nil {
         _ = NSApp.sendAction(item.action!, to: item.target, from: item)
     }
-    check(plusDirs == [repoDir] && wtDirs == [repoDir],
-          "menu items route to their callbacks")
-    check(agentDirs.count == agentCount
-          && agentDirs.allSatisfy { $0.dir == repoDir },
+    for item in plainMenu.items where item.action != nil {
+        _ = NSApp.sendAction(item.action!, to: item.target, from: item)
+    }
+    check(plusDirs == [repoDir, plainDir] && wtDirs == [repoDir],
+          "menu items route to their callbacks (worktree only from a repo)")
+    check(agentDirs.count == 2 * agentCount
+          && agentDirs.prefix(agentCount).allSatisfy { $0.dir == repoDir }
+          && agentDirs.suffix(agentCount).allSatisfy { $0.dir == plainDir },
           "agent entries route with the section dir")
 
     // RepoWatcher (FSEvents): local repos are event-driven — a file
@@ -1563,6 +1588,158 @@ func run() {
     check(rowKeys(panel).contains("row:untracked:wt-event.txt"),
           "event refetch reaches the panel via the cache-read path")
     ScmStore.shared.onRepoUpdated = nil
+
+    // Side terminal (right panel; spec 2026-08-30 §8) — the pane that
+    // belongs to no tab: decode, lifecycle, kill list, fg loop, cd gate.
+    // Fresh store; fg reports seeded straight in (no live daemon).
+    print("— side terminal: per-server panes in no tab —")
+    let auxURL = URL(fileURLWithPath:
+        NSTemporaryDirectory() + "goty-aux-\(UUID().uuidString).json")
+    // Old state.json (written before the field existed) decodes empty —
+    // default at decode = no migration pass, ever.
+    let oldAuxJSON = """
+    {"focusedIndex":0,"workspaces":[{"id":"\(UUID().uuidString)","name":"Local",
+    "tabs":[{"id":"t1","name":"1","panes":[{"id":"p1","cwd":"/tmp"}]}],
+    "focusedTabIndex":0}],"parked":[]}
+    """.data(using: .utf8)!
+    try? oldAuxJSON.write(to: auxURL, options: .atomic)
+    let auxStore = WorkspaceStore(sessionName: "goty", fileURL: auxURL)
+    let auxWs = auxStore.workspaces[0]
+    check(auxWs.auxTerminalPanes.isEmpty,
+          "old state.json without auxTerminalPanes decodes empty")
+    // v1's single-id field migrates into one full-rect pane at decode.
+    let legacyAuxURL = URL(fileURLWithPath:
+        NSTemporaryDirectory() + "goty-aux-\(UUID().uuidString).json")
+    let legacyAuxJSON = """
+    {"focusedIndex":0,"workspaces":[{"id":"\(auxWs.id.uuidString)","name":"Local",
+    "tabs":[{"id":"t1","name":"1","panes":[{"id":"p1","cwd":"/tmp"}]}],
+    "focusedTabIndex":0,"auxTerminalPaneId":"aux-legacy"}],"parked":[]}
+    """.data(using: .utf8)!
+    try? legacyAuxJSON.write(to: legacyAuxURL, options: .atomic)
+    let legacyPanes = WorkspaceStore(sessionName: "goty",
+                                     fileURL: legacyAuxURL).workspaces[0].auxTerminalPanes
+    check(legacyPanes.map(\.id) == ["aux-legacy"]
+              && legacyPanes[0].left == 0 && legacyPanes[0].top == 0
+              && legacyPanes[0].width == 1 && legacyPanes[0].height == 1,
+          "v1 auxTerminalPaneId migrates to one full-rect pane")
+    let auxCoord = WorkspaceCoordinator()
+    auxCoord.store = auxStore
+    // Idempotent ensure: one pane, stable across calls, persisted.
+    let auxId = auxCoord.ensureAuxTerminal() ?? "-never-"
+    check(auxCoord.ensureAuxTerminal() == auxId,
+          "ensureAuxTerminal is idempotent (second call kept the id)")
+    check(auxStore.workspaces[0].auxTerminalPanes.map(\.id) == [auxId],
+          "the pane id lands in the store")
+    check(WorkspaceStore(sessionName: "goty", fileURL: auxURL)
+            .workspaces[0].auxTerminalPanes.map(\.id) == [auxId],
+          "aux panes round-trip through state.json")
+    // Split: same cell math as the center; the new pane inherits the
+    // SOURCE pane's live cwd (applyCwds keeps it current).
+    auxCoord.applyCwds(wsId: auxWs.id, byRuntimeId: [
+        HostKey(workspace: auxWs.id, pane: auxId).runtimeId: "/work"
+    ])
+    check(auxStore.workspaces[0].auxTerminalPanes[0].cwd == "/work",
+          "the daemon list report lands on the aux pane's cwd")
+    auxCoord.splitAuxTerminal(wsId: auxWs.id, paneId: auxId,
+                              vertical: false, after: true)
+    var panes = auxStore.workspaces[0].auxTerminalPanes
+    let splitId = panes.last?.id ?? "-never-"
+    check(panes.count == 2 && panes[0].left == 0 && panes[0].width == 1
+              && panes[1].left == 1 && panes[1].width == 1,
+          "split right halves the cell (got \(panes.map { ($0.left, $0.width) }))")
+    check(panes[1].cwd == "/work",
+          "the new pane inherits the source pane's cwd")
+    // Kill list: the tabs' panes PLUS every aux pane (they die with
+    // their server even though no tab walk ever sees them).
+    let killIds = auxCoord.paneRuntimeIds(of: auxStore.workspaces[0])
+    check(killIds == [HostKey(workspace: auxWs.id, pane: "p1").runtimeId,
+                      HostKey(workspace: auxWs.id, pane: auxId).runtimeId,
+                      HostKey(workspace: auxWs.id, pane: splitId).runtimeId],
+          "kill list includes every aux pane (got \(killIds))")
+    // fg loop: the aux panes join identity tracking without owning a tab.
+    var identityHits: [HostKey] = []
+    auxCoord.onForegroundChange = { identityHits = $0.map(\.0) }
+    auxCoord.focusPane(wsId: auxWs.id, paneId: "p1")   // seeds the runtime entry
+    auxCoord.applyForegrounds([(auxWs.id, [auxId: "zsh", splitId: "vim"], [:])])
+    check(identityHits == [HostKey(workspace: auxWs.id, pane: auxId),
+                           HostKey(workspace: auxWs.id, pane: splitId)],
+          "fg reports on the aux panes yield identity changes")
+    auxCoord.applyForegrounds([(auxWs.id, [auxId: "zsh", splitId: "zsh"], [:])])
+    check(identityHits == [HostKey(workspace: auxWs.id, pane: splitId)],
+          "a second fg change re-signals (every change, not just identity)")
+    // The @omp/@ai resolvers must see the side panes too (a feed that
+    // resolves nil leaves @ai unarmed on the side terminal).
+    check(auxCoord.aiTarget(for: HostKey(workspace: auxWs.id, pane: auxId))?.cwd == "/work",
+          "aiTarget resolves an aux pane (the @ai arming feed)")
+    check(auxCoord.cwd(ofPane: auxId, in: auxWs.id) == "/work",
+          "cwd(ofPane:) resolves aux panes (@omp's launch dir)")
+    // Exit: paneExited routes an aux pane to its own teardown — that
+    // pane leaves, siblings and tabs stay.
+    auxCoord.paneExited(wsId: auxWs.id, paneId: splitId)
+    panes = auxStore.workspaces[0].auxTerminalPanes
+    check(panes.map(\.id) == [auxId] && auxStore.workspaces[0].tabs.count == 1,
+          "one aux exit removes just that pane and leaves tabs alone")
+    auxCoord.paneExited(wsId: auxWs.id, paneId: auxId)
+    check(auxStore.workspaces[0].auxTerminalPanes.isEmpty,
+          "the last aux exit empties the terminal")
+    check(WorkspaceStore(sessionName: "goty", fileURL: auxURL)
+            .workspaces[0].auxTerminalPanes.isEmpty,
+          "emptied aux panes persist")
+    // Close-all (the strip button): ensure again, close, empty — and
+    // STAYS empty (the auto-create gate's closed flag; the "close
+    // respawns a terminal" report).
+    _ = auxCoord.ensureAuxTerminal()
+    auxCoord.closeAuxTerminal(wsId: auxWs.id)
+    check(auxStore.workspaces[0].auxTerminalPanes.isEmpty,
+          "closeAuxTerminal clears every pane")
+    check(auxCoord.auxTerminalClosed(wsId: auxWs.id),
+          "an explicit close gates auto-create (stays closed)")
+    _ = auxCoord.ensureAuxTerminal()
+    check(!auxCoord.auxTerminalClosed(wsId: auxWs.id),
+          "reopening un-gates auto-create")
+    // Header + cd chip over the FOCUSED pane (multi-split): which pane
+    // the cwd label speaks for, the prompt gate, the injection bytes.
+    auxCoord.splitAuxTerminal(wsId: auxWs.id,
+                              paneId: auxCoord.ensureAuxTerminal() ?? "-never-",
+                              vertical: true, after: true)
+    var aux2 = auxStore.workspaces[0].auxTerminalPanes
+    let auxTop = aux2[0].id, auxBottom = aux2[1].id
+    check(auxCoord.focusedAuxPane(of: auxStore.workspaces[0])?.id == auxTop,
+          "focus falls back to the first pane before any click")
+    auxCoord.focusAuxPane(wsId: auxWs.id, paneId: auxBottom)
+    check(auxCoord.focusedAuxPane(of: auxStore.workspaces[0])?.id == auxBottom,
+          "focusAuxPane switches the header's pane")
+    check(auxCoord.auxTerminalAtPrompt(wsId: auxWs.id),
+          "no fg report reads as a prompt (chip enabled)")
+    auxCoord.applyForegrounds([(auxWs.id, [auxBottom: "vim"], [:])])
+    check(!auxCoord.auxTerminalAtPrompt(wsId: auxWs.id),
+          "a foreground program gates the chip off")
+    auxCoord.applyForegrounds([(auxWs.id, [auxBottom: "-zsh"], [:])])
+    check(auxCoord.auxTerminalAtPrompt(wsId: auxWs.id),
+          "back at the shell prompt re-enables the chip")
+    check(WorkspaceCoordinator.auxCdInjection(to: "/work/a b") == "\u{15}cd '/work/a b'\r",
+          "cd injection: clear-line + quoted path + enter")
+    auxCoord.paneExited(wsId: auxWs.id, paneId: auxBottom)
+    check(auxCoord.focusedAuxPane(of: auxStore.workspaces[0])?.id == auxTop,
+          "the focused pane's exit falls focus back to pane 0")
+    auxCoord.paneExited(wsId: auxWs.id, paneId: auxTop)
+    check(auxStore.workspaces[0].auxTerminalPanes.isEmpty
+              && auxCoord.auxTerminalClosed(wsId: auxWs.id),
+          "the last pane's exit closes the terminal (no auto-respawn)")
+    try? FileManager.default.removeItem(atPath: auxURL.path)
+    try? FileManager.default.removeItem(atPath: legacyAuxURL.path)
+
+    // The prompt predicate (PaneHost's @ai arming gate): no report /
+    // shell basenames pass (prompt is the default assumption),
+    // programs don't.
+    check(Shell.isShellPromptCommand(nil) && Shell.isShellPromptCommand("")
+              && Shell.isShellPromptCommand("-zsh")
+              && Shell.isShellPromptCommand("/bin/zsh"),
+          "no report, login dash and shell basenames read as a prompt")
+    check(!Shell.isShellPromptCommand("vim")
+              && !Shell.isShellPromptCommand("/usr/local/bin/node"),
+          "foreground programs do not")
+    try? FileManager.default.removeItem(atPath: auxURL.path)
 
     panel.removeFromSuperview()
     try? FileManager.default.removeItem(atPath: mdFixture)

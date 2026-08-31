@@ -28,13 +28,14 @@ final class RemoteDaemonLink {
     /// not re-run the boot pipeline.
     private(set) var daemon: SessionDaemon?
     private(set) var remoteShell: String = "/bin/bash"
-    /// Login-shell environment of the remote host, captured once per
-    /// boot. Agent panes spawn the CLI DIRECTLY (no login shell), so the
+    /// The remote host's user-shell environment, captured once per boot
+    /// through an interactive login shell (see captureHostProfile).
+    /// Agent panes spawn the CLI DIRECTLY (no login shell), so the
     /// process env comes from THIS dictionary — the daemon's own env is
-    /// a non-login ssh default whose PATH never sees ~/.local/bin, nvm…
+    /// a non-login ssh default whose PATH never sees ~/.bun/bin, nvm…
     private(set) var remoteEnvironment: [String: String] = [:]
-    /// Which agent CLIs exist on the host, probed once per boot with one
-    /// ssh exec (AgentRegistry binaries). Menus and openAgentSession read it.
+    /// Which agent CLIs exist on the host, probed once per boot in the
+    /// spawn env (AgentRegistry binaries). Menus and openAgentSession read it.
     private(set) var agentAvailability: [String: Bool] = [:]
     /// Capability the remote daemon reported at handshake. Owners use
     /// it to remember per-host upgrade declines (one nag per build).
@@ -156,18 +157,25 @@ final class RemoteDaemonLink {
         // singleton, so an upgrade never replaces a running one):
         // panes work, agent identity/status silently don't. Park in
         // `outdated` — the owner decides between restart and degraded.
-        guard capability >= SessionDaemon.expectedCapability else {
-            NSLog("remote-link %@: daemon capability %d < %d — outdated",
-                  host, capability, SessionDaemon.expectedCapability)
-            self.daemon = daemon
-            state = .outdated
-            return
-        }
+        // Host profile BEFORE the capability gate: probing agents is
+        // ssh knowledge, not daemon knowledge. The outdated path used
+        // to return above it — a remembered upgrade-decline then ran
+        // silent acceptOutdated with an EMPTY availability table:
+        // empty + menus and a false "omp 未安装" on every open
+        // (2026-08-31, host 5090 @ capability 2).
         if let shell = ssh("echo $SHELL").split(separator: "\n").last,
            shell.hasPrefix("/") {
             remoteShell = String(shell.trimmingCharacters(in: .whitespaces))
         }
         captureHostProfile()
+        guard capability >= SessionDaemon.expectedCapability else {
+            NSLog("remote-link %@: daemon capability %d < %d — outdated (agents %@)",
+                  host, capability, SessionDaemon.expectedCapability,
+                  agentAvailability.filter { $0.value }.keys.sorted().joined(separator: ","))
+            self.daemon = daemon
+            state = .outdated
+            return
+        }
         retryDelay = 1
         self.daemon = daemon
         state = .ready
@@ -175,12 +183,20 @@ final class RemoteDaemonLink {
               agentAvailability.filter { $0.value }.keys.sorted().joined(separator: ","))
     }
 
-    /// One ssh exec pair: the login-shell env (agent panes spawn the CLI
+    /// Three ssh execs: the user-shell env (agent panes spawn the CLI
     /// directly, so THIS becomes the process env) and which agent CLIs
-    /// exist on the host. Blocking ssh — the boot queue is the right
-    /// place; ready is only reported once the profile is known.
+    /// exist on the host — probed in that same env. Blocking ssh — the
+    /// boot queue is the right place; ready is only reported once the
+    /// profile is known.
     private func captureHostProfile() {
-        let envOut = ssh("\(Shell.forceQuoted(remoteShell)) -l -c env 2>/dev/null || env")
+        // Interactive beats plain login: version managers and bun add
+        // their bins in the INTERACTIVE half of .bashrc/.zshrc, so a
+        // plain `-l -c` capture never sees them (bun's ~/.bun/bin hid a
+        // host's omp from login too). stdin is /dev/null so an rc that
+        // reads input fails fast instead of hanging the boot queue; the
+        // chain degrades to plain login, then raw env (dash has no -i).
+        let envOut = ssh("\(Shell.forceQuoted(remoteShell)) -l -i -c env </dev/null 2>/dev/null "
+            + "|| \(Shell.forceQuoted(remoteShell)) -l -c env 2>/dev/null || env")
         var parsed: [String: String] = [:]
         for line in envOut.split(separator: "\n") {
             guard let eq = line.firstIndex(of: "=") else { continue }
@@ -188,8 +204,40 @@ final class RemoteDaemonLink {
         }
         if !parsed.isEmpty { remoteEnvironment = parsed }
 
+        // The rc capture is best effort: interactive init helpers can
+        // flake under boot-time ssh load (observed 2026-08-31 — a
+        // host's ~/.bun/bin vanished from a captured PATH while omp sat
+        // in it), so FLOOR the PATH with the standard tool-manager bins
+        // that exist on disk. Plain `ls -d` keeps this shell-syntax
+        // free; extras go in front, deduped. Spawn env and probe both
+        // read THIS merged PATH.
+        if let captured = remoteEnvironment["PATH"] {
+            let components = captured.split(separator: ":").map(String.init)
+            let listed = ssh("ls -d \"$HOME/.local/bin\" \"$HOME/.cargo/bin\" "
+                + "\"$HOME/.bun/bin\" \"$HOME/.ante/bin\" \"$HOME/go/bin\" \"$HOME/bin\" "
+                + "/usr/local/bin /opt/homebrew/bin /home/linuxbrew/.linuxbrew/bin 2>/dev/null")
+            let extras = listed.split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !components.contains($0) }
+            if !extras.isEmpty {
+                remoteEnvironment["PATH"] = (extras + components).joined(separator: ":")
+            }
+        }
+
+        // Probe in the SPAWN env: availability must answer "will the
+        // pane's `sh -c 'exec omp …'` resolve the binary" — so it runs
+        // against the captured PATH, never ssh's non-login default (the
+        // false "omp 未安装"). Raw fallback when nothing was captured.
+        // One name per lookup: dash's `command -v` with several names
+        // reports ONLY the first hit (2026-08-31, host 5090 — omp found,
+        // claude/codex silently swallowed). `--` dropped too: dash.
         let binaries = AgentRegistry.descriptors.map(\.binary).joined(separator: " ")
-        let probe = ssh("command -v -- \(binaries) 2>/dev/null; true")
+        let script = "for b in \(binaries); do p=$(command -v \"$b\" 2>/dev/null) "
+            + "&& printf '%s\\n' \"$p\"; done; true"
+        let capturedPath = remoteEnvironment["PATH"] ?? ""
+        let probe = !capturedPath.isEmpty
+            ? ssh("env PATH=\(Shell.forceQuoted(capturedPath)) sh -c \(Shell.forceQuoted(script))")
+            : ssh(script)
         let found = Set(probe.split(separator: "\n").map(String.init))
         for descriptor in AgentRegistry.descriptors {
             agentAvailability[descriptor.key] =
@@ -261,13 +309,30 @@ final class RemoteDaemonLink {
     /// Kills by the content-hashed binary path (unique per build), then
     /// re-runs the boot pipeline: the singleton socket is free now, so
     /// the fresh instance binds and reports the current capability.
+    ///
+    /// The kill WAITS: TERM → poll → KILL. Firing pkill and booting
+    /// immediately let the fresh instance die on the still-held socket
+    /// while the old build kept serving its old capability — the
+    /// upgrade dialog then looped forever (2026-08-31, host 5090).
+    /// `pkill -f` would also match THIS command's own remote shell (the
+    /// pattern is a substring of its command line) and cut the ssh
+    /// session mid-kill — hence the `[g]` character-class trick.
     func upgradeDaemon() {
         queue.async { [weak self] in
             guard let self, self.state == .outdated, !self.stopping else { return }
             self.state = .connecting
             self.daemon = nil
             if let binPath = self.remoteBinPath {
-                _ = self.ssh("pkill -f " + Shell.forceQuoted(binPath) + "; true")
+                // [g]oty-…: the regex matches the process argv, but THIS
+                // command's own argv (which contains the literal bracket
+                // form) never matches — pkill does not kill its own
+                // shell, so the kill sequence always completes.
+                let name = (binPath as NSString).lastPathComponent
+                let stem = "[" + name.prefix(1) + "]" + name.dropFirst(1)
+                _ = self.ssh("pkill -f '\(stem)'; for i in 1 2 3 4 5 6 7 8"
+                    + " 9 10; do pgrep -f '\(stem)' >/dev/null || break;"
+                    + " [ $i -lt 8 ] || pkill -9 -f '\(stem)'; sleep 0.3;"
+                    + " done; true")
             }
             self.teardownForward()
             self.retryDelay = 1

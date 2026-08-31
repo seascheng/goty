@@ -45,6 +45,11 @@ final class JSONRPCChannel {
     /// thread/start) without re-running a handshake against a process
     /// that already owns them.
     var onOrphanResult: (([String: Any]) -> Void)?
+    /// A replayed client→server request (ring_input panes re-stream the
+    /// user's own session/prompt wire). This is the ONLY record of the
+    /// user's side of a conversation for a reattaching adapter — live ACP
+    /// updates never echo prompts. Fires outside the lock, replay only.
+    var onReplayRequest: ((Int, String, [String: Any]) -> Void)?
 
     private let lock = NSLock()
     private var nextID = 1
@@ -70,6 +75,7 @@ final class JSONRPCChannel {
         var notified: [(String, [String: Any])] = []
         var unparseable: [String] = []
         var orphanResults: [[String: Any]] = []
+        var replayRequests: [(Int, String, [String: Any])] = []
         lock.lock()
         for line in splitter.feed(bytes) {
             if recentOut.contains(line) { continue }
@@ -87,6 +93,12 @@ final class JSONRPCChannel {
                     routed.append((id, method, params))
                 } else {
                     notified.append((method, params))
+                }
+                // Replayed client→server requests are the only wire record
+                // of the user's own prompts (ring_input panes) — surface
+                // them for transcript rebuild, never for live completion.
+                if replay {
+                    replayRequests.append((message["id"] as? Int ?? 0, method, params))
                 }
                 continue
             }
@@ -120,6 +132,7 @@ final class JSONRPCChannel {
         for line in unparseable { onUnparseable?(line) }
         for (method, params) in notified { onNotification?(method, params) }
         for (id, method, params) in routed { onRequest?(id, method, params) }
+        for (id, method, params) in replayRequests { onReplayRequest?(id, method, params) }
         for result in orphanResults { onOrphanResult?(result) }
         for (result, completion) in fired { completion(result) }
     }

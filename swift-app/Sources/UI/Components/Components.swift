@@ -114,6 +114,16 @@ final class IconButton: NSView, ThemeRefreshable {
     var pointSize: CGFloat = 13 { didSet { applyIcon() } }
     var symbol: String = "plus" { didSet { applyIcon() } }
 
+    /// Gate + dim — ChromeButton's contract on an icon tile: a gated
+    /// action looks gated (0.4 alpha) and swallows the click. Default
+    /// on; tiles were unconditional until the side-terminal cd tile.
+    var isEnabled = true {
+        didSet {
+            guard isEnabled != oldValue else { return }
+            imageView.alphaValue = isEnabled ? 1 : 0.4
+        }
+    }
+
     private let imageView = NSImageView()
     private var hovered = false
     private var ownTracking: NSTrackingArea?
@@ -179,6 +189,7 @@ final class IconButton: NSView, ThemeRefreshable {
 
     override func mouseEntered(with event: NSEvent) {
         hovered = true
+        guard isEnabled else { return }   // no affordance on a gated tile
         layer?.backgroundColor = Chrome.theme.hoverFill.cgColor
     }
 
@@ -187,7 +198,10 @@ final class IconButton: NSView, ThemeRefreshable {
         layer?.backgroundColor = nil
     }
 
-    override func mouseDown(with event: NSEvent) { onClick?() }
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        onClick?()
+    }
 
     /// Standard constructor: themed tint, explicit glyph size, action.
     static func make(_ symbol: String, pointSize: CGFloat = 13,

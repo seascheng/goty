@@ -18,6 +18,12 @@ enum ClaudeSessionStore {
 
     /// Sessions newest-first; `cwd` filters by working directory when
     /// the pane knows one (prefix match — claude stores absolute paths).
+    ///
+    /// Format drift (claude 2.1.236): project files no longer START with
+    /// a system/init line — `mode`/`file-history-snapshot` records lead,
+    /// and `sessionId`/`cwd` ride on EVERY line instead. So scan the
+    /// first lines for ANY record carrying them instead of demanding
+    /// init first.
     static func summaries(cwd: String?) -> [AgentSessionSummary] {
         let fm = FileManager.default
         guard let dirs = try? fm.contentsOfDirectory(at: root,
@@ -28,27 +34,44 @@ enum ClaudeSessionStore {
         for dir in dirs {
             let files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
             for file in files where file.pathExtension == "jsonl" {
-                guard let first = readFirstLine(file) ,
-                      let data = first.data(using: .utf8),
-                      let json = try? JSONSerialization.jsonObject(with: data),
-                      let frame = json as? [String: Any],
-                      frame["type"] as? String == "system",
-                      frame["subtype"] as? String == "init" else {
-                    continue
-                }
-                let sid = (frame["session_id"] as? String) ?? stem(of: file)
-                let frameCwd = frame["cwd"] as? String
+                guard let (sid, frameCwd) = Self.identify(file) else { continue }
                 if let cwd, let frameCwd, !frameCwd.hasPrefix(cwd) { continue }
                 let mtime = (try? file.resourceValues(forKeys: [.contentModificationDateKey])
                     .contentModificationDate)?.timeIntervalSince1970
                 out.append(AgentSessionSummary(
                     sessionId: sid, cwd: frameCwd,
-                    title: (frame["model"] as? String).map { "claude · \($0)" },
+                    title: nil,
                     updatedAt: mtime.map { String(Int($0)) },
                     messageCount: nil))
             }
         }
         return out.sorted { (Int($0.updatedAt ?? "") ?? 0) > (Int($1.updatedAt ?? "") ?? 0) }
+    }
+
+    /// (sessionId, cwd) from a session file's first lines — tolerates
+    /// both the old init-first layout and the new lead-with-mode one.
+    private static func identify(_ file: URL) -> (String, String?)? {
+        guard let stream = InputStream(url: file) else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var reader = BufferedLineReader(stream: stream)
+        var sid: String?
+        var cwd: String?
+        var scanned = 0
+        while sid == nil || cwd == nil, scanned < 20,
+              let line = reader.nextLine() {
+            scanned += 1
+            guard let data = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            if sid == nil, let s = json["sessionId"] as? String { sid = s }
+            if sid == nil, json["type"] as? String == "system",
+               json["subtype"] as? String == "init" {
+                sid = json["session_id"] as? String
+            }
+            if cwd == nil { cwd = json["cwd"] as? String }
+        }
+        guard let sid else { return nil }
+        return (sid, cwd)
     }
 
     /// All frames of one session, oldest first. Unparseable lines are

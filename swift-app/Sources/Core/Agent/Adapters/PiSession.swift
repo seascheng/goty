@@ -39,7 +39,7 @@ final class PiSession: AgentSessioning {
         self.daemon = params.daemon
         self.grid = AgentPaneDefaults.grid
         channel.onOutbound = { [weak self] in self?.pane?.sendInput($0) }
-        channel.onFrame = { [weak self] frame in
+        channel.onFrame = { [weak self] frame, _ in
             self?.handleFrame(frame)
         }
     }

@@ -19,6 +19,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// One ssh-installed daemon per remote workspace; survives GUI restart
     /// by design (the remote side keeps running when a link goes away).
     var remoteLinks: [UUID: RemoteDaemonLink] = [:]
+    /// Session-level loop guard: one upgrade prompt per (workspace,
+    /// capability). An upgrade that STILL lands on the same capability
+    /// degrades silently instead of re-prompting forever (2026-08-31
+    /// upgrade-dialog storm on host 5090).
+    var outdatedPrompted: [UUID: Int] = [:]
     /// Local event monitors must be retained: the returned token is an
     /// object — dropping it releases the monitor (events then never reach us).
     private var clickMonitor: Any?
@@ -198,14 +203,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Region wiring lost in the 2bece5f refactor (collapse button
         // was dead, width/tab changes never persisted): restored.
-        rightPanel.onWidthChange = { [weak self] w in
-            self?.prefs.rightPanelWidth = w
+        rightPanel.onWidthChange = { [weak self] tab, w in
+            guard let self else { return }
+            // Per-tab width memory (spec 2026-08-30): the Terminal
+            // slot must not ride drags made while another tab shows.
+            if tab == .terminal { self.prefs.terminalPanelWidth = w }
+            else { self.prefs.rightPanelWidth = w }
         }
         rightPanel.onCollapseViaTabs = { [weak self] in
             self?.wc.toggleRightPanel()
         }
         rightPanel.onTabChange = { [weak self] tab in
-            self?.prefs.rightPanelTab = tab
+            guard let self else { return }
+            self.prefs.rightPanelTab = tab
+            // Showing the Terminal tab is creation INTENT — re-run the
+            // gate (updateRightPanel refreshes the side terminal).
+            self.updateRightPanel()
+        }
+        rightPanel.onReveal = { [weak self] in
+            self?.updateRightPanel()   // panel re-shown: the gate re-runs
+        }
+        rightPanel.onNewSideTerminal = { [weak self] in
+            guard let self else { return }
+            // An idempotent ensure (the pane already exists) fires no
+            // structure event — mount here so the button always ends
+            // with a host on screen.
+            if self.coordinator.ensureAuxTerminal() != nil {
+                self.updateRightPanel()
+            }
+        }
+        rightPanel.onCloseSideTerminal = { [weak self] in
+            guard let self, let ws = self.coordinator.store?.focused else { return }
+            if Dialog.confirm(title: "关闭侧边终端？",
+                              detail: "结束该服务器上的侧边终端会话（包含所有分屏）。",
+                              action: "关闭") {
+                self.coordinator.closeAuxTerminal(wsId: ws.id)
+            }
+        }
+        // cd chip: inject into the FOCUSED side pane (prompt-gated on
+        // the coordinator side; the chip renders disabled otherwise).
+        rightPanel.onCdSideTerminal = { [weak self] in
+            self?.cdSideTerminalToCurrentSpace()
         }
 
         startPollingAndWatchers()
@@ -230,13 +268,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self, let window = self.window, event.window === window else { return event }
             let location = event.locationInWindow
-            if let host = self.wc?.terminalArea.paneGrid.visibleHosts
-                .first(where: {
+            func hit(in hosts: [any PaneHosting]) -> (any PaneHosting)? {
+                hosts.first {
                     $0.frame.contains($0.superview?.convert(location, from: nil) ?? .zero)
-                }) {
+                }
+            }
+            // The side panes keep their own focus field (center
+            // focusPane would point the center's active-pane resolvers
+            // at a pane no tab owns).
+            if let host = hit(in: self.wc?.terminalArea.paneGrid.visibleHosts ?? []) {
                 host.focusAsPane()
                 self.coordinator.focusPane(wsId: host.hostKey.workspace,
                                            paneId: host.hostKey.pane)
+            } else if let host = hit(in: self.wc?.rightPanel.sideTerminalHosts ?? []) {
+                host.focusAsPane()
+                self.coordinator.focusAuxPane(wsId: host.hostKey.workspace,
+                                              paneId: host.hostKey.pane)
             }
             return event
         }
@@ -307,7 +354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.onVisibilityChange = { [weak self] visible in
             guard let self, let area = self.wc?.terminalArea else { return }
             if visible {
-                area.presentOverlay(panel, kind: .editor, fullBleed: true)   // flush to the window top
+                area.presentOverlay(panel, kind: .editor)   // flush to the window top
             } else {
                 area.dismissOverlay(kind: .editor)
                 // Back to the terminal — the user just left the editor.
@@ -461,6 +508,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         host.onAgentState = { [weak self] host, state in
             self?.coordinator.agentStateUpdated(wsId: ws.id, paneId: host.paneId, state: state)
         }
+        wireTerminalTriggers(host: host, ws: ws)
+        hostPool[key] = host
+        return host
+    }
+
+    /// One side-terminal pane's host (right panel; spec 2026-08-30): a
+    /// plain PaneHost — same attach/replay/reconnect story as any center
+    /// pane — just addressed by its aux pane id and fed to the panel's
+    /// grid by updateRightPanel instead of the center grid. No link-nil
+    /// guard: parity with center terminal panes (a nil target defers the
+    /// session start; the reconnect flow retries when the link lands).
+    func makeAuxTerminalHost(ws: WorkspaceState, paneId: String,
+                             spawnCwd: String?, gapp: ghostty_app_t) -> PaneHost? {
+        let key = HostKey(workspace: ws.id, pane: paneId)
+        if let existing = hostPool[key] as? PaneHost { return existing }
+        let wsId = ws.id
+        let host = PaneHost(app: gapp, paneId: paneId, hostKey: key, cwd: spawnCwd,
+                            command: nil) { [weak self] in
+            self?.paneDaemonTarget(wsId: wsId, command: nil)
+        }
+        host.onConnected = { [weak self] _ in
+            self?.coordinator.workspaceConnected(ws.id)
+        }
+        host.onDisconnected = { [weak self] _ in
+            guard ws.isRemote else { return }
+            self?.coordinator.workspaceDisconnected(ws.id)
+        }
+        // The pane belongs to no TabState — exit reports route straight
+        // to the aux teardown (what paneExited's aux branch does).
+        host.onExited = { [weak self] _ in
+            self?.coordinator.auxTerminalExited(wsId: wsId, paneId: paneId)
+        }
+        host.onPaneGone = { [weak self] _ in
+            self?.coordinator.auxTerminalExited(wsId: wsId, paneId: paneId)
+        }
+        // Same @ai / @omp story as a center terminal pane (spec §4): the
+        // side terminal was the one pane family without it — the feed
+        // resolving nil left @ai unarmed and @omp firing into nothing.
+        wireTerminalTriggers(host: host, ws: ws)
+        hostPool[key] = host
+        return host
+    }
+
+    /// The @ai / @omp / @tty wiring every terminal PaneHost needs,
+    /// center or side: the execution-target feed (updateAITrigger
+    /// requires it non-nil to arm @ai), the AI card's task start, and
+    /// the spawn triggers' launches (an agent space or a terminal tab
+    /// in the center, both at the pane's live cwd).
+    private func wireTerminalTriggers(host: PaneHost, ws: WorkspaceState) {
+        let key = host.hostKey
         host.coordinatorFeed = { [weak self] in
             self?.coordinator.aiTarget(for: key)
         }
@@ -474,9 +571,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ?? host.initialCwd
             self.openAgentSession(agent: agent, cwd: cwd, initialPrompt: prompt)
         }
+        host.onTTYTrigger = { [weak self] host in
+            guard let self else { return }
+            let cwd = self.coordinator.cwd(ofPane: host.hostKey.pane,
+                                           in: host.hostKey.workspace)
+                ?? host.initialCwd
+            self.coordinator.newTab(cwd: cwd)
+        }
         host.refreshAITrigger()
-        hostPool[key] = host
-        return host
     }
 
     /// Persistent host for one GUI agent session pane (ACP over sessiond).
@@ -500,9 +602,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let session = descriptor.make(AgentPaneParams(paneId: key.runtimeId,
                                                       cwd: pane.cwd,
                                                       environment: environment,
-                                                      daemon: daemon))
+                                                      daemon: daemon,
+                                                      restoredSessionId: pane.agentSessionId))
         let host = AgentPaneHost(key: key, session: session, agentLabel: descriptor.label)
-        host.fileIndexHost = ws.sshHost
+        host.daemonRef = daemon
+        host.onSessionId = { [weak self] sid in
+            self?.coordinator.setAgentSessionId(paneId: pane.id, sessionId: sid)
+        }
         host.onTurnState = { [weak self] state in
             guard let self else { return }
             let activity: AgentActivity
@@ -514,6 +620,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.coordinator.agentStateUpdated(wsId: ws.id, paneId: pane.id,
                                                state: activity)
+        }
+        // Live session title → the tab's display name (manual renames
+        // still outrank it — see TabState.agentTitle).
+        host.onSessionTitle = { [weak self] title in
+            self?.coordinator.setAgentTabTitle(paneId: pane.id, name: title)
         }
         return host
     }
@@ -530,13 +641,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func updateRightPanel() {
         guard let store = coordinator.store,
               let ws = store.focused else { return }
-        let pane = coordinator.activePane(of: ws)
-        let cwd = pane?.cwd
-        let host = ws.sshHost
-        let spaceRoot = cwd.flatMap { GitStatusStore.shared.spaceRoot(for: $0, host: host) } ?? cwd
+        let cwd = coordinator.activePane(of: ws)?.cwd
+        let spaceRoot = currentSpaceRoot()
         wc.rightPanel.setSystemTarget(host: ws.isRemote ? ws.sshHost : nil)
         wc.rightPanel.setDirectory(spaceRoot, source: FileSources.source(for: ws))
         wc.rightPanel.setScmTarget(cwd: cwd, host: ws.sshHost)
+        refreshSideTerminal(ws: ws, spaceRoot: spaceRoot)
+    }
+
+    // MARK: Side terminal (right panel; spec 2026-08-30)
+
+    /// Mount the focused workspace's side terminal into the panel. The
+    /// ONLY intent-gated step is creation — no pane exists until the
+    /// user actually shows the Terminal tab (a shell per server is a
+    /// real process; flipping past the tab must not materialize one),
+    /// and an explicitly closed terminal stays closed until the user
+    /// reopens it. Once created, the hosts ride every panel refresh:
+    /// focus switches, reconnects, cwd/prompt reports, splits all
+    /// re-run here.
+    func refreshSideTerminal(ws: WorkspaceState, spaceRoot: String?) {
+        if prefs.rightPanelTab == .terminal, prefs.rightPanelVisible,
+           ws.auxTerminalPanes.isEmpty,
+           !coordinator.auxTerminalClosed(wsId: ws.id) {
+            _ = coordinator.ensureAuxTerminal()   // .structure → refresh → here
+        }
+        // `ws` is a VALUE copy taken before ensureAuxTerminal wrote the
+        // field — re-read the store, or this frame unmounts the host the
+        // .structure pass just mounted (the "terminal never opens" bug).
+        guard let live = coordinator.store?.workspaces
+                  .first(where: { $0.id == ws.id }),
+              let gapp = ghostty.app else {
+            wc.rightPanel.setTerminalPanes([])
+            return
+        }
+        // Same normalization as the center grid: persisted split cells →
+        // layout fractions. A single full-rect pane lands on (0,0,1,1).
+        let panes = live.auxTerminalPanes
+        let gridW = max(panes.map { $0.left + $0.width }.max() ?? 1, 1)
+        let gridH = max(panes.map { $0.top + $0.height }.max() ?? 1, 1)
+        var entries: [(paneKey: HostKey, host: any PaneHosting,
+                       fraction: NSRect)] = []
+        for pane in panes {
+            if let host = makeAuxTerminalHost(ws: live, paneId: pane.id,
+                                              spawnCwd: pane.cwd ?? spaceRoot,
+                                              gapp: gapp) {
+                entries.append((paneKey: host.hostKey, host: host, fraction: NSRect(
+                    x: CGFloat(pane.left) / CGFloat(gridW),
+                    y: CGFloat(pane.top) / CGFloat(gridH),
+                    width: CGFloat(pane.width) / CGFloat(gridW),
+                    height: CGFloat(pane.height) / CGFloat(gridH)
+                )))
+            }
+        }
+        // setVisiblePanes re-pushes every host's core visibility each
+        // pass — the tab switch and panel reveal land here right after
+        // the ancestor unhide (the panel's equivalent of the center
+        // grid's syncAllCoreVisibility; the "mounted but blank" bug).
+        wc.rightPanel.setTerminalPanes(entries)
+        // Header: the focused pane's cwd + the cd chip's prompt gate.
+        wc.rightPanel.setTerminalCwd(coordinator.focusedAuxPane(of: live)?.cwd)
+        wc.rightPanel.setTerminalCd(enabled: coordinator.auxTerminalAtPrompt(wsId: live.id))
+    }
+
+    /// The cd chip: type `cd <current space root>` into the FOCUSED
+    /// side pane. Same target the Files tab resolves — the center's
+    /// active pane's repo root.
+    private func cdSideTerminalToCurrentSpace() {
+        guard let ws = coordinator.store?.focused,
+              let pane = coordinator.focusedAuxPane(of: ws),
+              coordinator.auxTerminalAtPrompt(wsId: ws.id),
+              let root = currentSpaceRoot() else { return }
+        (hostPool[HostKey(workspace: ws.id, pane: pane.id)] as? PaneHost)?
+            .sendText(WorkspaceCoordinator.auxCdInjection(to: root))
+    }
+
+    /// The center's current space root (Files, the cd chip, one
+    /// resolver): the active pane's cwd resolved to its repo root.
+    private func currentSpaceRoot() -> String? {
+        guard let ws = coordinator.store?.focused else { return nil }
+        let cwd = coordinator.activePane(of: ws)?.cwd
+        return cwd.flatMap {
+            GitStatusStore.shared.spaceRoot(for: $0, host: ws.sshHost)
+        } ?? cwd
     }
     /// The one recurring timer + kernel-event watchers (see inline audit).
     private func startPollingAndWatchers() {
@@ -602,6 +788,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         sidebar.onNewAgentSessionInDir = { [weak self] key, cwd in
             self?.openAgentSession(agent: key, cwd: cwd)
+        }
+        sidebar.agentAvailable = { [weak self] key in
+            self?.agentAvailable(key: key) ?? false
         }
         sidebar.onNewWorktreeInDir = { [weak self] cwd in
             self?.startWorktreeFlow(cwd: cwd)
@@ -684,6 +873,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         strip.onNewTab = { [weak self] in self?.coordinator.newTab() }
         strip.onNewAgentSession = { [weak self] key in
             self?.openAgentSession(agent: key)
+        }
+        strip.agentAvailable = { [weak self] key in
+            self?.agentAvailable(key: key) ?? false
         }
         strip.onCloseTab = { [weak self] idx in
             self?.coordinator.closeTab(index: idx)

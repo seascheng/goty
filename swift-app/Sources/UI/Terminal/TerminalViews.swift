@@ -157,6 +157,9 @@ final class PaneHost: NSView {
     /// `@omp [prompt]` → AppDelegate opens an Agent GUI space in this
     /// pane's cwd (capability-checked there).
     var onAgentSessionTrigger: ((PaneHost, String, String?) -> Void)?
+    /// `@tty` → AppDelegate opens a terminal tab in this pane's cwd
+    /// (the sidebar "+" New Terminal path — no capability gate needed).
+    var onTTYTrigger: ((PaneHost) -> Void)?
     let aiTail = OutputTail()
     private let replaySanitizer = ReplaySanitizer()
     /// A trigger fires this with the request text (after the host has
@@ -183,6 +186,9 @@ final class PaneHost: NSView {
         aiTrigger.onTrigger = { [weak self] text in self?.handleAITrigger(text) }
         aiTrigger.onAgentTrigger = { [weak self] key, text in
             self?.handleAgentTrigger(key, text)
+        }
+        aiTrigger.onTTYTrigger = { [weak self] in
+            DispatchQueue.main.async { self?.handleTTYTrigger() }
         }
         aiTrigger.onPendingEnter = { [weak self] in
             DispatchQueue.main.async { self?.handleAIHistoryEnter() }
@@ -681,6 +687,14 @@ final class PaneHost: NSView {
         }
     }
 
+    /// `@tty` fired: same readline-clear as the agent trigger (the
+    /// swallowed enter left the typed bytes in the shell's line), then
+    /// hand the spawn up — a terminal takes no payload.
+    private func handleTTYTrigger() {
+        sendText("\u{15}")
+        onTTYTrigger?(self)
+    }
+
     /// History-recalled enter (↑/ctrl-r): the line's bytes never
     /// passed the input filter — zsh redrew it as PTY output — so read
     /// what the shell actually holds: the rendered cursor row. An @ai
@@ -699,6 +713,8 @@ final class PaneHost: NSView {
             onAITask?(self, match.text)
         case .agent(let key):
             onAgentSessionTrigger?(self, key, match.text.isEmpty ? nil : match.text)
+        case .tty:
+            onTTYTrigger?(self)
         }
     }
 
@@ -744,11 +760,10 @@ final class PaneHost: NSView {
 
     /// True for nil (spawned shell) and the shell basenames — matches
     /// what sessiond's foreground report spells at a plain prompt.
+    /// The predicate itself lives in Core (Shell) — the coordinator
+    /// gates the side terminal's cd chip on the same rule.
     static func isShellPrompt(_ command: String?) -> Bool {
-        guard let command, !command.isEmpty else { return true }
-        var base = (command as NSString).lastPathComponent
-        if base.hasPrefix("-") { base = String(base.dropFirst()) }
-        return ["zsh", "bash", "sh", "fish", "dash", "ash"].contains(base)
+        Shell.isShellPromptCommand(command)
     }
 
     // MARK: AI task card (bottom-anchored overlay)

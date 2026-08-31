@@ -23,6 +23,17 @@ final class ClaudeFrameMapper {
     /// Integrity accounting (agenttest asserts these).
     private(set) var framesRouted = 0
     private(set) var framesIgnored = 0
+    /// Partial-streaming dedup (--include-partial-messages): the
+    /// interleaved COMPLETE assistant frames repeat what the deltas
+    /// already delivered. Characters already streamed for the current
+    /// message, per block kind — the frame emits only the remainder.
+    /// Zero throughout plain --print runs and history replay (no
+    /// stream_events there), so complete frames pass through in full.
+    /// One text and one thinking block per message is claude's actual
+    /// shape; a second block of the same kind would dedup against the
+    /// first's length (never observed).
+    private var streamedTextLen = 0
+    private var streamedThinkingLen = 0
     /// result.result repeats the last assistant text on success AND on
     /// error runs (claude's error message arrives in an assistant frame
     /// first) — emit it once.
@@ -39,6 +50,7 @@ final class ClaudeFrameMapper {
         case "assistant": return mapAssistant(frame)
         case "user": return mapUser(frame)
         case "result": return mapResult(frame)
+        case "stream_event": return mapStreamEvent(frame)
         default:
             framesIgnored += 1
             return []
@@ -90,13 +102,19 @@ final class ClaudeFrameMapper {
             guard let kind = block["type"] as? String else { continue }
             switch kind {
             case "text":
-                if let text = block["text"] as? String, !text.isEmpty {
-                    lastAssistantText = text
-                    events.append(.messageChunk(text))
+                guard let text = block["text"] as? String, !text.isEmpty else { continue }
+                lastAssistantText = text
+                let remainder = ClaudeFrameMapper.unstreamed(
+                    text, already: &streamedTextLen)
+                if !remainder.isEmpty {
+                    events.append(.messageChunk(remainder))
                 }
             case "thinking":
-                if let text = block["thinking"] as? String, !text.isEmpty {
-                    events.append(.thoughtChunk(text))
+                guard let text = block["thinking"] as? String, !text.isEmpty else { continue }
+                let remainder = ClaudeFrameMapper.unstreamed(
+                    text, already: &streamedThinkingLen)
+                if !remainder.isEmpty {
+                    events.append(.thoughtChunk(remainder))
                 }
             case "tool_use":
                 guard let id = block["id"] as? String,
@@ -114,6 +132,51 @@ final class ClaudeFrameMapper {
             }
         }
         return events
+    }
+
+    // MARK: - stream_event (partial messages)
+
+    /// Delta frames from --include-partial-messages. Text/thinking
+    /// deltas stream live; the surrounding protocol events (block
+    /// start/stop, signature, message_delta/stop) carry no transcript
+    /// content. message_start resets the dedup counters — indexes and
+    /// lengths belong to ONE message.
+    private func mapStreamEvent(_ frame: [String: Any]) -> [AgentSessionEvent] {
+        guard let event = frame["event"] as? [String: Any],
+              let type = event["type"] as? String else { return [] }
+        switch type {
+        case "message_start":
+            streamedTextLen = 0
+            streamedThinkingLen = 0
+            return []
+        case "content_block_delta":
+            let delta = event["delta"] as? [String: Any] ?? [:]
+            switch delta["type"] as? String {
+            case "text_delta":
+                guard let text = delta["text"] as? String, !text.isEmpty else { return [] }
+                streamedTextLen += text.count
+                return [.messageChunk(text)]
+            case "thinking_delta":
+                guard let text = delta["thinking"] as? String, !text.isEmpty else { return [] }
+                streamedThinkingLen += text.count
+                return [.thoughtChunk(text)]
+            default:
+                return []
+            }
+        default:
+            return []
+        }
+    }
+
+    /// Portion of `text` not yet streamed: `already` tracks the prefix
+    /// length delivered by deltas and advances to cover `text`.
+    private static func unstreamed(_ text: String, already: inout Int) -> String {
+        guard text.count > already else {
+            already = max(already, text.count)
+            return ""
+        }
+        defer { already = text.count }
+        return String(text.dropFirst(already))
     }
 
     // MARK: - user (tool_result carrier)

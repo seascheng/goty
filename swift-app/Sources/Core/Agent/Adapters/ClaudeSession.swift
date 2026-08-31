@@ -31,11 +31,30 @@ final class ClaudeSession: AgentSessioning {
     private var processAlive = false
     /// Resume target for the (re)spawn in connect().
     private var resumeSessionId: String?
+    /// Session the pane had open when it was last closed (state.json
+    /// via AgentPaneParams). Re-loaded on connect — claude's `--print`
+    /// processes are ephemeral; the project store is the durable state.
+    private let restoredSessionId: String?
+    /// Label for the boot chip re-armed during the settle respawn.
+    private static let startingLabel: String =
+        AgentRegistry.descriptor(for: "claude")?.label ?? "Claude Code"
+    /// Best-effort initial model from ~/.claude/settings.json — the SDK
+    /// `init` frame only arrives at the FIRST turn, so without this the
+    /// model chip is blank (or stale) for the whole boot.
+    private static func settingsModel() -> String? {
+        let path = NSString(string: "~/.claude/settings.json").expandingTildeInPath
+        guard let data = FileManager.default.contents(atPath: path),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let env = json["env"] as? [String: Any],
+              let model = env["ANTHROPIC_MODEL"] as? String, !model.isEmpty else { return nil }
+        return model
+    }
     /// GOTY_CLAUDE_MODEL debug knob: this machine's default claude model
     /// is misconfigured; tests override it without touching user config.
     private var modelOverride: String? {
         ProcessInfo.processInfo.environment["GOTY_CLAUDE_MODEL"]
     }
+    var selfManagesRestore: Bool { true }
 
     /// Integrity accounting.
     private(set) var framesRouted = 0
@@ -47,9 +66,10 @@ final class ClaudeSession: AgentSessioning {
         self.environment = params.environment
         self.daemon = params.daemon
         self.grid = AgentPaneDefaults.grid
+        self.restoredSessionId = params.restoredSessionId
         channel.onOutbound = { [weak self] in self?.pane?.sendInput($0) }
-        channel.onFrame = { [weak self] frame in
-            self?.handleFrame(frame)
+        channel.onFrame = { [weak self] frame, replay in
+            self?.handleFrame(frame, replay: replay)
         }
         channel.onUnparseable = { line in
             if ProcessInfo.processInfo.environment["GOTY_CLAUDE_DEBUG"] != nil {
@@ -65,7 +85,12 @@ final class ClaudeSession: AgentSessioning {
     /// while satisfying the non-TTY check.
     static func shellCommand(model: String?, resume: String?) -> (String, [String]) {
         var cmd = "exec claude --print --input-format stream-json "
-            + "--output-format stream-json --verbose"
+            + "--output-format stream-json --verbose "
+            // Delta stream: without it claude buffers each message and
+            // the reply lands as one block (no live thinking, no
+            // progressive text). The interleaved COMPLETE assistant
+            // frames are deduped in the mapper by streamed length.
+            + "--include-partial-messages"
         if let model, model.allSatisfy({ c in c.isLetter || c.isNumber || ".-_".contains(c) }) {
             cmd += " --model \(model)"
         }
@@ -78,7 +103,8 @@ final class ClaudeSession: AgentSessioning {
 
     private func argv(resume: String?) -> [String] {
         var args = ["--print", "--input-format", "stream-json",
-                    "--output-format", "stream-json", "--verbose"]
+                    "--output-format", "stream-json", "--verbose",
+                    "--include-partial-messages"]
         if let modelOverride {
             args += ["--model", modelOverride]
         }
@@ -88,16 +114,35 @@ final class ClaudeSession: AgentSessioning {
         return args
     }
 
-    // MARK: - AgentSessioning
-
     func connect(completion: ((Bool) -> Void)? = nil) {
         guard !connected else {
             completion?(true)
             return
         }
         connected = true
-        openPane(resume: resumeSessionId, completion: completion)
+        // Seed the model chip before the first turn: the SDK init frame
+        // only arrives at turn start, so without this the chip is blank
+        // for the whole boot. Ground truth (init) overwrites it later.
+        if configOptions.isEmpty, let model = Self.settingsModel() {
+            configOptions = [AgentConfigOption(id: "model", name: "模型",
+                                               category: nil, currentValue: model,
+                                               options: [])]
+            emit([.configChanged(configOptions)])
+        }
+        // Paseo rule: the process is disposable, the project store is
+        // the durable state. Attach-to-stale-ring proved fragile (new
+        // claude writes no init into the project file, dead processes
+        // hold stale env) — so drop any leftover pane and re-load the
+        // pane's last session (or the newest for this cwd) from the
+        // store, which respawns with --resume and re-reads settings.
+        daemon.killPane(id: paneId)
+        if let restore = restoredSessionId ?? ClaudeSessionStore.summaries(cwd: cwd).first?.sessionId {
+            load(sessionId: restore, completion: completion)
+        } else {
+            openPane(resume: nil, completion: completion)
+        }
     }
+
 
     func reconnect(completion: ((Bool) -> Void)? = nil) {
         pane?.close()
@@ -133,6 +178,15 @@ final class ClaudeSession: AgentSessioning {
         opened.session.start()
         pane = opened.session
         processAlive = true
+        // claude has no pre-turn handshake: in SDK --print mode the
+        // `init` frame arrives only when the FIRST user turn starts —
+        // a fresh process emits nothing but SessionStart hook frames
+        // (mapper-ignored noise) while it waits for stdin. Treating
+        // init as the only ready signal made every fresh pane sit at
+        // "正在启动" until the 90s watchdog fired while claude itself
+        // was healthy and waiting for input. Ready = process spawned;
+        // the init frame still enriches model/commands on first turn.
+        emit([.ready])
         completion?(true)
     }
 
@@ -206,12 +260,19 @@ final class ClaudeSession: AgentSessioning {
                 self.sessionId = sessionId
                 self.resumeSessionId = sessionId
                 self.commands = []
+                // The attach may already have replayed the ring into
+                // the transcript — the store file is authoritative, so
+                // wipe before replaying it (no double history).
+                self.emit([.transcriptReset])
                 self.emit(events + [.configChanged(self.configOptions)])
+                // The respawn re-reads settings.json (model/env/MCP):
+                // surface it as a boot phase — the old starting chip was
+                // already consumed by the replayed init's ready.
+                self.emit([.starting(agent: Self.startingLabel)])
                 self.pane?.close()
-                self.pane = nil
                 // Pane id is daemon identity (attach-or-spawn): kill the
                 // old process or the reopen would ATTACH to it — a fresh
-                // --resume/--session spawn never happens.
+                // --resume spawn never happens.
                 self.daemon.killPane(id: self.paneId)
                 self.openPane(resume: sessionId, completion: completion)
             }
@@ -245,7 +306,20 @@ final class ClaudeSession: AgentSessioning {
         }
     }
 
-    private func handleFrame(_ frame: [String: Any]) {
+    private func handleFrame(_ frame: [String: Any], replay: Bool) {
+        let events = mapper.map(frame)
+        if let sid = mapper.sessionId { sessionId = sid }
+        if let model = mapper.model {
+            configOptions = [AgentConfigOption(id: "model", name: "模型",
+                                               category: nil, currentValue: model,
+                                               options: [])]
+        }
+        if replay {
+            // History rebuilds the transcript only — never the turn
+            // state (adapter isWorking stays false for replayed chunks).
+            emit(events)
+            return
+        }
         framesRouted += 1
         if ProcessInfo.processInfo.environment["GOTY_CLAUDE_DEBUG"] != nil {
             let kind = (frame["type"] as? String) ?? "?"
@@ -264,19 +338,16 @@ final class ClaudeSession: AgentSessioning {
             emit([.permissionRequested(prompt)])
             return
         }
-        let events = mapper.map(frame)
-        if let sid = mapper.sessionId { sessionId = sid }
-        if let model = mapper.model {
-            configOptions = [AgentConfigOption(id: "model", name: "模型",
-                                               category: nil, currentValue: model,
-                                               options: [])]
-        }
         // Working state follows the turn: any assistant output means
         // work, result ends it (store.ts already derives it, but the
         // adapter's isWorking gates send()).
         if case .turnEnded = events.last {
             isWorking = false
-        } else if events.contains(where: { if case .messageChunk = $0 { return true }; return false }) {
+        } else if events.contains(where: {
+            if case .messageChunk = $0 { return true }
+            if case .thoughtChunk = $0 { return true }
+            return false
+        }) {
             isWorking = true
         }
         if !events.isEmpty { emit(events) }

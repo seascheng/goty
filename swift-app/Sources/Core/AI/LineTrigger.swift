@@ -18,15 +18,21 @@ final class LineTrigger {
         /// `@omp` / `@claude` / `@codex` … — an Agent GUI space for
         /// that agent; payload is the manifest key.
         case agent(key: String)
+        /// `@tty` — a new terminal tab in this pane's cwd. Takes no
+        /// payload; trailing words on the line are ignored.
+        case tty
     }
 
     var armed = false
-    /// @ai arms only with the provider configured; agent triggers need
-    /// just a shell prompt (the fire path handles a stale daemon itself).
+    /// @ai arms only with the provider configured; the spawn triggers
+    /// (@agents, @tty) need just a shell prompt (the fire path handles
+    /// a stale daemon itself).
     var agentArmed = false
     var onTrigger: ((String) -> Void)?
     /// `@omp [prompt]` — a new Agent GUI space in this pane's cwd.
     var onAgentTrigger: ((String, String) -> Void)?
+    /// `@tty` — a new terminal tab in this pane's cwd.
+    var onTTYTrigger: (() -> Void)?
     /// Enter swallowed on a zle-edited line (↑/↓/ctrl-r recall): the
     /// line's text lives only on the rendered screen, so the host
     /// reads the cursor row and either fires the task or re-sends the
@@ -38,6 +44,7 @@ final class LineTrigger {
         for descriptor in AgentRegistry.descriptors {
             list.append((Array("@\(descriptor.key)".utf8), .agent(key: descriptor.key)))
         }
+        list.append((Array("@tty".utf8), .tty))
         return list
     }()
     /// Escape-sequence parser state: inside CSI / inside SS3.
@@ -134,6 +141,7 @@ final class LineTrigger {
                     switch match.kind {
                     case .ai: onTrigger?(match.text)
                     case .agent(let key): onAgentTrigger?(key, match.text)
+                    case .tty: onTTYTrigger?()   // payload-less by design
                     }
                     return out  // swallow this enter (and anything after in the same chunk)
                 }

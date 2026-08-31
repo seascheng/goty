@@ -17,6 +17,9 @@ struct AgentPaneParams {
     let cwd: String?
     let environment: [String: String]
     let daemon: SessionDaemon
+    /// Session the pane had loaded when it was last open (state.json).
+    /// The adapter re-loads it on connect; nil = start fresh / newest.
+    var restoredSessionId: String? = nil
 }
 
 /// One agent family as the app offers it: fixed UI (AgentSessioning +
@@ -57,7 +60,8 @@ enum AgentRegistry {
                 OmpSession(paneId: params.paneId, cwd: params.cwd,
                            grid: AgentPaneDefaults.grid,
                            environment: params.environment,
-                           spawn: ompSpawn, daemon: params.daemon)
+                           spawn: ompSpawn, daemon: params.daemon,
+                           restoredSessionId: params.restoredSessionId)
             }),
         AgentDescriptor(
             key: "claude",
@@ -92,11 +96,13 @@ enum AgentRegistry {
         descriptors.first { $0.key == key }
     }
 
-    /// Menu/picker entries in display order, flagged for availability.
-    /// Unavailable entries stay visible (disabled + tooltip) — a missing
-    /// CLI is a fixable condition, not a reason to hide the agent.
-    static func pickerEntries(path: String) -> [(key: String, label: String,
-                                                  available: Bool)] {
-        descriptors.map { ($0.key, $0.label, $0.isAvailable(path: path)) }
+    /// Menu/picker entries in display order; the caller injects the
+    /// FOCUSED workspace's availability (local user PATH vs a remote
+    /// link's connect-time probe). Unavailable agents are DROPPED
+    /// (2026-08-31): a picker offers only what will actually open —
+    /// keyboard and @agent triggers still hit the openAgentSession gate.
+    static func pickerEntries(isAvailable: (String) -> Bool)
+        -> [(key: String, label: String, available: Bool)] {
+        descriptors.map { ($0.key, $0.label, isAvailable($0.key)) }
     }
 }

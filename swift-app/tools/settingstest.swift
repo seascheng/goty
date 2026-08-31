@@ -199,6 +199,26 @@ enum SettingsTest {
             check(!heights.isEmpty && heights.allSatisfy { $0 == 56 },
                   "\(sec.title) rows uniform 56pt (got \(heights))")
         }
+        // Config File document page: the action pair is equal-width /
+        // equal-height with padded titles — the git split-control look.
+        root.selectForTest(.configFile)
+        root.layoutSubtreeIfNeeded()
+        if let page = (root.pageHostForTest as? NSScrollView)?.documentView as? ConfigFilePage {
+            let pair = page.actionButtonsForTest
+            check(pair.count == 2, "config file page carries the action pair")
+            check(abs(pair[0].frame.width - pair[1].frame.width) < 0.5,
+                  "action pair equal width (got \(pair[0].frame.width) vs \(pair[1].frame.width))")
+            check(abs(pair[0].frame.height - pair[1].frame.height) < 0.5,
+                  "action pair equal height (got \(pair[0].frame.height) vs \(pair[1].frame.height))")
+            for b in pair {
+                let text = (b.title as NSString).size(
+                    withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium)]).width
+                check(b.frame.width - text >= 16,
+                      "padded title: \"\(b.title)\" keeps ≥8pt air per side (button \(Int(b.frame.width)) vs text \(Int(text)))")
+            }
+        } else {
+            check(false, "config file page is a ConfigFilePage")
+        }
         root.selectForTest(.appearance)
 
         // Hit-test lock (the "all sliders dead" report): every control

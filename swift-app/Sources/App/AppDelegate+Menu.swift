@@ -62,15 +62,13 @@ extension AppDelegate {
         agentItem.submenu = agentMenu
         shellMenu.addItem(agentItem)
         let sessionMenu = NSMenu()
-        let path = UserShellEnv.asDictionary["PATH"] ?? ""
-        for entry in AgentRegistry.pickerEntries(path: path) {
+        for entry in AgentRegistry.pickerEntries(isAvailable: { agentAvailable(key: $0) })
+        where entry.available {
             let item = NSMenuItem(title: entry.label,
                                   action: #selector(menuNewAgentSessionFrom(_:)),
                                   keyEquivalent: "")
             item.target = self
             item.representedObject = entry.key
-            item.isEnabled = entry.available
-            if !entry.available { item.toolTip = "\(entry.key) 不在 PATH" }
             sessionMenu.addItem(item)
         }
         let sessionItem = NSMenuItem(title: "New Agent Session", action: nil, keyEquivalent: "")
@@ -245,7 +243,6 @@ extension AppDelegate {
         guard let view = note.object as? Ghostty.SurfaceView,
               let host = hostPool.values.compactMap({ $0 as? PaneHost }).first(where: { $0.surfaceView === view })
         else { return }
-        coordinator.focusPane(wsId: host.hostKey.workspace, paneId: host.paneId)
         let vertical: Bool, after: Bool
         switch note.userInfo?["direction"] as? ghostty_action_split_direction_e {
         case GHOSTTY_SPLIT_DIRECTION_DOWN: (vertical, after) = (true, true)
@@ -253,6 +250,18 @@ extension AppDelegate {
         case GHOSTTY_SPLIT_DIRECTION_LEFT: (vertical, after) = (false, false)
         default: (vertical, after) = (false, true)   // RIGHT
         }
+        // The side terminal lives in NO tab, so splitPane would silently
+        // no-op on it — the split happens IN the panel, on the same pane
+        // array the panel grid renders (2026-08-31).
+        if let ws = coordinator.store?.workspaces
+            .first(where: { $0.id == host.hostKey.workspace }),
+           ws.auxTerminalPanes.contains(where: { $0.id == host.paneId }) {
+            coordinator.splitAuxTerminal(wsId: host.hostKey.workspace,
+                                         paneId: host.paneId,
+                                         vertical: vertical, after: after)
+            return
+        }
+        coordinator.focusPane(wsId: host.hostKey.workspace, paneId: host.paneId)
         coordinator.splitPane(vertical: vertical, after: after)
     }
 
@@ -307,6 +316,7 @@ extension AppDelegate {
               ws.tabs.indices.contains(index) else { return }
         let tab = ws.tabs[index]
         let current = tab.userTitle
+            ?? tab.agentTitle
             ?? coordinator.surfaceTitle(for: tab)
             ?? tab.name
         guard let name = Dialog.promptText(title: "Rename Tab",

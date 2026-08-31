@@ -17,6 +17,8 @@ final class TabStripView: NSView {
     var onNewTab: (() -> Void)?
     /// Flat + menu's agent items (AgentRegistry).
     var onNewAgentSession: ((String) -> Void)?
+    /// Availability for the + menu's agent entries; nil = local PATH.
+    var agentAvailable: ((String) -> Bool)?
     /// "Rename…" — the strip has no inline field; the owner prompts.
     var onRenameTab: ((Int) -> Void)?
     var onTabColor: ((Int, String?) -> Void)?
@@ -103,8 +105,9 @@ final class TabStripView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
 
-    /// The +'s flat menu: new terminal, then every supported agent —
-    /// one click from menu to space, no submenus.
+    /// The +'s flat menu: new terminal, then the focused workspace's
+    /// available agents — unavailable CLIs are not offered (the
+    /// openAgentSession gate stays for keyboard/@agent triggers).
     private func popPlusMenu(from anchor: NSView) {
         let menu = NSMenu()
         let term = NSMenuItem(title: "新建终端", action: #selector(plusTerminalAction(_:)),
@@ -114,14 +117,15 @@ final class TabStripView: NSView {
                              accessibilityDescription: nil)
         menu.addItem(term)
         menu.addItem(.separator())
-        let path = UserShellEnv.asDictionary["PATH"] ?? ""
-        for entry in AgentRegistry.pickerEntries(path: path) {
+        let available = agentAvailable ?? { key in
+            AgentRegistry.descriptor(for: key)?
+                .isAvailable(path: UserShellEnv.asDictionary["PATH"] ?? "") ?? false
+        }
+        for entry in AgentRegistry.pickerEntries(isAvailable: available) where entry.available {
             let item = NSMenuItem(title: entry.label, action: #selector(plusAgentAction(_:)),
                                   keyEquivalent: "")
             item.target = self
             item.representedObject = entry.key
-            item.isEnabled = entry.available
-            if !entry.available { item.toolTip = "\(entry.key) 不在 PATH" }
             item.image = AgentBrandIcons.menuImage(for: entry.key)
             menu.addItem(item)
         }
@@ -153,7 +157,7 @@ final class TabStripView: NSView {
             let command = commandFor?(tab) ?? tab.paneCommand
             let spec = AgentCatalog.spec(for: command)
             let title = titleFor?(tab)
-            let display = tab.userTitle ?? spec?.label ?? title ?? tab.name
+            let display = tab.userTitle ?? tab.agentTitle ?? spec?.label ?? title ?? tab.name
             signature += "|\(tab.id):\(display):\(tab.icon ?? "-"):\(tab.color ?? "-")"
                 + ":\(tab.id == workspace.focusedTab?.id)"
         }
@@ -175,7 +179,7 @@ final class TabStripView: NSView {
                 ? AgentBrandIcons.image(for: AgentCatalog.manifestKey(for: command))
                 : nil
             let title = titleFor?(tab)
-            let display = tab.userTitle ?? spec?.label ?? title ?? tab.name
+            let display = tab.userTitle ?? tab.agentTitle ?? spec?.label ?? title ?? tab.name
             let tint = tab.color.flatMap { NSColor(hex: $0) }
                 ?? (running ? spec?.accent : nil)
             let chip = TabChipView(

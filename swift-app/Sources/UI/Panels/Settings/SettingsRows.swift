@@ -8,6 +8,12 @@ import GhosttyKit
 /// has no settings, only facts and verbs about one file.
 final class ConfigFilePage: NSView {
     override var isFlipped: Bool { true }
+    /// The card's action pair — equal width (the git split-control
+    /// recipe). Clicks wire in init (ClosureButton.onClick).
+    private let openButton = ChromeButton.make("Open in Editor", style: .ghost)
+    private let reloadButton = ChromeButton.make("Reload Now", style: .primary)
+    /// Test surface: the action pair after layout.
+    var actionButtonsForTest: [ChromeButton] { [openButton, reloadButton] }
 
     init(title: String, subtitle: String, path: String,
          errors: [String], onOpen: @escaping () -> Void,
@@ -70,13 +76,10 @@ final class ConfigFilePage: NSView {
         let divider1 = HairlineView()
         divider1.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(divider1)
-
-        let open = ChromeButton.make("Open in Editor", style: .ghost, onClick: onOpen)
-        open.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(open)
-        let reload = ChromeButton.make("Reload Now", style: .primary, onClick: onReload)
-        reload.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(reload)
+        openButton.onClick = onOpen
+        reloadButton.onClick = onReload
+        card.addSubview(openButton)
+        card.addSubview(reloadButton)
 
         let divider2 = HairlineView()
         divider2.translatesAutoresizingMaskIntoConstraints = false
@@ -132,14 +135,17 @@ final class ConfigFilePage: NSView {
             divider1.topAnchor.constraint(equalTo: pathField.bottomAnchor, constant: 14),
             divider1.heightAnchor.constraint(equalToConstant: 1),
 
-            open.leadingAnchor.constraint(equalTo: caps.leadingAnchor),
-            open.topAnchor.constraint(equalTo: divider1.bottomAnchor, constant: 12),
-            reload.leadingAnchor.constraint(equalTo: open.trailingAnchor, constant: 10),
-            reload.centerYAnchor.constraint(equalTo: open.centerYAnchor),
+            openButton.leadingAnchor.constraint(equalTo: caps.leadingAnchor),
+            openButton.topAnchor.constraint(equalTo: divider1.bottomAnchor, constant: 12),
+            reloadButton.leadingAnchor.constraint(equalTo: openButton.trailingAnchor, constant: 10),
+            reloadButton.centerYAnchor.constraint(equalTo: openButton.centerYAnchor),
+            // Grouped pair: equal width (resolves to the wider label,
+            // "Open in Editor") — the git split-control recipe.
+            reloadButton.widthAnchor.constraint(equalTo: openButton.widthAnchor),
 
             divider2.leadingAnchor.constraint(equalTo: divider1.leadingAnchor),
             divider2.trailingAnchor.constraint(equalTo: divider1.trailingAnchor),
-            divider2.topAnchor.constraint(equalTo: open.bottomAnchor, constant: 14),
+            divider2.topAnchor.constraint(equalTo: openButton.bottomAnchor, constant: 14),
             divider2.heightAnchor.constraint(equalToConstant: 1),
 
             dot.leadingAnchor.constraint(equalTo: caps.leadingAnchor),

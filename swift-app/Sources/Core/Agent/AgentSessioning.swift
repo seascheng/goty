@@ -38,6 +38,10 @@ protocol AgentSessioning: AnyObject {
 
 extension AgentSessioning {
     var lastSessionId: String? { sessionId }
+    /// true = the adapter consumes `restoredSessionId` itself inside
+    /// connect (claude: store replay + --resume respawn) and the caller
+    /// must NOT also load() after connect.
+    var selfManagesRestore: Bool { false }
     /// Ring-replay diagnostics — omp is the only adapter with a ring to
     /// measure; others report zeros.
     var debugReplayBytes: Int { 0 }

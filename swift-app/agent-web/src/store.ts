@@ -121,6 +121,10 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("sessions"), sessions: z.unknown().nullish() }),
   z.object({ type: z.literal("clearTranscript") }),
   z.object({ type: z.literal("files"), files: z.array(z.string()) }),
+  z.object({
+    type: z.literal("sessionTitle"),
+    title: z.string().nullish(),
+  }),
   z.object({ type: z.literal("theme"), vars: z.record(z.string(), z.string()) }),
   z.object({
     type: z.literal("meta"),
@@ -150,6 +154,22 @@ function coerceList<T>(raw: unknown, schema: z.ZodType<T>): T[] {
     .map((r) => r.data);
 }
 
+/// Events that definitively end the initial startup phase. Static lookup:
+/// no per-event allocation on transcript replay.
+const STARTING_TERMINATORS: Record<string, true> = {
+  status: true,
+  configOptions: true,
+  commands: true,
+  userMessage: true,
+  userChunk: true,
+  agentChunk: true,
+  thoughtChunk: true,
+  toolCall: true,
+  permission: true,
+  turnEnded: true,
+  error: true,
+};
+
 class Store {
   blocks: Block[] = [];
   toolOrder: string[] = [];
@@ -159,8 +179,8 @@ class Store {
   permission: Permission | null = null;
   working = false;
   /// Agent handshake phase: set on "starting", cleared by the first
-  /// handshake-complete signal (status/configOptions/transcript). The
-  /// composer renders an explicit chip while this is non-null.
+  /// handshake-complete signal or a terminal error. The composer renders
+  /// an explicit chip while this is non-null.
   starting: string | null = null;
   configOptions: ConfigOption[] = [];
   commands: AgentCommand[] = [];
@@ -168,15 +188,18 @@ class Store {
   /// awaitingPermission — null when idle. `working` mirrors phase != null
   /// (kept as its own field: the composer's send/stop flip predates it).
   phase: "thinking" | "executing" | "awaitingPermission" | null = null;
-  /// Terminal pane failure (process exit, connect failure). Cleared when
-  /// a new turn starts or the pane reconnects.
+  /// Current session's display name (Swift queries the adapter's
+  /// session directory after handshake, history load, and each turn).
+  sessionTitle: string | null = null;
   error: string | null = null;
   /// The transport is down and Swift is riding the reconnect backoff.
   reconnecting = false;
-  /// Transient 「已完成」 flash: true for ~2.5s after a clean turnEnded.
-  justFinished = false;
+  /// Turn wall-clock: `turnStartedAt` set when a turn starts
+  /// (working:true), folded into `lastTurnMs` at turnEnded — the
+  /// transcript tail shows the duration as the turn's closing stats.
+  turnStartedAt: number | null = null;
+  lastTurnMs: number | null = null;
   status = "连接中…";
-  private flashTimer: number | null = null;
   usage: { used?: number | null; size?: number | null;
            input?: number | null; output?: number | null;
            costAmount?: number | null; costCurrency?: string | null } | null = null;
@@ -211,11 +234,22 @@ class Store {
   /// The merged block is replaced (not mutated) so memoized rows keyed by
   /// stable ids re-render only the tail.
   private tail(kind: "agent" | "thought"): { kind: "agent" | "thought"; text: string } {
-    const last = this.blocks[this.blocks.length - 1];
-    if (last && last.kind === kind) {
-      const merged = { kind, id: last.id, text: last.text };
-      this.blocks[this.blocks.length - 1] = merged;
-      return merged;
+    // Thought-passthrough merge: claude (esp. GLM-via-proxy) interleaves
+    // reasoning and text deltas arbitrarily, even MID-SENTENCE. Merging
+    // only when the same kind is literally last shattered the text into
+    // mid-word fragments ("…work" [thought] "bench, …"). Walk back over
+    // thought blocks for agent text (and vice versa) — reasoning is
+    // ambient, not a boundary; tool cards and user prompts still start
+    // a fresh block.
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      const b = this.blocks[i];
+      if (b.kind === kind) {
+        const merged = { kind, id: b.id, text: b.text };
+        this.blocks[i] = merged;
+        return merged;
+      }
+      if (kind === "agent" && b.kind !== "thought") break;
+      if (kind === "thought" && b.kind !== "agent") break;
     }
     const block = this.push({ kind, text: "" }) as { kind: "agent" | "thought"; text: string };
     return block;
@@ -266,15 +300,10 @@ class Store {
     this.emit();
   }
   private applyParsed(event: IncomingEvent) {
-    // Only handshake-complete signals clear the starting chip: status
-    // ("就绪"/failure), config/command directories, or transcript
-    // traffic. theme/meta/sessions/files are unrelated and may land in
-    // the same FIFO batch right after "starting".
-    const handshakeSignals: ReadonlySet<string> = new Set([
-      "status", "configOptions", "commands", "userMessage", "userChunk",
-      "agentChunk", "thoughtChunk", "toolCall", "permission", "turnEnded",
-    ]);
-    if (handshakeSignals.has(event.type)) this.starting = null;
+    // A terminal error ends startup too: a process that exited cannot
+    // complete its handshake, and leaving `starting` set renders a
+    // permanent contradictory spinner.
+    if (STARTING_TERMINATORS[event.type]) this.starting = null;
     switch (event.type) {
       case "userMessage": this.push({ kind: "user", text: event.text }); break;
       case "userChunk":
@@ -300,6 +329,18 @@ class Store {
         if (!this.tools.has(event.id)) {
           this.toolOrder.push(event.id);
           this.push({ kind: "tool", call });
+        } else {
+          // Swap the owning block's `call` too: BlockView is memoized on
+          // block/call identity — updating only the tools Map left the
+          // card frozen at its mount-time status (运行中) until a click
+          // re-rendered it and revealed 完成.
+          for (let i = this.blocks.length - 1; i >= 0; i--) {
+            const b = this.blocks[i];
+            if (b.kind === "tool" && b.call.id === event.id) {
+              this.blocks[i] = { ...b, call };
+              break;
+            }
+          }
         }
         this.tools.set(event.id, call);
         break;
@@ -311,18 +352,20 @@ class Store {
         this.push({ kind: "agent", text: "" });
         this.working = false;
         this.phase = null;
-        this.justFinished = true;
-        if (this.flashTimer !== null) clearTimeout(this.flashTimer);
-        this.flashTimer = window.setTimeout(() => {
-          this.justFinished = false;
-          this.emit();
-        }, 2500);
+        if (this.turnStartedAt != null) {
+          this.lastTurnMs = Date.now() - this.turnStartedAt;
+          this.turnStartedAt = null;
+        }
         break;
       case "sessions": this.sessions = coerceList(event.sessions, AgentSessionSummarySchema); break;
       case "working":
         this.working = event.value;
-        if (event.value) this.error = null;
-        else this.phase = null;
+        if (event.value) {
+          this.error = null;
+          if (this.turnStartedAt == null) this.turnStartedAt = Date.now();
+        } else {
+          this.phase = null;
+        }
         break;
       case "phase":
         this.phase = (event.value === "thinking" || event.value === "executing"
@@ -330,8 +373,24 @@ class Store {
         if (this.phase) this.error = null;
         break;
       case "error":
+        // Error is terminal for this pane's current lifecycle. Clear every
+        // transient status so the failure and its retry action replace, not
+        // stack under, the old startup/working indicators.
+        this.starting = null;
+        this.working = false;
+        this.phase = null;
+        this.reconnecting = false;
         this.error = event.text;
         break;
+      case "sessionTitle": this.sessionTitle = event.title ?? null; break;
+      case "theme": {
+        const root = document.documentElement;
+        for (const [k, v] of Object.entries(event.vars)) {
+          if (k === "mode") root.dataset.theme = v;
+          else root.style.setProperty(`--${k}`, v);
+        }
+        break;
+      }
       case "reconnecting":
         this.reconnecting = event.value;
         if (event.value) this.error = null;
@@ -345,7 +404,7 @@ class Store {
         this.blocks = []; this.toolOrder = []; this.tools.clear();
         this.permission = null; this.working = false;
         this.phase = null; this.error = null; this.reconnecting = false;
-        this.justFinished = false;
+        this.turnStartedAt = null;
         this.generation += 1;
         break;
       case "files": this.files = event.files; break;
@@ -354,14 +413,6 @@ class Store {
                       directory: event.directory ?? null,
                       branch: event.branch ?? null, icon: event.icon ?? null };
         break;
-      case "theme": {
-        const root = document.documentElement;
-        for (const [k, v] of Object.entries(event.vars)) {
-          if (k === "mode") root.dataset.theme = v;
-          else root.style.setProperty(`--${k}`, v);
-        }
-        break;
-      }
       default: {
         // Exhaustiveness guard: a swallowed case (an edit once ate
         // userMessage — sent messages vanished from the transcript)

@@ -207,6 +207,7 @@ struct PaneState {
 pub struct Pane {
     pub id: String,
     replay_enabled: bool,
+    ring_input: bool,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     writer: Mutex<Box<dyn Write + Send>>,
@@ -249,10 +250,10 @@ impl Pane {
         drop(pair.slave);
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
-
         let pane = Arc::new(Self {
-            id: request.pane_id,
+            id: request.pane_id.clone(),
             replay_enabled: request.replay,
+            ring_input: request.ring_input,
             master: Mutex::new(Some(pair.master)),
             child: Mutex::new(Some(child)),
             writer: Mutex::new(writer),
@@ -335,6 +336,18 @@ impl Pane {
     pub fn input(&self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
+        }
+        // Agent panes ring the INPUT wire too (ring_input): the reattach
+        // replay then carries the user's own prompt requests interleaved
+        // with the output in true chronological order, so the rebuilt
+        // transcript keeps the user's side of the conversation. Under the
+        // same state lock the PTY reader uses — the interleaving is the
+        // real arrival order, never a merge guess.
+        if self.ring_input
+            && self.replay_enabled
+            && let Ok(mut state) = self.state.lock()
+        {
+            state.ring.append(bytes);
         }
         if let Ok(mut writer) = self.writer.lock() {
             let _ = writer.write_all(bytes);

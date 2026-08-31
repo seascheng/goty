@@ -29,6 +29,15 @@ final class WorkspaceCoordinator {
         /// restored session doesn't show a stale title before the PTY
         /// sets its own.
         var titles: [String: String] = [:]
+        /// The side pane the user last clicked — its cwd drives the
+        /// panel header and the cd chip targets it. Falls back to the
+        /// first pane; volatile.
+        var auxFocusedPaneId: String?
+        /// The side terminal was explicitly closed (strip button or the
+        /// last pane's exit): the auto-create gate stays closed until
+        /// the user asks again — "空态不自动重生" (spec §2). An empty
+        /// array alone cannot tell "never opened" from "closed".
+        var auxClosed = false
     }
     private var runtime: [UUID: Runtime] = [:]
     var onSendText: ((HostKey, String) -> Void)?
@@ -38,10 +47,15 @@ final class WorkspaceCoordinator {
     /// until the user opens it.
     struct AgentPaneRuntime: Equatable {
         var state: AgentActivity = .unknown
+        /// The agent process's OWN report ("working"/"blocked"/"idle"
+        /// via its extension to the daemon) — the authority. Survives
+        /// client restarts and never guesses. nil = nothing reported.
+        var reported: AgentActivity? = nil
         var seen = true
         /// Live foreground command (sessiond list reply); nil = whatever
         /// the pane was spawned with is authoritative.
         var command: String?
+
     }
 
     var wsStates: [UUID: WsState] {
@@ -120,6 +134,12 @@ final class WorkspaceCoordinator {
         }
         guard next != previous else { return }
         runtime[wsId]!.agents[paneId] = next
+        // The badge MUST re-render on every state change. It used to
+        // freeze on "working": the sidebar only re-renders on
+        // coordinatorDidChange, which the daemon list loop only fires
+        // when the extension report changes — a client-derived
+        // working→idle transition never repainted the row (2026-08-31).
+        delegate?.coordinatorDidChange(.agent)
     }
 
     /// Focusing a tab counts as seeing everything in it — a done badge
@@ -143,6 +163,13 @@ final class WorkspaceCoordinator {
     func agentStatus(paneId: String) -> AgentPaneRuntime? {
         guard let wsId = store?.focused?.id else { return nil }
         return runtime[wsId]?.agents[paneId]
+    }
+
+    /// The agent process's own report (extension → daemon), the
+    /// authoritative working switch for the pane's composer. nil = the
+    /// process never reported (older daemon, non-instrumented agent).
+    func reportedActivity(wsId: UUID, paneId: String) -> AgentActivity? {
+        runtime[wsId]?.agents[paneId]?.reported
     }
 
     /// The spawn command a tab was created with, or — when the user typed
@@ -227,46 +254,57 @@ final class WorkspaceCoordinator {
             }
         }
     }
-    private func applyForegrounds(_ results: [(UUID, [String: String], [String: String])]) {
+    // Internal (not private): the headless layout tests seed fg reports
+    // straight in (spec 2026-08-30 §8) — pollDaemonLists needs a live
+    // daemon, which a pure coordinator fixture doesn't have.
+    func applyForegrounds(_ results: [(UUID, [String: String], [String: String])]) {
         guard let store else { return }
         var changed = false
         var identityChanges: [(HostKey, String?)] = []
         for (wsId, fg, agents) in results {
             guard runtime[wsId] != nil,
                   let wi = store.workspaces.firstIndex(where: { $0.id == wsId }) else { continue }
-            for tab in store.workspaces[wi].tabs {
-                for pane in tab.panes {
-                    var entry = runtime[wsId]!.agents[pane.id] ?? AgentPaneRuntime()
-                    let newCommand = fg[pane.id]
-                    var entryChanged = false
-                    if entry.command != newCommand {
-                        // Signal on EVERY fg change, not just agent-identity
-                        // changes: PaneHost retargets detection (deduped by
-                        // `guard next != agentCommand`) and re-evaluates the
-                        // @ai trigger arming. Identity filtering left the
-                        // trigger armed inside vim/ssh/python — every
-                        // non-agent program maps to identity nil, so the
-                        // shell→vim transition never signalled (acceptance
-                        // #8). Sidebar churn is driven by entryChanged,
-                        // not this list.
-                        entry.command = newCommand
-                        entryChanged = true
-                        identityChanges.append((HostKey(workspace: wsId, pane: pane.id), newCommand))
-                    }
-                    // The omp/pi extension reports the authoritative TUI
-                    // state through its owning daemon — it outranks the
-                    // passive screen tracker whenever it speaks.
-                    if let reported = agents[pane.id],
-                       let activity = AgentActivity(reported),
-                       entry.state != activity {
-                        entry.state = activity
-                        entry.seen = true
-                        entryChanged = true
-                    }
-                    guard entryChanged else { continue }
-                    runtime[wsId]!.agents[pane.id] = entry
-                    changed = true
+            // The side terminal's panes join the same identity loop
+            // (their fg drives the @ai trigger arming); they are in NO
+            // tab, so they are appended to the walked pane ids.
+            let paneIds = store.workspaces[wi].tabs.flatMap { $0.panes }.map(\.id)
+                + store.workspaces[wi].auxTerminalPanes.map(\.id)
+            for paneId in paneIds {
+                var entry = runtime[wsId]!.agents[paneId] ?? AgentPaneRuntime()
+                let newCommand = fg[paneId]
+                var entryChanged = false
+                if entry.command != newCommand {
+                    // Signal on EVERY fg change, not just agent-identity
+                    // changes: PaneHost retargets detection (deduped by
+                    // `guard next != agentCommand`) and re-evaluates the
+                    // @ai trigger arming. Identity filtering left the
+                    // trigger armed inside vim/ssh/python — every
+                    // non-agent program maps to identity nil, so the
+                    // shell→vim transition never signalled (acceptance
+                    // #8). Sidebar churn is driven by entryChanged,
+                    // not this list.
+                    entry.command = newCommand
+                    entryChanged = true
+                    identityChanges.append((HostKey(workspace: wsId, pane: paneId), newCommand))
                 }
+                // The omp/pi extension reports the authoritative TUI
+                // state through its owning daemon — it outranks the
+                // passive screen tracker whenever it speaks.
+                if let reported = agents[paneId],
+                   let activity = AgentActivity(reported),
+                   entry.reported != activity {
+                    // The process's own report is the authority — it
+                    // lands in `reported` (the composer follows it via
+                    // pushReportedAgentStates) and never overwrites the
+                    // client derivation, so the two consumers cannot
+                    // fight over one field again.
+                    entry.reported = activity
+                    entry.seen = true
+                    entryChanged = true
+                }
+                guard entryChanged else { continue }
+                runtime[wsId]!.agents[paneId] = entry
+                changed = true
             }
         }
         guard changed else { return }
@@ -302,7 +340,9 @@ final class WorkspaceCoordinator {
         guard let store,
               let ws = store.workspaces.first(where: { $0.id == key.workspace }),
               let pane = ws.tabs.flatMap({ $0.panes })
-                  .first(where: { $0.id == key.pane }) else { return nil }
+                  .first(where: { $0.id == key.pane })
+                  ?? ws.auxTerminalPanes.first(where: { $0.id == key.pane })
+        else { return nil }
         return ExecutionTarget(
             workspaceId: ws.id, paneId: pane.id, displayName: ws.displayName,
             transport: ws.sshHost.map { .ssh(host: $0) } ?? .local,
@@ -319,7 +359,9 @@ final class WorkspaceCoordinator {
     }
 
 
-    private func applyCwds(wsId: UUID, byRuntimeId: [String: String]) {
+    // Internal (not private): same test seam as applyForegrounds — the
+    // headless suite seeds cwd reports straight in.
+    func applyCwds(wsId: UUID, byRuntimeId: [String: String]) {
         guard let store,
               let wi = store.workspaces.firstIndex(where: { $0.id == wsId }) else { return }
         var changed = false
@@ -331,6 +373,17 @@ final class WorkspaceCoordinator {
                 store.workspaces[wi].tabs[ti].panes[pi].cwd = cwd
                 changed = true
             }
+        }
+        // The side terminal's panes track their cwd in the same store
+        // field as tab panes — a split inherits the SOURCE pane's live
+        // cwd, so the report must be persisted before the gesture reads
+        // it. Same list reply, one more consumer.
+        for pi in store.workspaces[wi].auxTerminalPanes.indices {
+            let pane = store.workspaces[wi].auxTerminalPanes[pi]
+            let runtimeId = HostKey(workspace: wsId, pane: pane.id).runtimeId
+            guard let cwd = byRuntimeId[runtimeId], pane.cwd != cwd else { continue }
+            store.workspaces[wi].auxTerminalPanes[pi].cwd = cwd
+            changed = true
         }
         guard changed else { return }
         store.save()
@@ -421,11 +474,21 @@ final class WorkspaceCoordinator {
         delegate?.coordinatorDidChange(.structure)
     }
 
+    /// Every daemon-side pane id one workspace owns: the tabs' panes
+    /// plus the side terminal, which is in NO tab (spec 2026-08-30) —
+    /// the kill path and the layout tests share this list.
+    func paneRuntimeIds(of workspace: WorkspaceState) -> [String] {
+        let tabIds = workspace.tabs.flatMap(\.panes).map {
+            HostKey(workspace: workspace.id, pane: $0.id).runtimeId
+        }
+        return tabIds + workspace.auxTerminalPanes.map {
+            HostKey(workspace: workspace.id, pane: $0.id).runtimeId
+        }
+    }
+
     func killWorkspace(_ wsId: UUID) {
         guard let workspace = store?.workspaces.first(where: { $0.id == wsId }) else { return }
-        let ids = workspace.tabs.flatMap(\.panes).map {
-            HostKey(workspace: wsId, pane: $0.id).runtimeId
-        }
+        let ids = paneRuntimeIds(of: workspace)
         let daemon = daemonFor?(workspace) ?? .shared
         DispatchQueue.global(qos: .userInitiated).async {
             for id in ids { daemon.killPane(id: id) }
@@ -458,7 +521,9 @@ final class WorkspaceCoordinator {
         for tab in ws.tabs {
             if let pane = tab.panes.first(where: { $0.id == paneId }) { return pane.cwd }
         }
-        return nil
+        // The side terminal's panes are in no tab — same resolution,
+        // one more list (the @omp trigger's launch directory).
+        return ws.auxTerminalPanes.first(where: { $0.id == paneId })?.cwd
     }
 
     /// The host factory takes (and clears) a queued initial prompt.
@@ -580,6 +645,13 @@ final class WorkspaceCoordinator {
     func paneExited(wsId: UUID, paneId: String) {
         guard let store,
               let wi = store.workspaces.firstIndex(where: { $0.id == wsId }) else { return }
+        // The side terminal's panes never live in a tab — route them to
+        // their own teardown first; the tab walk below would silently
+        // no-op on them.
+        if store.workspaces[wi].auxTerminalPanes.contains(where: { $0.id == paneId }) {
+            auxTerminalExited(wsId: wsId, paneId: paneId)
+            return
+        }
         let runtimeId = HostKey(workspace: wsId, pane: paneId).runtimeId
         let daemon = daemonFor?(store.workspaces[wi]) ?? .shared
         DispatchQueue.global(qos: .utility).async {
@@ -598,6 +670,126 @@ final class WorkspaceCoordinator {
         ensureWorkspaceHasTab(index: wi)
         store.save()
         delegate?.coordinatorDidChange(.structure)
+    }
+
+    // MARK: Side terminal (right panel; spec 2026-08-30)
+
+    /// Materialize the FOCUSED workspace's first side-terminal pane.
+    /// Splits never land here (splitAuxTerminal appends); an existing
+    /// terminal is returned untouched — the daemon owns the sessions,
+    /// "ensure" never respawns. The spawn cwd is resolved by the delegate
+    /// layer when it builds the host (same structure pass); only the pane
+    /// is persisted.
+    @discardableResult
+    func ensureAuxTerminal() -> String? {
+        guard let store, store.workspaces.indices.contains(store.focusedIndex) else { return nil }
+        let wi = store.focusedIndex
+        // Reopening always un-gates auto-create — the closed flag marks
+        // "the user said no"; an explicit ensure IS the user saying yes.
+        runtime[store.workspaces[wi].id, default: Runtime()].auxClosed = false
+        if let existing = store.workspaces[wi].auxTerminalPanes.first { return existing.id }
+        let pane = PaneState(id: UUID().uuidString, cwd: nil)
+        store.workspaces[wi].auxTerminalPanes = [pane]
+        store.save()
+        delegate?.coordinatorDidChange(.structure)
+        return pane.id
+    }
+
+    /// The auto-create gate's other half (spec §2): a closed terminal
+    /// stays closed — only "never opened" (or reopened) auto-creates.
+    func auxTerminalClosed(wsId: UUID) -> Bool {
+        runtime[wsId]?.auxClosed ?? false
+    }
+
+    /// A click landed in one of the panel's panes: it becomes the pane
+    /// the header speaks for (cwd label + cd chip target).
+    func focusAuxPane(wsId: UUID, paneId: String) {
+        runtime[wsId, default: Runtime()].auxFocusedPaneId = paneId
+        delegate?.coordinatorDidChange(.cwd)
+    }
+
+    /// The side pane the header speaks for: the last clicked one,
+    /// falling back to the first (fresh terminal, nothing focused yet).
+    func focusedAuxPane(of ws: WorkspaceState) -> PaneState? {
+        if let id = runtime[ws.id]?.auxFocusedPaneId,
+           let pane = ws.auxTerminalPanes.first(where: { $0.id == id }) { return pane }
+        return ws.auxTerminalPanes.first
+    }
+
+    /// cd chip gate: the focused side pane sits at a shell prompt — the
+    /// injection types into the user's command line, which must not be
+    /// mid-vim/mid-run. Same predicate as PaneHost's @ai arming.
+    func auxTerminalAtPrompt(wsId: UUID) -> Bool {
+        guard let ws = store?.workspaces.first(where: { $0.id == wsId }),
+              let pane = focusedAuxPane(of: ws) else { return false }
+        return Shell.isShellPromptCommand(runtime[wsId]?.agents[pane.id]?.command)
+    }
+
+    /// The cd chip's payload: clear-line + quoted cd + enter — the
+    /// same clear-then-inject shape as handleAITrigger (a half-typed
+    /// line must never absorb the injection). Pure for the headless
+    /// suite to pin byte-for-byte.
+    static func auxCdInjection(to path: String) -> String {
+        "\u{15}cd \(Shell.forceQuoted(path))\r"
+    }
+
+    /// A ghostty split request from one of the side terminal's panes:
+    /// same geometry math as a center split, but on the aux pane array.
+    /// The new pane inherits the SOURCE pane's live cwd (applyCwds
+    /// keeps it current), so the split opens right beside its origin.
+    func splitAuxTerminal(wsId: UUID, paneId: String, vertical: Bool, after: Bool) {
+        guard let store,
+              let wi = store.workspaces.firstIndex(where: { $0.id == wsId }),
+              let target = store.workspaces[wi].auxTerminalPanes
+                  .firstIndex(where: { $0.id == paneId }),
+              let split = Self.splitCells(store.workspaces[wi].auxTerminalPanes,
+                                          target: target, vertical: vertical, after: after)
+        else { return }
+        store.workspaces[wi].auxTerminalPanes = split.cells
+        let frame = split.newFrame
+        store.workspaces[wi].auxTerminalPanes.append(
+            PaneState(id: UUID().uuidString, cwd: split.cells[target].cwd,
+                      left: frame.left, top: frame.top,
+                      width: frame.width, height: frame.height))
+        store.save()
+        delegate?.coordinatorDidChange(.structure)
+    }
+
+    /// One side-terminal pane died (EXITED frame, error path). Removed
+    /// from the array — siblings keep running; an emptied array is the
+    /// panel's empty state. Nothing else in the workspace is touched.
+    func auxTerminalExited(wsId: UUID, paneId: String) {
+        guard let store,
+              let wi = store.workspaces.firstIndex(where: { $0.id == wsId }),
+              let pi = store.workspaces[wi].auxTerminalPanes
+                  .firstIndex(where: { $0.id == paneId }) else { return }
+        let runtimeId = HostKey(workspace: wsId, pane: paneId).runtimeId
+        let daemon = daemonFor?(store.workspaces[wi]) ?? .shared
+        DispatchQueue.global(qos: .utility).async {
+            daemon.killPane(id: runtimeId)
+        }
+        delegate?.retireHost(HostKey(workspace: wsId, pane: paneId))
+        runtime[wsId]?.agents[paneId] = nil
+        if runtime[wsId]?.auxFocusedPaneId == paneId {
+            runtime[wsId]?.auxFocusedPaneId = nil   // header falls back to pane 0
+        }
+        store.workspaces[wi].auxTerminalPanes.remove(at: pi)
+        if store.workspaces[wi].auxTerminalPanes.isEmpty {
+            // The last pane's exit IS a close (spec §2): empty state,
+            // no auto-respawn.
+            runtime[wsId]?.auxClosed = true
+        }
+        store.save()
+        delegate?.coordinatorDidChange(.structure)
+    }
+
+    /// The panel's close button: the whole side terminal (every pane)
+    /// goes, with one confirm at the delegate layer.
+    func closeAuxTerminal(wsId: UUID) {
+        guard let ws = store?.workspaces.first(where: { $0.id == wsId }) else { return }
+        for pane in ws.auxTerminalPanes {
+            auxTerminalExited(wsId: wsId, paneId: pane.id)
+        }
     }
 
     func closeTab() {
@@ -649,6 +841,45 @@ final class WorkspaceCoordinator {
         delegate?.coordinatorDidChange(.title)
     }
 
+    /// Live agent-session title for the tab that hosts `paneId`. Unlike
+    /// renameTab (user override), this follows the session automatically
+    /// — new session, history load, omp's post-turn auto-naming — and
+    /// never touches userTitle. Searches every workspace: the pane's
+    /// tab need not be focused for its title to stay current.
+    func setAgentTabTitle(paneId: String, name: String?) {
+        guard let store else { return }
+        let clean = name?.trimmingCharacters(in: .whitespaces)
+        let value = (clean?.isEmpty == false) ? clean : nil
+        for wi in store.workspaces.indices {
+            guard let ti = store.workspaces[wi].tabs.firstIndex(where: {
+                $0.panes.contains { $0.id == paneId }
+            }) else { continue }
+            guard store.workspaces[wi].tabs[ti].agentTitle != value else { return }
+            store.workspaces[wi].tabs[ti].agentTitle = value
+            store.save()
+            delegate?.coordinatorDidChange(.title)
+            return
+        }
+    }
+
+
+    /// Agent pane: persist the session the user last had loaded here so
+    /// reopening the app re-loads the SAME conversation. Same walk as
+    /// setAgentTabTitle — the pane's tab need not be focused.
+    func setAgentSessionId(paneId: String, sessionId: String?) {
+        guard let store else { return }
+        for wi in store.workspaces.indices {
+            guard let ti = store.workspaces[wi].tabs.firstIndex(where: {
+                $0.panes.contains { $0.id == paneId }
+            }) else { continue }
+            guard let pi = store.workspaces[wi].tabs[ti].panes.firstIndex(where: { $0.id == paneId })
+            else { continue }
+            guard store.workspaces[wi].tabs[ti].panes[pi].agentSessionId != sessionId else { return }
+            store.workspaces[wi].tabs[ti].panes[pi].agentSessionId = sessionId
+            store.save()
+            return
+        }
+    }
     func setTabIcon(index: Int, symbol: String?) {
         guard let store, store.workspaces.indices.contains(store.focusedIndex),
               store.workspaces[store.focusedIndex].tabs.indices.contains(index) else { return }
