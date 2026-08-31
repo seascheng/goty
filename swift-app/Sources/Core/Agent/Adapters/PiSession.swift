@@ -57,8 +57,17 @@ final class PiSession: AgentSessioning {
     private var readyCompletion: ((Bool) -> Void)?
     private var readyTimeoutScheduled = false
     private var respawnedForReadyTimeout = false
-
     private var connected = false
+    var lastSessionId: String?
+    /// Replay gate: on a resume spawn every event is buffered until the
+    /// authoritative store replay lands, then released in order —
+    /// clearTranscript → store history → buffered live frames. Without
+    /// the gate, live chunks of a CONTINUED turn render first, get wiped
+    /// by the later transcriptReset, and turn stats rendered before the
+    /// reset are lost outright (2026-08-31 restart-mid-stream report).
+    private var replayGateActive = false
+    private var gatedEvents: [AgentSessionEvent] = []
+    private var replayGateTimeout: DispatchWorkItem?
     private var resumeSessionId: String?
     private var nextRequestID = 1
     private let responseLock = NSLock()
@@ -140,10 +149,15 @@ final class PiSession: AgentSessioning {
             // omp buckets its sessions by --cwd; the pane cwd alone is
             // not enough for a fresh spawn from a Finder-launched GUI.
             if let cwd, !cwd.isEmpty { args += ["--cwd", cwd] }
-            // omp's --resume wants the exact session file path.
+            // omp's --resume wants the exact session file path. The
+            // resume also opens the replay gate: the continued turn's
+            // live chunks race the store read, and only the gate keeps
+            // the final transcript free of wipes, duplicates, and lost
+            // turn stats (see beginReplayGate).
             if let sessionId,
                let url = OmpSessionStore.fileURL(sessionId: sessionId) {
                 args += ["--resume", url.path]
+                beginReplayGate(sessionId: sessionId)
             }
         case .pi:
             if let sessionId { args += ["--session", sessionId] }
@@ -240,7 +254,8 @@ final class PiSession: AgentSessioning {
         // the mapper (replaying mode emits the user echo).
         if harness == .omp {
             isWorking = state["isStreaming"] as? Bool ?? false
-            ompStoreReplay()
+            // History lands through the replay gate (see openPane); no
+            // direct replay here — the gate owns the ordering.
         }
         var events: [AgentSessionEvent] = [.ready]
         if !configOptions.isEmpty {
@@ -380,15 +395,57 @@ final class PiSession: AgentSessioning {
         emit([.commandsChanged(commands)])
     }
 
-    private func ompStoreReplay() {
-        guard let sid = sessionId else { return }
+    /// Opens the replay gate for a resume spawn: starts reading the
+    /// store immediately (it races the handshake, not the other way
+    /// around) and buffers every emitted event until the authoritative
+    /// history is in. A 5s ceiling releases the gate even if the store
+    /// read fails — the pane must never freeze on its own history.
+    private func beginReplayGate(sessionId sid: String) {
+        replayGateActive = true
+        gatedEvents.removeAll()
+        let timeout = DispatchWorkItem { [weak self] in
+            self?.releaseReplayGate()
+        }
+        replayGateTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeout)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let stored = OmpSessionStore.load(sessionId: sid)
             DispatchQueue.main.async {
-                guard let self, !stored.events.isEmpty else { return }
-                self.emit([.transcriptReset] + stored.events)
+                self?.finishReplayGate(with: stored.events)
             }
         }
+    }
+
+    /// Store history landed. Normal path: prepend it (behind a
+    /// transcript reset) to the buffered live events and release
+    /// everything in order. If the 5s ceiling already released the
+    /// gate, the history still MUST land (never dropped) — it replays
+    /// over whatever rendered in the meantime.
+    private func finishReplayGate(with storedEvents: [AgentSessionEvent]) {
+        guard !storedEvents.isEmpty else {
+            releaseReplayGate()
+            return
+        }
+        var events: [AgentSessionEvent]
+        if replayGateActive {
+            replayGateTimeout?.cancel()
+            events = [.transcriptReset] + storedEvents + gatedEvents
+            gatedEvents = []
+            replayGateActive = false
+        } else {
+            events = [.transcriptReset] + storedEvents
+        }
+        delegate?.session(self, didEmit: events)
+    }
+
+    /// Ceiling release (store read failed or hung): buffered events go
+    /// out as-is, without the history.
+    private func releaseReplayGate() {
+        guard replayGateActive else { return }
+        let events = gatedEvents
+        gatedEvents = []
+        replayGateActive = false
+        delegate?.session(self, didEmit: events)
     }
 
     func send(_ text: String) {
@@ -706,6 +763,13 @@ final class PiSession: AgentSessioning {
 
     private func emit(_ events: [AgentSessionEvent]) {
         guard !events.isEmpty else { return }
-        delegate?.session(self, didEmit: events)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard self.replayGateActive else {
+                self.delegate?.session(self, didEmit: events)
+                return
+            }
+            self.gatedEvents.append(contentsOf: events)
+        }
     }
 }
