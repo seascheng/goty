@@ -160,7 +160,13 @@ final class PiSession: AgentSessioning {
                 beginReplayGate(sessionId: sessionId)
             }
         case .pi:
-            if let sessionId { args += ["--session", sessionId] }
+            // pi EXITS when --session names an id its store no longer
+            // has ("No session found matching '…'" → EXITED → the
+            // pane reported 进程已退出 forever). Only resume ids the
+            // store can still find; a missing one boots fresh.
+            if let sessionId, PiSessionStore.find(sessionId: sessionId) != nil {
+                args += ["--session", sessionId]
+            }
         }
         // omp: the handshake is gated on the ready frame (see
         // handleFrame) — the process answers stdin normally once its
