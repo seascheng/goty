@@ -25,15 +25,20 @@ enum OmpSessionStore {
             .appendingPathComponent(".omp/agent/sessions", isDirectory: true)
     }
 
-    /// Locate `<…>_<sessionId>.jsonl` across all cwd directories.
+    /// Locate `<timestamp>_<sessionId>.jsonl` across all cwd directories
+    /// by SUFFIX — the timestamp prefix is not derivable from the id.
+    /// (An exact-name probe matched nothing: every spawn silently lost
+    /// --resume and session switching spawned fresh conversations.)
     static func fileURL(sessionId: String) -> URL? {
         let suffix = "_" + sessionId + ".jsonl"
-        let dirs = (try? FileManager.default.contentsOfDirectory(
+        let fm = FileManager.default
+        let dirs = (try? fm.contentsOfDirectory(
             at: root, includingPropertiesForKeys: nil)) ?? []
         for dir in dirs where dir.hasDirectoryPath {
-            let candidate = dir.appendingPathComponent(suffix)
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                return candidate
+            let files = (try? fm.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: nil)) ?? []
+            for file in files where file.lastPathComponent.hasSuffix(suffix) {
+                return file
             }
         }
         return nil

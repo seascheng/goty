@@ -304,7 +304,11 @@ final class PiSession: AgentSessioning {
             failAfter.cancel()
             completion?(ok)
         }
-        func negotiateThenState() {
+        // negotiate_protocol is an omp extension (v2 chunked frames);
+        // base pi 0.8x answers it success=false and would fail the
+        // whole handshake (2026-08-31: every pi panel showed 连接失败).
+        // pi goes straight to get_state.
+        if harness == .omp {
             request("negotiate_protocol", ["protocolVersion": 2]) { [weak self] response in
                 guard let self else { return }
                 guard response["success"] as? Bool == true else {
@@ -316,8 +320,11 @@ final class PiSession: AgentSessioning {
                     self?.handleStateResponse(response, completion: finish)
                 }
             }
+        } else {
+            request("get_state") { [weak self] response in
+                self?.handleStateResponse(response, completion: finish)
+            }
         }
-        negotiateThenState()
     }
 
     private func fetchCommands() {
