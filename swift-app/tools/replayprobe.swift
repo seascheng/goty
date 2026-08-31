@@ -55,6 +55,7 @@ final class ProbeDelegate: AgentSessionDelegate {
             case .configChanged: eventCounts["config", default: 0] += 1
             case .commandsChanged: eventCounts["commands", default: 0] += 1
             case .usageUpdate: eventCounts["usage", default: 0] += 1
+            case .starting, .transcriptReset: break
             }
             if let bridge {
                 bridge.push(e.jsRepresentation)
@@ -82,14 +83,14 @@ enum ReplayProbe {
         app.setActivationPolicy(.regular)
 
         let delegate = ProbeDelegate()
-        let session = OmpSession(
-            paneId: "replayprobe-\(Int(Date().timeIntervalSince1970))",
-            cwd: "/Users/seascheng/Downloads/ai_project/goty-agent-gui",
-            grid: SessionGrid(columns: 120, rows: 40, cellWidth: 7, cellHeight: 17),
-            environment: ProcessInfo.processInfo.environment.filter { $0.key != "GOTY_AUTOLOAD_SESSION" },
-            spawn: AgentRegistry.ompSpawn,
-            daemon: .shared,
-            delegate: delegate)
+        let session = PiSession(
+            params: AgentPaneParams(
+                paneId: "replayprobe-\(Int(Date().timeIntervalSince1970))",
+                cwd: "/Users/seascheng/Downloads/ai_project/goty/swift-app",
+                environment: ProcessInfo.processInfo.environment.filter { $0.key != "GOTY_AUTOLOAD_SESSION" },
+                daemon: .shared),
+            harness: .omp)
+        session.delegate = delegate
 
         // Web layer first so the bridge can push live during the replay.
         let webCfg = WKWebViewConfiguration()

@@ -1,12 +1,32 @@
-// goty — see CLAUDE.md for the working principles.
+// goty - see CLAUDE.md for the working principles.
 import Foundation
 
-/// pi over `pi --mode rpc` — pi's own JSONL RPC on a LineChannel pane.
-/// Commands carry optional ids; responses match by id (a small pending
-/// table here — pi's ids live inside payloads, not JSON-RPC envelopes).
-/// Events stream as id-less frames; PiFrameMapper shapes them. Resume
-/// respawns with `--session <id>` and replays get_messages through the
-/// mapper's replay path.
+/// Which pi-mono harness a session drives. Both speak the same JSONL
+/// RPC runtime (`--mode rpc`); the differences stop at this enum:
+///
+/// - argv: omp takes `--cwd <dir>` (and `--resume <file>`); pi has no
+///   --cwd (the pane's cwd buckets its sessions) and resumes via
+///   `--session`;
+/// - handshake: omp negotiates protocol v2 and may send base64
+///   `rpc_chunk` frames that reassemble into one logical frame; pi has
+///   neither;
+/// - events: omp streams tool lifecycle as tool_execution_* frames and
+///   terminates runs with agent_end (pi settles via agent_settled and
+///   carries tools as content blocks);
+/// - recovery: omp renders its transcript from the session store (the
+///   same jsonl the omp TUI reads); pi replays get_messages.
+///
+/// Probed live on omp 18.0.10 / pinned by fixtures for pi 0.84.3.
+enum PiMonoHarness {
+    case pi
+    case omp
+
+    var shell: String { self == .omp ? "omp" : "pi" }
+}
+
+/// One harness of the pi-mono family over `--mode rpc` — JSONL frames
+/// on a LineChannel pane. Commands carry optional ids; responses match
+/// by id. Events stream as id-less frames; PiFrameMapper shapes them.
 final class PiSession: AgentSessioning {
     weak var delegate: AgentSessionDelegate?
 
@@ -16,12 +36,13 @@ final class PiSession: AgentSessioning {
     private(set) var configOptions: [AgentConfigOption] = []
     private(set) var commands: [AgentSlashCommand] = []
 
+    private let harness: PiMonoHarness
     private let paneId: String
     private let environment: [String: String]
     private let daemon: SessionDaemon
     private let grid: SessionGrid
     private let channel = LineChannel()
-    private let mapper = PiFrameMapper()
+    private let mapper: PiFrameMapper
     private var pane: PaneSession?
     private var connected = false
     private var resumeSessionId: String?
@@ -29,15 +50,32 @@ final class PiSession: AgentSessioning {
     private let responseLock = NSLock()
     private var pendingResponses: [String: ([String: Any]) -> Void] = [:]
 
+    /// omp attach: ring frames are SIGNAL-ONLY while the authoritative
+    /// transcript is read from the session store (the ring's callback
+    /// order is not chronological; rendering it scrambled transcripts).
+    private var suppressReplay = false
+
+    /// v2 chunked frames: base64 rpc_chunk sequences reassembled per
+    /// chunkId (≤64 MiB, ≤4096 parts — omp's ready-frame caps).
+    private struct ChunkAssembly {
+        var count: Int
+        var parts: [Int: Data]
+        var bytes: Int
+    }
+    private var chunkAssemblies: [String: ChunkAssembly] = [:]
+
     /// Integrity accounting.
     private(set) var framesRouted = 0
 
-    init(params: AgentPaneParams) {
+    init(params: AgentPaneParams, harness: PiMonoHarness = .pi) {
+        self.harness = harness
         self.paneId = params.paneId
         self.cwd = params.cwd
         self.environment = params.environment
         self.daemon = params.daemon
         self.grid = AgentPaneDefaults.grid
+        self.mapper = PiFrameMapper(terminalOnAgentEnd: harness == .omp)
+        self.resumeSessionId = params.restoredSessionId
         channel.onOutbound = { [weak self] in self?.pane?.sendInput($0) }
         channel.onFrame = { [weak self] frame, _ in
             self?.handleFrame(frame)
@@ -60,17 +98,28 @@ final class PiSession: AgentSessioning {
         pane = nil
         connected = true
         // A fresh spawn resumes the agent's own session natively
-        // (--session); an attach re-syncs state over the live process.
+        // (--session / --resume); an attach re-syncs state over the
+        // live process.
         openPane(resume: lastSessionId ?? resumeSessionId, completion: completion)
     }
 
-    private func openPane(resume: String?, completion: ((Bool) -> Void)?) {
+    private func openPane(resume sessionId: String?, completion: ((Bool) -> Void)?) {
         var args = ["--mode", "rpc"]
-        if let resume {
-            args += ["--session", resume]
+        switch harness {
+        case .omp:
+            // omp buckets its sessions by --cwd; the pane cwd alone is
+            // not enough for a fresh spawn from a Finder-launched GUI.
+            if let cwd, !cwd.isEmpty { args += ["--cwd", cwd] }
+            // omp's --resume wants the exact session file path.
+            if let sessionId,
+               let url = OmpSessionStore.fileURL(sessionId: sessionId) {
+                args += ["--resume", url.path]
+            }
+        case .pi:
+            if let sessionId { args += ["--session", sessionId] }
         }
         guard let opened = daemon.openPaneWithAttachment(
-            id: paneId, cwd: cwd, shell: "pi", args: args,
+            id: paneId, cwd: cwd, shell: harness.shell, args: args,
             environment: environment, grid: grid,
             noEcho: true, ringBytes: 16_777_216,
             onFrame: { [weak self] kind, data in
@@ -89,42 +138,92 @@ final class PiSession: AgentSessioning {
         }
         opened.session.start()
         pane = opened.session
-        // Ready = get_state answered: model known, session id captured.
-        // Also the attach path's state sync — get_state is a query, safe
-        // against the live process we just reattached to.
-        request("get_state") { [weak self] response in
-            guard let self else { return }
-            guard response["success"] as? Bool == true,
-                  let state = response["data"] as? [String: Any] else {
-                self.delegate?.sessionDidFail(self, reason: "pi get_state 失败")
-                completion?(false)
-                return
-            }
-            self.sessionId = state["sessionId"] as? String
-            self.applyState(state)
-            var events: [AgentSessionEvent] = [.ready]
-            if !self.configOptions.isEmpty {
-                events.append(.configChanged(self.configOptions))
-            }
-            self.emit(events)
-            self.request("get_commands") { [weak self] response in
-                guard let self, response["success"] as? Bool == true else { return }
-                // Response wraps the list: {"commands":[…]} (verified
-                // live); a bare array is tolerated for forward compat.
-                let payload = response["data"] as? [String: Any]
-                let data = (payload?["commands"] as? [[String: Any]])
-                    ?? (response["data"] as? [[String: Any]]) ?? []
-                let commands: [AgentSlashCommand] = data.compactMap { raw in
-                    guard let name = raw["name"] as? String else { return nil }
-                    return AgentSlashCommand(name: name,
-                                             description: raw["description"] as? String,
-                                             inputHint: nil)
+        // Ready = state answered: session id captured, config known.
+        // get_state is a query — safe against the live process an
+        // attach just reconnected to.
+        handshake(completion: completion)
+    }
+
+    private func handshake(completion: ((Bool) -> Void)?) {
+        func stateStep() {
+            request("get_state") { [weak self] response in
+                guard let self else { return }
+                guard response["success"] as? Bool == true,
+                      let state = response["data"] as? [String: Any] else {
+                    self.delegate?.sessionDidFail(self, reason: "\(self.harness.shell) get_state 失败")
+                    completion?(false)
+                    return
                 }
-                guard !commands.isEmpty else { return }
-                self.commands = commands
-                self.emit([.commandsChanged(commands)])
+                self.sessionId = state["sessionId"] as? String ?? self.sessionId
+                self.applyState(state)
+                // omp: the ring is signal-only; the authoritative
+                // transcript comes from the session store (user side
+                // included, aborted turns settled). pi: the ring replay
+                // already rendered through the mapper (replaying mode
+                // emits the user echo).
+                if self.harness == .omp {
+                    self.isWorking = state["isStreaming"] as? Bool ?? false
+                    self.ompStoreReplay()
+                }
+                var events: [AgentSessionEvent] = [.ready]
+                if !self.configOptions.isEmpty {
+                    events.append(.configChanged(self.configOptions))
+                }
+                self.emit(events)
+                if self.harness == .pi {
+                    self.fetchCommands()
+                }
+                completion?(true)
             }
-            completion?(true)
+        }
+        // omp runs a versioned protocol: agree on v2 before anything
+        // else (60s ceiling mirrors the reference runtime).
+        if harness == .omp {
+            request("negotiate_protocol", ["protocolVersion": 2]) { response in
+                guard response["success"] as? Bool == true else {
+                    self.delegate?.sessionDidFail(self, reason: "omp 不支持 RPC v2，请升级 CLI")
+                    completion?(false)
+                    return
+                }
+                stateStep()
+            }
+        } else {
+            stateStep()
+        }
+    }
+
+    private func fetchCommands() {
+        request("get_commands") { [weak self] response in
+            guard let self, response["success"] as? Bool == true else { return }
+            // Response wraps the list: {"commands":[…]} (verified
+            // live); a bare array is tolerated for forward compat.
+            let payload = response["data"] as? [String: Any]
+            let data = (payload?["commands"] as? [[String: Any]])
+                ?? (response["data"] as? [[String: Any]]) ?? []
+            self.applyCommands(data)
+        }
+    }
+
+    private func applyCommands(_ data: [[String: Any]]) {
+        let commands: [AgentSlashCommand] = data.compactMap { raw in
+            guard let name = raw["name"] as? String else { return nil }
+            return AgentSlashCommand(name: name,
+                                     description: raw["description"] as? String,
+                                     inputHint: (raw["input"] as? [String: Any])?["hint"] as? String)
+        }
+        guard !commands.isEmpty else { return }
+        self.commands = commands
+        emit([.commandsChanged(commands)])
+    }
+
+    private func ompStoreReplay() {
+        guard let sid = sessionId else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let stored = OmpSessionStore.load(sessionId: sid)
+            DispatchQueue.main.async {
+                guard let self, !stored.events.isEmpty else { return }
+                self.emit([.transcriptReset] + stored.events)
+            }
         }
     }
 
@@ -140,8 +239,8 @@ final class PiSession: AgentSessioning {
     }
 
     func respondPermission(requestID: String, optionId: String) {
-        // pi rpc auto-approves per its config in v1; no permission
-        // requests are mapped, so an answer here is a no-op.
+        // rpc mode auto-approves per the agent's own config in v1; no
+        // permission requests are mapped, so an answer here is a no-op.
     }
 
     func setConfigOption(id: String, value: String) {
@@ -150,7 +249,9 @@ final class PiSession: AgentSessioning {
 
     func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let summaries = PiSessionStore.summaries(cwd: self.cwd)
+            let summaries = self.harness == .omp
+                ? OmpSessionStore.summaries(cwd: self.cwd)
+                : PiSessionStore.summaries(cwd: self.cwd)
             DispatchQueue.main.async {
                 completion(summaries)
             }
@@ -158,46 +259,39 @@ final class PiSession: AgentSessioning {
     }
 
     func load(sessionId: String, completion: ((Bool) -> Void)? = nil) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            let found = PiSessionStore.find(sessionId: sessionId) != nil
-            DispatchQueue.main.async {
-                guard found else {
-                    completion?(false)
-                    return
-                }
-                self.sessionId = sessionId
-                self.resumeSessionId = sessionId
-                // Swap the pane to the resumed session, then replay its
-                // messages through the mapper once the new process answers.
-                self.pane?.close()
-                self.pane = nil
-                // Pane id is daemon identity (attach-or-spawn): kill the
-                // old process or the reopen would ATTACH to it — a fresh
-                // --session spawn never happens.
-                self.daemon.killPane(id: self.paneId)
-                self.openPane(resume: sessionId) { [weak self] ok in
-                    guard let self, ok else {
+        // Both harnesses swap sessions the same way: kill the pane (or
+        // the reopen would ATTACH to the old process), respawn with the
+        // resume flag, and let the handshake path render — omp from the
+        // store, pi from get_messages.
+        resumeSessionId = sessionId
+        self.sessionId = sessionId
+        pane?.close()
+        pane = nil
+        daemon.killPane(id: paneId)
+        openPane(resume: sessionId) { [weak self] ok in
+            guard let self, ok else {
+                completion?(false)
+                return
+            }
+            if self.harness == .pi {
+                self.request("get_messages") { [weak self] response in
+                    guard let self,
+                          response["success"] as? Bool == true,
+                          let data = response["data"] as? [String: Any],
+                          let messages = data["messages"] as? [[String: Any]] else {
                         completion?(false)
                         return
                     }
-                    self.request("get_messages") { [weak self] response in
-                        guard let self,
-                              response["success"] as? Bool == true,
-                              let data = response["data"] as? [String: Any],
-                              let messages = data["messages"] as? [[String: Any]] else {
-                            completion?(false)
-                            return
-                        }
-                        let replayMapper = PiFrameMapper()
-                        var events: [AgentSessionEvent] = []
-                        for message in messages {
-                            events += replayMapper.mapReplayedMessage(message)
-                        }
-                        self.emit(events)
-                        completion?(true)
+                    let replayMapper = PiFrameMapper()
+                    var events: [AgentSessionEvent] = []
+                    for message in messages {
+                        events += replayMapper.mapReplayedMessage(message)
                     }
+                    self.emit(events)
+                    completion?(true)
                 }
+            } else {
+                completion?(true)
             }
         }
     }
@@ -212,14 +306,23 @@ final class PiSession: AgentSessioning {
 
     private func handleTransportFrame(kind: UInt8, data: Data) {
         switch kind {
-        case SessionOutputKind.output, SessionOutputKind.snapshot:
+        case SessionOutputKind.output:
+            channel.feed([UInt8](data), replay: false)
+        case SessionOutputKind.snapshot:
+            // Ring replay (reattach). pi renders it through the mapper
+            // with the user echo on; omp suppresses rendering entirely —
+            // its transcript lands from the session store instead.
+            if harness == .omp { suppressReplay = true }
+            mapper.replaying = true
             channel.feed([UInt8](data), replay: true)
+            mapper.replaying = false
+            suppressReplay = false
         case SessionOutputKind.exited:
             if isWorking {
                 isWorking = false
                 emit([.turnEnded(stopReason: nil)])
             }
-            delegate?.sessionDidFail(self, reason: "pi 进程已退出")
+            delegate?.sessionDidFail(self, reason: "\(harness.shell) 进程已退出")
         default:
             break
         }
@@ -227,6 +330,13 @@ final class PiSession: AgentSessioning {
 
     private func handleFrame(_ frame: [String: Any]) {
         framesRouted += 1
+        guard frame["type"] as? String != "rpc_chunk" else {
+            if let assembled = feedChunk(frame) {
+                handleFrame(assembled)
+            }
+            return
+        }
+        if suppressReplay { return }
         if frame["type"] as? String == "response",
            let id = frame["id"] as? String {
             responseLock.lock()
@@ -236,8 +346,13 @@ final class PiSession: AgentSessioning {
             return
         }
         let events = mapper.map(frame)
-        if case .turnEnded = events.last {
-            isWorking = false
+        for event in events {
+            if case .commandsChanged(let list) = event {
+                commands = list
+            }
+            if case .turnEnded = event {
+                isWorking = false
+            }
         }
         // Usage rides message frames (input/output token splits).
         if let usage = (frame["usage"] as? [String: Any]),
@@ -249,6 +364,45 @@ final class PiSession: AgentSessioning {
                                costAmount: nil, costCurrency: nil)])
         }
         emit(events)
+    }
+
+    // MARK: omp v2 chunked frames
+
+    private func feedChunk(_ frame: [String: Any]) -> [String: Any]? {
+        guard let chunkId = frame["chunkId"] as? String, !chunkId.isEmpty,
+              let index = frame["index"] as? Int,
+              let count = frame["count"] as? Int,
+              let b64 = frame["data"] as? String,
+              index >= 0, count >= 1, count <= 4096,
+              let decoded = Data(base64Encoded: b64) else {
+            responseLock.lock()
+            chunkAssemblies.removeAll()
+            responseLock.unlock()
+            return nil
+        }
+        responseLock.lock()
+        defer { responseLock.unlock() }
+        var assembly = chunkAssemblies[chunkId]
+            ?? ChunkAssembly(count: count, parts: [:], bytes: 0)
+        guard assembly.count == count else {
+            chunkAssemblies[chunkId] = nil
+            return nil
+        }
+        assembly.parts[index] = decoded
+        assembly.bytes += decoded.count
+        guard assembly.bytes <= 64 * 1024 * 1024 else {
+            chunkAssemblies[chunkId] = nil
+            return nil
+        }
+        guard assembly.parts.count == count else {
+            chunkAssemblies[chunkId] = assembly
+            return nil
+        }
+        chunkAssemblies[chunkId] = nil
+        var joined = Data()
+        joined.reserveCapacity(assembly.bytes)
+        for i in 0..<count { joined.append(assembly.parts[i] ?? Data()) }
+        return try? JSONSerialization.jsonObject(with: joined) as? [String: Any]
     }
 
     private func applyState(_ state: [String: Any]) {
@@ -266,9 +420,9 @@ final class PiSession: AgentSessioning {
         configOptions = options
     }
 
-    /// pi command with id-matched response completion. The pending entry
-    /// registers BEFORE the frame hits the wire (same invariant as
-    /// JSONRPCChannel).
+    /// pi-mono command with id-matched response completion. The pending
+    /// entry registers BEFORE the frame hits the wire (same invariant
+    /// as JSONRPCChannel).
     private func request(_ command: String, _ extra: [String: Any] = [:],
                          completion: @escaping ([String: Any]) -> Void) {
         responseLock.lock()

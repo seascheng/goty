@@ -3,9 +3,9 @@ import Foundation
 
 /// What a GUI agent pane needs from ANY agent implementation. The UI
 /// speaks this interface; each agent family adapts its wire dialect
-/// behind it (Adapters/: OmpSession speaks ACP, Claude/Codex/Pi their
-/// own). Events (`AgentSessionEvent`) are the dialect-neutral currency
-/// crossing this seam.
+/// behind it (Adapters/: Claude/Codex their own, Pi+omp share the
+/// pi-mono rpc runtime in PiSession). Events (`AgentSessionEvent`)
+/// are the dialect-neutral currency crossing this seam.
 protocol AgentSessioning: AnyObject {
     var delegate: AgentSessionDelegate? { get set }
     var sessionId: String? { get }

@@ -39,6 +39,60 @@ enum OmpSessionStore {
         return nil
     }
 
+    /// History list for one workspace: every store file under the
+    /// sessions root, filtered by the pane cwd prefix, newest first.
+    /// The title comes from the title line (omp rewrites a 256-byte slot
+    /// in place — first-line read sees the current value); the session
+    /// id from the filename suffix.
+    static func summaries(cwd: String?) -> [AgentSessionSummary] {
+        let fm = FileManager.default
+        let dirs = (try? fm.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: nil)) ?? []
+        var out: [AgentSessionSummary] = []
+        for dir in dirs where dir.hasDirectoryPath {
+            let files = (try? fm.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+            for file in files where file.pathExtension == "jsonl" {
+                let name = file.deletingPathExtension().lastPathComponent
+                guard let underscore = name.lastIndex(of: "_") else { continue }
+                let sid = String(name[name.index(after: underscore)...])
+                guard sid.contains("-"), sid.count >= 30 else { continue }
+                guard let raw = try? String(contentsOf: file, encoding: .utf8),
+                      let first = raw.split(separator: "\n").first,
+                      let data = first.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data),
+                      let record = json as? [String: Any] else { continue }
+                var sessionCwd: String?
+                var title: String?
+                if record["type"] as? String == "title" {
+                    title = record["title"] as? String
+                }
+                // The session line carries the cwd; the title line may
+                // come first — scan the first few lines for both.
+                for line in raw.split(separator: "\n").prefix(6) {
+                    guard let d = line.data(using: .utf8),
+                          let j = try? JSONSerialization.jsonObject(with: d),
+                          let rec = j as? [String: Any] else { continue }
+                    if rec["type"] as? String == "session" {
+                        sessionCwd = rec["cwd"] as? String
+                    }
+                    if rec["type"] as? String == "title", title == nil {
+                        title = rec["title"] as? String
+                    }
+                }
+                if let cwd, let sessionCwd, !sessionCwd.hasPrefix(cwd) { continue }
+                let date = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate
+                let updated = date?.timeIntervalSince1970 ?? 0
+                let cleanTitle = (title ?? "").isEmpty ? nil : title
+                out.append(AgentSessionSummary(
+                    sessionId: sid, cwd: sessionCwd, title: cleanTitle,
+                    updatedAt: String(Int(updated)), messageCount: nil))
+            }
+        }
+        return out.sorted { (Int($0.updatedAt ?? "") ?? 0) > (Int($1.updatedAt ?? "") ?? 0) }
+    }
+
     /// Authoritative recovery for one session: full history (user side
     /// included) as render events, plus whether its last turn was
     /// aborted, plus omp's title (nil when unnamed).

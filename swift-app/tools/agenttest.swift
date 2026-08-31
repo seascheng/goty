@@ -83,114 +83,90 @@ enum AgentTest {
         let samplePath = "/tmp/goty-agenttest-sample.txt"
         try? "old content".write(toFile: samplePath, atomically: true, encoding: .utf8)
 
-        print("— AgentSession.interpret —")
+        print("— PiFrameMapper (omp rpc) —")
         var events: [AgentSessionEvent] = []
-        let daemon = SessionDaemon(socketPath: "/nonexistent-\(UUID().uuidString)")
-        let session = OmpSession(paneId: "p1", cwd: nil, grid: grid,
-                                   environment: [:],
-                                   spawn: AgentSpawn(
-                                       command: "omp", args: ["acp"],
-                                       ringBytes: 67_108_864),
-                                   daemon: daemon, delegate: nil)
-        events += session.interpret(["method": "session/update", "params": [
-            "sessionId": "s1",
-            "update": ["sessionUpdate": "agent_message_chunk",
-                       "content": ["type": "text", "text": "hello"]],
-        ]])
-        events += session.interpret(["method": "session/update", "params": [
-            "sessionId": "s1",
-            "update": ["sessionUpdate": "tool_call", "toolCallId": "t1",
-                       "title": "Read file", "kind": "read", "status": "completed",
-                       "content": [["type": "text", "text": "src/main.rs"]]],
-        ]])
+        let rpcMapper = PiFrameMapper(terminalOnAgentEnd: true)
+
+        // Live delta stream (message_update.assistantMessageEvent).
+        events += rpcMapper.map(["type": "message_update", "assistantMessageEvent": [
+            "type": "text_delta", "delta": "hello"]])
+        events += rpcMapper.map(["type": "message_update", "assistantMessageEvent": [
+            "type": "thinking_delta", "delta": "pondering"]])
         check(events.count == 2, "two events so far")
-        if case .messageChunk(let text)? = events.first, text == "hello" {} else { failures += 1; print("FAIL  messageChunk payload") }
-        if case .toolCallUpdate(let id, _, _, let status, let content, let output, let rawInput, let oldText) = events.last,
-           id == "t1", status == "completed", content.count == 1, output.isEmpty,
-           rawInput == nil, oldText == nil {} else { failures += 1; print("FAIL  toolCallUpdate payload") }
+        if case .messageChunk(let text)? = events.first, text == "hello" {} else {
+            failures += 1; print("FAIL  messageChunk payload")
+        }
+        if case .thoughtChunk(let think)? = events.last, think == "pondering" {} else {
+            failures += 1; print("FAIL  thoughtChunk payload")
+        }
 
-        events += session.interpret(["method": "session/update", "params": [
-            "sessionId": "s1",
-            "update": ["sessionUpdate": "tool_call", "toolCallId": "t2", "kind": "edit",
-                       "status": "pending",
-                       "rawInput": ["path": samplePath, "content": "new"],
-                       "content": [["type": "text", "text": "x"]]],
-        ]])
-        if case .toolCallUpdate(_, _, let kind, _, _, _, let editInput, let oldText)? = events.last,
-           kind == "edit",
-           let editPath = editInput?["path"] as? String, editPath == samplePath,
-           oldText == "old content" {} else { failures += 1; print("FAIL  edit oldText snapshot") }
+        // omp tool lifecycle frames (probed 18.0.10).
+        events += rpcMapper.map(["type": "tool_execution_start",
+                                 "toolCallId": "t1", "toolName": "bash",
+                                 "args": ["command": "ls -la"],
+                                 "intent": "Listing files"])
+        if case .toolCallUpdate(let id, let title, _, let status, let content, _, _, _)? = events.last,
+           id == "t1", title == "Listing files", status == "in_progress",
+           content.first?.text == "ls -la" {} else {
+            failures += 1; print("FAIL  tool_execution_start payload")
+        }
+        events += rpcMapper.map(["type": "tool_execution_update",
+                                 "toolCallId": "t1", "toolName": "bash",
+                                 "args": ["command": "ls -la"],
+                                 "partialResult": ["content":
+                                    [["type": "text", "text": "partial body"]]]])
+        if case .toolCallUpdate(_, _, _, let status, _, let output, _, _)? = events.last,
+           status == "in_progress", output.first?.text == "partial body" {} else {
+            failures += 1; print("FAIL  tool_execution_update partial output")
+        }
+        events += rpcMapper.map(["type": "tool_execution_end",
+                                 "toolCallId": "t1", "toolName": "bash",
+                                 "result": ["content":
+                                    [["type": "text", "text": "tool result body"]]],
+                                 "isError": false])
+        if case .toolCallUpdate(_, _, _, let status, _, let output, _, _)? = events.last,
+           status == "completed", output.first?.text == "tool result body" {} else {
+            failures += 1; print("FAIL  tool_execution_end payload")
+        }
+        // The end frame is terminal for the call: a duplicate end must
+        // not re-emit (omp may redeliver on retry paths).
+        let before = events.count
+        events += rpcMapper.map(["type": "tool_execution_end",
+                                 "toolCallId": "t1", "toolName": "bash",
+                                 "result": ["content": [["type": "text", "text": "dup"]]],
+                                 "isError": false])
+        check(events.count == before, "duplicate tool end deduped")
 
-        // Replayed history echoes the user's prompts as user_message_chunk;
-        // dropping them erased every user turn from resumed transcripts.
-        events += session.interpret(["method": "session/update", "params": [
-            "sessionId": "s1",
-            "update": ["sessionUpdate": "user_message_chunk",
-                       "content": ["type": "text", "text": "我看当前已经有了"]],
-        ]])
+        // User echo: suppressed live, emitted in replay mode (a
+        // reattached page rebuilds the user side from the ring).
+        let userFrame: [String: Any] = ["type": "message_end", "message": [
+            "role": "user",
+            "content": [["type": "text", "text": "我看当前已经有了"]]]]
+        events += rpcMapper.map(userFrame)
+        check(events.count == before, "live user echo suppressed")
+        rpcMapper.replaying = true
+        events += rpcMapper.map(userFrame)
+        rpcMapper.replaying = false
         if case .userChunk(let userText)? = events.last, userText == "我看当前已经有了" {} else {
-            failures += 1; print("FAIL  user_message_chunk replay")
-        }
-        // Full fidelity, both wire shapes: nested content wrappers and
-        // rawOutput results survive untouched — no cap. The old flat-only
-        // reader plus the 64 KiB cap dropped exactly these on resume.
-        events += session.interpret(["method": "session/update", "params": [
-            "sessionId": "s1",
-            "update": ["sessionUpdate": "tool_call_update", "toolCallId": "t3",
-                       "status": "completed",
-                       "content": [["type": "content", "content":
-                                       ["type": "text", "text": String(repeating: "x", count: 100_000)]]],
-                       "rawOutput": ["content": [["type": "text", "text": "tool result body"]]],
-        ]]])
-        if case .toolCallUpdate(_, _, _, _, let big, let bigOut, _, _)? = events.last,
-           big.first?.text?.count == 100_000,
-           bigOut.first?.text == "tool result body" {} else {
-            failures += 1; print("FAIL  full-fidelity tool payloads (nested + rawOutput, no cap)")
+            failures += 1; print("FAIL  user echo in replay mode")
         }
 
-        events += session.interpret(["method": "session/update", "params": [
-            "sessionId": "s1",
-            "update": ["sessionUpdate": "plan",
-                       "entries": [["content": "step 1", "priority": "high", "status": "pending"]]],
-        ]])
-        if case .plan(let entries)? = events.last, entries.count == 1,
-           entries[0].content == "step 1" {} else { failures += 1; print("FAIL  plan payload") }
+        // agent_end: terminal for omp (turnEnded), non-terminal frames
+        // (auto-retry boundaries) must not settle the turn.
+        events += rpcMapper.map(["type": "agent_end", "isTerminal": false])
+        if case .turnEnded?? = events.last { failures += 1; print("FAIL  non-terminal agent_end settled the turn") }
+        events += rpcMapper.map(["type": "agent_end"])
+        if case .turnEnded?? = events.last {} else { failures += 1; print("FAIL  terminal agent_end ends turn") }
 
-        events += session.interpret(["id": 7, "method": "session/request_permission", "params": [
-            "sessionId": "s1", "toolCall": ["title": "bash"],
-            "options": [["optionId": "allow", "name": "Allow", "kind": "allow_once"]],
-        ]])
-        if case .permissionRequested(let prompt)? = events.last, prompt.requestID == "7",
-           prompt.toolCallTitle == "bash",
-           prompt.options.first?.optionId == "allow" {} else { failures += 1; print("FAIL  permission prompt") }
-
-        events += session.interpret(["method": "session/update", "params": [
-            "sessionId": "s1",
-            "update": ["sessionUpdate": "available_commands_update",
-                       "availableCommands": [["name": "model", "description": "Show current model"],
-                                             ["name": "fast", "input": ["hint": "[on|off]"]]]],
-        ]])
+        // available_commands_update carries omp's slash commands.
+        events += rpcMapper.map(["type": "available_commands_update",
+                                 "commands": [["name": "model", "description": "Show current model"],
+                                              ["name": "fast", "input": ["hint": "[on|off]"]]]])
         if case .commandsChanged(let commands)? = events.last, commands.count == 2,
-           commands[0].name == "model", commands[1].inputHint == "[on|off]" {} else { failures += 1; print("FAIL  commands payload") }
-        check(session.commands.count == 2, "commands stored on session")
+           commands[0].name == "model", commands[1].inputHint == "[on|off]" {} else {
+            failures += 1; print("FAIL  commands payload")
+        }
 
-        events += session.interpret(["method": "session/update", "params": [
-            "sessionId": "s1",
-            "update": ["sessionUpdate": "usage_update", "used": 19754, "size": 1000000,
-                       "input": 18000, "output": 1754,
-                       "cost": ["amount": 0.0171, "currency": "USD"]],
-        ]])
-        if case .usageUpdate(let used, let size, let input, let output,
-                              let costAmount, let costCurrency)? = events.last,
-           used == 19754, size == 1000000, input == 18000, output == 1754,
-           costAmount == 0.0171, costCurrency == "USD" {} else { failures += 1; print("FAIL  usage payload") }
-        events += session.interpret(["method": "session/update", "params": [
-            "sessionId": "s1",
-            "update": ["sessionUpdate": "usage_update", "used": 19754, "size": 1000000,
-                       "cost": ["amount": 0.0171, "currency": "USD"]],
-        ]])
-        if case .usageUpdate(_, _, let noIn, let noOut, _, _)? = events.last,
-           noIn == nil && noOut == nil {} else { failures += 1; print("FAIL  usage without token split stays nil") }
 
         print("— ACPContentNormalizer —")
         check(ACPContentNormalizer.flatten([["type": "text", "text": "a"]]).first?.text == "a",
@@ -286,8 +262,8 @@ enum AgentTest {
         check(promptReplays.count == 1, "live prompt request does not surface as replay")
 
         print("— integrity counters —")
-        check(session.bytesFed == 0 && session.eventsEmitted > 0,
-              "events counted without frames fed")
+        check(rpcMapper.eventsRouted > 0 && rpcMapper.framesIgnored > 0,
+              "mapper counts routed and ignored frames")
         check(rc.messagesRouted == 3, "messages routed counted")
         print("— UserShellEnv —")
         // The Finder-launch regression: a non-interactive capture missed
@@ -299,7 +275,7 @@ enum AgentTest {
 
         print("— registry —")
         let omp = AgentRegistry.descriptor(for: "omp")
-        check(omp?.spawn.command == "omp" && omp?.spawn.args == ["acp"], "omp acp spawn")
+        check(omp?.spawn.command == "omp" && omp?.spawn.args == ["--mode", "rpc"], "omp rpc spawn")
         check(omp?.spawn.ringBytes == 67_108_864, "omp uses the 64 MiB ring")
         check(AgentRegistry.descriptors.first?.key == "omp", "picker order leads with omp")
         let path = UserShellEnv.asDictionary["PATH"] ?? ""

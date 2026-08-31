@@ -55,14 +55,9 @@ enum AgentRegistry {
             key: "omp",
             label: "OMP",
             binary: "omp",
-            spawn: AgentSpawn(command: "omp", args: ["acp"], ringBytes: 67_108_864),
-            make: { params in
-                OmpSession(paneId: params.paneId, cwd: params.cwd,
-                           grid: AgentPaneDefaults.grid,
-                           environment: params.environment,
-                           spawn: ompSpawn, daemon: params.daemon,
-                           restoredSessionId: params.restoredSessionId)
-            }),
+            spawn: AgentSpawn(command: "omp", args: ["--mode", "rpc"],
+                              ringBytes: 67_108_864),
+            make: { params in PiSession(params: params, harness: .omp) }),
         AgentDescriptor(
             key: "claude",
             label: "Claude Code",
@@ -88,9 +83,9 @@ enum AgentRegistry {
             make: { params in PiSession(params: params) }),
     ]
 
-    /// The omp spawn shape shared by the descriptor table above and
-    /// tests that construct AgentSession directly.
-    static let ompSpawn = AgentSpawn(command: "omp", args: ["acp"], ringBytes: 67_108_864)
+    /// The omp spawn shape tests construct PiSession(.omp) panes with.
+    static let ompSpawn = AgentSpawn(command: "omp", args: ["--mode", "rpc"],
+                                     ringBytes: 67_108_864)
 
     static func descriptor(for key: String) -> AgentDescriptor? {
         descriptors.first { $0.key == key }
