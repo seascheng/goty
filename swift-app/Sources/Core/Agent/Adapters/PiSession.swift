@@ -136,22 +136,18 @@ final class PiSession: AgentSessioning {
         case .pi:
             if let sessionId { args += ["--session", sessionId] }
         }
-        // omp: the handshake rides the daemon's spawn prewrite — omp's
-        // Bun stdin only processes input buffered at boot (post-startup
-        // writes are never surfaced by its event loop, probed
-        // 2026-08-31), so negotiate+get_state must already be in the PTY
-        // when the process starts. The responses arrive through the
-        // channel as ordinary id-matched frames; register their pending
-        // completions BEFORE the spawn so nothing races.
-        var prewrite: String?
-        if harness == .omp {
-            prewrite = bootHandshakePrewrite(completion: completion)
-        }
+        // omp: the handshake is gated on the ready frame (see
+        // handleFrame) — the process answers stdin normally once its
+        // RPC loop is up; a burst written before that strands all but
+        // the first line (PTY line discipline, probed 2026-08-31).
+        // A pane left over from the pre-migration ACP era speaks a
+        // DIFFERENT protocol: its output has no ready frame, so the
+        // handshake would never fire — handleReadyTimeout respawns
+        // with the rpc argv and --resume below.
         guard let opened = daemon.openPaneWithAttachment(
             id: paneId, cwd: cwd, shell: harness.shell, args: args,
             environment: environment, grid: grid,
             noEcho: true, ringBytes: 16_777_216,
-            prewrite: prewrite,
             onFrame: { [weak self] kind, data in
                 self?.handleTransportFrame(kind: kind, data: data)
             },
@@ -168,10 +164,10 @@ final class PiSession: AgentSessioning {
         }
         opened.session.start()
         pane = opened.session
-        // pi answers get_state immediately after spawn. omp's handshake
-        // already rode the spawn prewrite; the ready frame stays as a
-        // fallback trigger for environments where the prewrite was
-        // eaten by the pane wrapper.
+        // pi answers the handshake immediately after spawn (its node
+        // runtime has no PTY first-line stranding); omp waits for the
+        // ready frame — live on a fresh spawn, or inside the ring
+        // replay when attaching to a live pane.
         if harness == .omp {
             handshakeStarted = false
             readyCompletion = completion
@@ -193,10 +189,6 @@ final class PiSession: AgentSessioning {
         }
     }
 
-    /// omp's spawn prewrite: negotiate + get_state as two JSONL lines.
-    /// The ids are registered in `pendingResponses` first (see openPane)
-    /// so the daemon-pre-written responses route like any other.
-
     /// The ready frame never arrived: the pane is either an old ACP
     /// process or a dead process the daemon still lists. Respawn once
     /// with the current harness argv; the next openPane's ready frame
@@ -213,7 +205,7 @@ final class PiSession: AgentSessioning {
     }
 
     /// Shared get_state handler: the pi immediate handshake and the omp
-    /// spawn-prewrite response both land here.
+    /// ready-gated handshake both land here.
     private func handleStateResponse(_ response: [String: Any],
                                      completion: ((Bool) -> Void)?) {
         guard response["success"] as? Bool == true,
@@ -244,35 +236,13 @@ final class PiSession: AgentSessioning {
         completion?(true)
     }
 
-    /// omp's spawn prewrite: negotiate + get_state as two JSONL lines.
-    /// Their pending completions are registered BEFORE the spawn (see
-    /// openPane) so the daemon-pre-written responses route like any
-    /// other id-matched frame.
-    private func bootHandshakePrewrite(completion: ((Bool) -> Void)?) -> String {
-        let negotiate = ["id": "boot-1", "type": "negotiate_protocol",
-                         "protocolVersion": 2] as [String: Any]
-        let state = ["id": "boot-2", "type": "get_state"] as [String: Any]
-        responseLock.lock()
-        pendingResponses["boot-1"] = { [weak self] response in
-            guard let self else { return }
-            if response["success"] as? Bool != true {
-                self.delegate?.sessionDidFail(self, reason: "omp 不支持 RPC v2，请升级 CLI")
-                completion?(false)
-            }
-        }
-        pendingResponses["boot-2"] = { [weak self] response in
-            guard let self else { return }
-            self.handleStateResponse(response, completion: completion)
-        }
-        responseLock.unlock()
-        func line(_ obj: [String: Any]) -> String {
-            (try? JSONSerialization.data(withJSONObject: obj)).flatMap {
-                String(data: $0, encoding: .utf8)
-            } ?? ""
-        }
-        return line(negotiate) + "\n" + line(state) + "\n"
-    }
-
+    /// ready-gated handshake, one command in flight at a time. omp's
+    /// PTY delivers ONE line per read until its reader loop spins up,
+    /// so a two-line burst written at once can strand the second line
+    /// forever (probed 2026-08-31: prewrite boots answered negotiate
+    /// but never get_state). Sequential request→response→request is
+    /// also the shape gooey-pi's runtime uses against the same
+    /// protocol.
     private func handshake(completion: ((Bool) -> Void)?) {
         // The host's 90s watchdog is disarmed by our early .ready (the
         // session-name render); a genuinely broken handshake must still
@@ -291,10 +261,20 @@ final class PiSession: AgentSessioning {
             failAfter.cancel()
             completion?(ok)
         }
-        request("get_state") { [weak self] response in
-            guard let self else { return }
-            self.handleStateResponse(response, completion: finish)
+        func negotiateThenState() {
+            request("negotiate_protocol", ["protocolVersion": 2]) { [weak self] response in
+                guard let self else { return }
+                guard response["success"] as? Bool == true else {
+                    self.delegate?.sessionDidFail(self, reason: "omp 不支持 RPC v2，请升级 CLI")
+                    finish(false)
+                    return
+                }
+                request("get_state") { [weak self] response in
+                    self?.handleStateResponse(response, completion: finish)
+                }
+            }
         }
+        negotiateThenState()
     }
 
     private func fetchCommands() {
@@ -450,7 +430,11 @@ final class PiSession: AgentSessioning {
             }
             return
         }
-        if suppressReplay { return }
+        // Protocol plumbing is exempt from replay suppression: the
+        // ready frame of a LIVE pane arrives only inside the ring
+        // replay (the process emitted it once at boot), so gating the
+        // handshake behind suppressReplay deadlocks attach. Stale
+        // replayed responses simply match no pending id and drop.
         if frame["type"] as? String == "ready",
            harness == .omp, !handshakeStarted {
             handshakeStarted = true
@@ -459,8 +443,6 @@ final class PiSession: AgentSessioning {
             handshake(completion: completion)
             return
         }
-
-        if suppressReplay { return }
         if frame["type"] as? String == "response",
            let id = frame["id"] as? String {
             responseLock.lock()
@@ -469,6 +451,9 @@ final class PiSession: AgentSessioning {
             completion?(frame)
             return
         }
+        // Transcript frames from the ring replay stay suppressed for
+        // omp: the session store is the authoritative transcript.
+        if suppressReplay { return }
         let events = mapper.map(frame)
         for event in events {
             if case .commandsChanged(let list) = event {

@@ -240,9 +240,6 @@ final class SessionDaemon {
             var request = Self.agentSpawnPayload(
                 cwd: cwd, shell: shell, args: args, environment: environment,
                 grid: grid, noEcho: noEcho, ringBytes: ringBytes, ringInput: ringInput)
-            if let prewrite {
-                request["prewrite"] = prewrite
-            }
             request["pane_id"] = id
             guard let data = try? JSONSerialization.data(withJSONObject: request),
                   Self.writeFrame(fd: fd, kind: SessionFrame.spawn, payload: data),

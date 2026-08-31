@@ -249,14 +249,7 @@ impl Pane {
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);
         let reader = pair.master.try_clone_reader()?;
-        let mut writer = pair.master.take_writer()?;
-        // Pre-write handshake bytes before the child's first read: omp's
-        // Bun stdin only processes input buffered at boot (2026-08-31),
-        // so the RPC handshake must already be in the PTY queue here.
-        if let Some(pre) = request.prewrite.as_deref() {
-            writer.write_all(pre.as_bytes())?;
-            writer.flush()?;
-        }
+        let writer = pair.master.take_writer()?;
         let pane = Arc::new(Self {
             id: request.pane_id.clone(),
             replay_enabled: request.replay,
@@ -598,13 +591,10 @@ fn echo_off_wrapper(shell: &str, args: &[String]) -> (String, Vec<String>) {
     fn quote(token: &str) -> String {
         format!("'{}'", token.replace('\'', "'\\''"))
     }
-    // RAW + no echo: agent runtimes (omp's Bun) read stdin in one
-    // boot-time drain — canonical line buffering would hand them ONE
-    // pre-written line per read and silently drop the rest (edge-
-    // triggered events never fire for residual data on this host,
-    // 2026-08-31). Raw mode makes each read return everything
-    // buffered, so multi-command handshakes (and resume prompts) ride
-    // the spawn prewrite intact.
+    // RAW + no echo: agent RPC frames routinely exceed the canonical
+    // line-discipline limit (1 KiB per line), which would truncate or
+    // stall long prompt writes. Raw mode also makes each read return
+    // everything buffered instead of one line at a time.
     let mut line = String::from("stty raw -echo 2>/dev/null; exec ");
     line.push_str(&quote(shell));
     for arg in args {
