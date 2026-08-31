@@ -138,7 +138,7 @@ enum OmpSessionStore {
                 case "user":
                     for block in blocks where block["type"] as? String == "text" {
                         if let text = block["text"] as? String, !text.isEmpty {
-                            events.append(.userChunk(text))
+                            events.append(.userMessage(text))
                         }
                     }
                 case "assistant":

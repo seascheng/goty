@@ -60,12 +60,7 @@ final class CodexFrameMapper {
             let text = CodexFrameMapper.textOf(item["content"])
             guard !text.isEmpty, !emittedText.contains(id) else { return [] }
             emittedText.insert(id)
-            return [.userChunk(text)]
-        case "assistantMessage":
-            let text = CodexFrameMapper.textOf(item["content"])
-            guard !text.isEmpty, !emittedText.contains(id) else { return [] }
-            emittedText.insert(id)
-            return [.messageChunk(text)]
+            return [.userMessage(text)]
         case "reasoning":
             let text = CodexFrameMapper.textOf(item["text"] ?? item["content"])
             guard !text.isEmpty, !emittedText.contains(id) else { return [] }

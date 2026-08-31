@@ -147,7 +147,7 @@ enum AgentTest {
         rpcMapper.replaying = true
         events += rpcMapper.map(userFrame)
         rpcMapper.replaying = false
-        if case .userChunk(let userText)? = events.last, userText == "我看当前已经有了" {} else {
+        if case .userMessage(let userText)? = events.last, userText == "我看当前已经有了" {} else {
             failures += 1; print("FAIL  user echo in replay mode")
         }
 
@@ -345,7 +345,7 @@ enum AgentTest {
         var replayEvents: [AgentSessionEvent] = []
         for frame in claudeHistory { replayEvents += replayMapper.map(frame) }
         check(replayEvents.contains(where: {
-            if case .userChunk(let text) = $0 {
+            if case .userMessage(let text) = $0 {
                 return text.contains("HELLO_CLAUDE")
             }
             return false
@@ -376,11 +376,11 @@ enum AgentTest {
             }
         }
         check(codexEvents.contains(where: {
-            if case .userChunk(let text) = $0 {
+            if case .userMessage(let text) = $0 {
                 return text.contains("HELLO_CODEX")
             }
             return false
-        }), "userMessage item maps userChunk (started, no completed dup)")
+        }), "userMessage item maps userMessage (started, no completed dup)")
         check(codexEvents.contains(where: {
             if case .messageChunk(let text) = $0 { return text.contains("[codex]") }
             return false
@@ -442,7 +442,7 @@ enum AgentTest {
             }
         }
         check(piReplayed.contains(where: {
-            if case .userChunk(let text) = $0 { return text.contains("HELLO_PI") }
+            if case .userMessage(let text) = $0 { return text.contains("HELLO_PI") }
             return false
         }), "pi replay carries user prompt")
         check(piReplayed.contains(where: {

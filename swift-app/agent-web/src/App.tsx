@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalSto
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { store, type Block, type PlanEntry, type ToolCall } from "./store";
+import { store, fmtTokens, type Block, type PlanEntry, type ToolCall } from "./store";
 
 /* ——— omp-TUI-style line diff (renderDiff design: ±N gutter, dim context,
    word-level highlight on single-line replacements, … gap collapse) ——— */
@@ -245,13 +245,6 @@ function PlanCard({ entries }: { entries: PlanEntry[] }) {
   );
 }
 
-function fmtTokens(n?: number | null): string {
-  if (n == null) return "";
-  if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "G";
-  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
-  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
-  return String(n);
-}
 
 /// One clickable config knob (mode / model / thinking …) with its option
 /// popover. Selection posts `setConfig`; the OK response re-syncs the
@@ -686,6 +679,7 @@ const BlockView = React.memo(
           rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown></div>) : null;
       case "thought": return <div className="thought"><Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown></div>;
       case "tool": return <ToolCard id={block.call.id} />;
+      case "turnStats": return <div className="turn-stats">{block.text}</div>;
       case "plan": return <PlanCard entries={block.entries} />;
     }
   },
@@ -721,17 +715,9 @@ function StatusLine() {
   } else if (s.phase === "awaitingPermission") {
     chips.push(<span key="ap" className="cstat awaiting" title="等待你在下方授权">等待授权</span>);
   }
-  // Settled turn: duration stats stick around until the next turn.
-  if (chips.length === 0 && !s.working && s.lastTurnMs != null) {
-    const u = s.usage;
-    const parts: string[] = [`⏱ ${(s.lastTurnMs / 1000).toFixed(1)}s`];
-    if (u?.input != null) parts.push(`↑${fmtTokens(u.input)}`);
-    if (u?.output != null) parts.push(`↓${fmtTokens(u.output)}`);
-    if (u?.costAmount != null) {
-      parts.push(`$${u.costAmount < 1 ? u.costAmount.toFixed(4) : u.costAmount.toFixed(2)}`);
-    }
-    chips.push(<span key="ts" className="cstat done">{parts.join(" · ")}</span>);
-  }
+  // (Settled-turn duration lives INSIDE the transcript now — a
+  // turnStats block glued to the turn it closes, so the next user
+  // message appends below it instead of above the composer.)
   if (chips.length === 0) return null;
   return <div className="composer-status">{chips}</div>;
 }

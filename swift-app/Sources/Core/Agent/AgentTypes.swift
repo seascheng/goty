@@ -216,9 +216,13 @@ enum AgentSessionEvent {
     /// "starting", never as silent nothing.
     case starting(agent: String)
     case ready
-    /// `user_message_chunk` — replayed history echoes the user's own
-    /// prompts; live turns echo locally instead, so this only fires on
-    /// session/load.
+    /// One COMPLETE user message — always its own transcript block (the
+    /// JS store fuses consecutive `userChunk`s; replaying two prompts
+    /// that interrupted turns apart must not merge them into one bubble).
+    case userMessage(String)
+    /// `user_message_chunk` — a fragment of one user message; consecutive
+    /// fragments fuse into a single bubble. Live turns echo locally
+    /// instead, so this only fires on session/load replay.
     case userChunk(String)
     case messageChunk(String)
     case thoughtChunk(String)
@@ -258,6 +262,8 @@ extension AgentSessionEvent {
             return ["type": "starting", "agent": agent]
         case .ready:
             return ["type": "status", "text": "就绪"]
+        case .userMessage(let text):
+            return ["type": "userMessage", "text": text]
         case .userChunk(let text):
             return ["type": "userChunk", "text": text]
         case .messageChunk(let text):

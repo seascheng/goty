@@ -27,7 +27,18 @@ export type Block =
   | { kind: "agent"; id: number; text: string }
   | { kind: "thought"; id: number; text: string }
   | { kind: "tool"; id: number; call: ToolCall }
-  | { kind: "plan"; id: number; entries: PlanEntry[] };
+  | { kind: "turnStats"; id: number; text: string }
+  | { kind: "plan"; id: number; entries: PlanEntry[] }
+
+/// Compact token counts (k/M/G), shared by the transcript's turn-stats
+/// rows and the composer usage segments.
+export function fmtTokens(n?: number | null): string {
+  if (n == null) return "";
+  if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "G";
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
+  return String(n);
+}
 
 const ToolContentSchema = z.object({
   type: z.string(),
@@ -348,15 +359,28 @@ class Store {
       case "plan": this.push({ kind: "plan", entries: event.entries ?? [] }); break;
       case "permission": this.permission = event; break;
       case "permissionResolved": this.permission = null; break;
-      case "turnEnded":
-        this.push({ kind: "agent", text: "" });
-        this.working = false;
-        this.phase = null;
+      case "turnEnded": {
+        // Settled-turn stats land IN the transcript, glued to the turn
+        // they close — the next user message must append BELOW them,
+        // not sandwich them at the composer (2026-08-31).
         if (this.turnStartedAt != null) {
           this.lastTurnMs = Date.now() - this.turnStartedAt;
           this.turnStartedAt = null;
         }
+        if (this.lastTurnMs != null) {
+          const parts: string[] = [`⏱ ${(this.lastTurnMs / 1000).toFixed(1)}s`];
+          const u = this.usage;
+          if (u?.input != null) parts.push(`↑${fmtTokens(u.input)}`);
+          if (u?.output != null) parts.push(`↓${fmtTokens(u.output)}`);
+          if (u?.costAmount != null) {
+            parts.push(`$${u.costAmount < 1 ? u.costAmount.toFixed(4) : u.costAmount.toFixed(2)}`);
+          }
+          this.push({ kind: "turnStats", text: parts.join(" · ") });
+        }
+        this.working = false;
+        this.phase = null;
         break;
+      }
       case "sessions": this.sessions = coerceList(event.sessions, AgentSessionSummarySchema); break;
       case "working":
         this.working = event.value;

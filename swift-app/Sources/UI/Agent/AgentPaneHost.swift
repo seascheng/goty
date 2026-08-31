@@ -121,7 +121,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     self.setTurnState(.thinking)
                 }
             case .idle:
-                if self.turnState == .thinking || self.turnState == .executing {
+                // A stale idle report must not kill a turn the adapter
+                // KNOWS is live (isWorking) — e.g. the report lags the
+                // user's next prompt and clobbered 思考中 until the
+                // model's first token arrived (2026-08-31).
+                if (self.turnState == .thinking || self.turnState == .executing),
+                   !self.session.isWorking {
                     self.setTurnState(.idle)
                 }
             case .blocked:
@@ -548,7 +553,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             guard let self else { return }
             for event in events {
                 switch event {
-                case .ready, .configChanged, .userChunk, .messageChunk, .toolCallUpdate:
+                case .ready, .configChanged, .userMessage, .userChunk, .messageChunk, .toolCallUpdate:
                     // First handshake-complete signal cancels the
                     // watchdog (configChanged arrives even when an
                     // adapter omits ready).

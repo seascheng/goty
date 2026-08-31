@@ -188,7 +188,7 @@ final class ClaudeFrameMapper {
         // userChunk so the transcript shows the asking side. Block-form
         // user frames are the tool_result carrier.
         if let text = message["content"] as? String, !text.isEmpty {
-            return [.userChunk(text)]
+            return [.userMessage(text)]
         }
         let blocks = message["content"] as? [[String: Any]] ?? []
         var events: [AgentSessionEvent] = []

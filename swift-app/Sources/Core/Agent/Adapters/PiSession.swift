@@ -576,6 +576,22 @@ final class PiSession: AgentSessioning {
             if case .turnEnded = event {
                 isWorking = false
             }
+            // LIVE content resurrects working state: a stale extension
+            // idle report or an isStreaming=false reattach (get_state
+            // racing a turn in progress) must not leave a streaming
+            // agent reading as idle — the composer's stop button and
+            // Esc routing all hang off working.
+            if !mapper.replaying {
+                switch event {
+                case .messageChunk, .thoughtChunk:
+                    isWorking = true
+                case .toolCallUpdate(_, _, _, let status, _, _, _, _)
+                    where status == "pending" || status == "in_progress":
+                    isWorking = true
+                default:
+                    break
+                }
+            }
         }
         // Usage rides message frames (input/output token splits).
         if let usage = (frame["usage"] as? [String: Any]),

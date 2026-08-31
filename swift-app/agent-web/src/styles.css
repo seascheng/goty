@@ -355,6 +355,13 @@ body {
 .cstat.done { color: var(--accent-bright); }
 .cstat.error { color: var(--destructive); }
 .cstat.error .chip-retry { margin-left: 4px; }
+
+/* Settled-turn duration/tokens, IN the transcript flow — glued to the
+   turn it closes so following user messages append below it. */
+.turn-stats {
+  font-size: 11.5px; color: var(--accent-bright);
+  padding: 2px 0 6px; user-select: none;
+}
 .pane-agent-icon {
   width: 15px; height: 15px; flex: none; margin-left: 2px;
 }

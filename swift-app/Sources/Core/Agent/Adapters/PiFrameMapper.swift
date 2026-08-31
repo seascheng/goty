@@ -94,7 +94,7 @@ final class PiFrameMapper {
         switch role {
         case "user", "custom":
             let text = content.compactMap { $0["text"] as? String }.joined()
-            if !text.isEmpty { events.append(.userChunk(text)) }
+            if !text.isEmpty { events.append(.userMessage(text)) }
         case "assistant":
             for block in content {
                 switch block["type"] as? String {
@@ -152,7 +152,7 @@ final class PiFrameMapper {
             if replaying {
                 let text = (message["content"] as? [[String: Any]] ?? [])
                     .compactMap { $0["text"] as? String }.joined()
-                return text.isEmpty ? [] : [.userChunk(text)]
+                return text.isEmpty ? [] : [.userMessage(text)]
             }
             return []
         case "toolResult":
