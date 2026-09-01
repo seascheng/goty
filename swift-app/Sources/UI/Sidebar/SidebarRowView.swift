@@ -87,12 +87,12 @@ final class SidebarRowView: NSView {
         static func color(for s: SpaceStatus) -> NSColor {
             let dark = Chrome.theme.isDark
             switch s.activity {
-            case .working: return dark ? AgentSpec.statusWorking : AgentSpec.statusWorkingLight
-            case .blocked: return dark ? AgentSpec.statusWaiting : AgentSpec.statusWaitingLight
+            case .working: return dark ? AgentStatusPalette.working : AgentStatusPalette.workingLight
+            case .blocked: return dark ? AgentStatusPalette.waiting : AgentStatusPalette.waitingLight
             case .error: return Chrome.theme.gitRemoved
             case .idle: return s.seen
-                ? (dark ? AgentSpec.statusIdle : AgentSpec.statusIdleLight)
-                : (dark ? AgentSpec.statusDone : AgentSpec.statusDoneLight)
+                ? (dark ? AgentStatusPalette.idle : AgentStatusPalette.idleLight)
+                : (dark ? AgentStatusPalette.done : AgentStatusPalette.doneLight)
             case .unknown: return Chrome.theme.secondaryText
             }
         }

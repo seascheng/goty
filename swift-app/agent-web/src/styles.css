@@ -279,20 +279,69 @@ body {
 .chip svg, .icon-chip svg { color: var(--fg-extra-muted); pointer-events: none; flex: none; }
 .chip:hover svg, .chip.open svg,
 .icon-chip:hover svg, .icon-chip.open svg { color: var(--accent-bright); }
-.chip-name { color: var(--fg-muted); }
-.chip-value { font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chip-caret { color: var(--fg-extra-muted); font-size: 9px; pointer-events: none; }
+/* Config chip styles */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--chip-bg);
+  color: var(--chip-fg);
+  border: 1px solid var(--chip-border);
+  cursor: pointer;
+  user-select: none;
+}
+
+.chip-value {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.chip-caret {
+  font-size: 8px;
+  opacity: 0.6;
+}
 
 .chip-pop {
-  position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 20;
-  min-width: 200px; max-height: 260px; overflow-y: auto; overscroll-behavior: contain;
-  background: var(--surface1); border: 1px solid var(--border-accent); border-radius: var(--radius);
-  padding: 4px; box-shadow: var(--pop-shadow);
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 2px;
+  background: var(--chip-pop-bg);
+  border: 1px solid var(--chip-border);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+  min-width: 120px;
 }
+
 .chip-opt {
-  display: flex; justify-content: space-between; gap: 10px; width: 100%; text-align: left;
-  background: none; border: 0; color: var(--foreground); padding: 5px 8px;
-  border-radius: 5px; font-size: 12px; cursor: pointer;
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  text-align: left;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--chip-opt-fg);
+}
+
+.chip-opt.cur {
+  background: var(--chip-opt-selected-bg);
+  color: var(--chip-opt-selected-fg);
+}
+
+.chip-check {
+  float: right;
+  margin-left: 8px;
+  opacity: 0.6;
+}
+
+.chip-source {
+  font-size: 10px;
+  opacity: 0.6;
+  margin-left: 4px;
 }
 .chip-opt:hover { background: var(--surface3); }
 .chip-opt.cur { color: var(--accent-bright); }
@@ -328,14 +377,14 @@ body {
 }
 .jump-bottom:hover { color: var(--accent-bright); border-color: var(--accent); }
 
-/* Off-screen virtualization, platform-native (paseo uses a row
-   virtualizer; content-visibility is the DOM equivalent with zero
-   bookkeeping): the browser skips layout/paint for transcript blocks
-   outside the viewport while keeping their scroll geometry. */
-.agent, .thought, .tool-card, .turn-stats {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 120px;
-}
+/* NOTE: content-visibility: auto was tried here (2026-09-01) and
+   REMOVED: with the transcript pinned to the bottom, the "relevant to
+   the user" boundary sits exactly at the viewport's top edge — blocks
+   toggling in/out of size-containment oscillated scrollHeight against
+   the follow writer (visible bounce while typing). Windowed rendering
+   (App.tsx INITIAL/WINDOW_PAGE/MAX_WINDOW ≤ 210 mounted blocks) caps
+   the DOM already; do not re-add virtualization without solving the
+   pin-bottom boundary interplay first. */
 
 /* — dual-state action button (paseo style) — */
 .action-btn {
@@ -361,7 +410,7 @@ body {
 .chip.done { cursor: default; color: var(--accent-bright); animation: chipfade 2.5s ease forwards; }
 .chip.done:hover { background: none; border-color: transparent; }
 .chip.error { cursor: default; color: var(--destructive); border-color: var(--destructive); flex-wrap: wrap; }
-.chip.error .chip-value { color: var(--destructive); white-space: normal; max-width: 260px; }
+.chip.error .chip-value { color: var(--destructive); white-space: normal; max-width: 560px; }
 .chip-retry {
   background: var(--destructive); color: #fff; border: 0; border-radius: 4px;
   padding: 1px 7px; font-size: 11px; cursor: pointer;
@@ -393,6 +442,35 @@ body {
   font-size: 11.5px; color: var(--accent-bright);
   padding: 2px 0 6px; user-select: none;
 }
+/* Provider/agent failure line — TUI parity: the error is part of the
+   transcript, not just a transient composer chip. */
+.block-error {
+  color: var(--destructive, #dc2626);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 6px 10px;
+  margin: 4px 0;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  user-select: text;
+}
+[data-theme="dark"] .block-error { color: #f25555; }
+
+/* Agent notice line (extension setStatus, builtin slash-command output
+   like /compact's "Compaction failed: …") — quieter than an error. */
+.block-notice {
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 4px 10px;
+  user-select: text;
+}
+
+/* Retry countdown chip (model rate-limited, agent backing off). */
+.cstat.retry { color: var(--working, #d97706); }
 .pane-agent-icon {
   width: 15px; height: 15px; flex: none; margin-left: 2px;
 }
@@ -590,6 +668,17 @@ body {
 .outbox-mark { color: var(--accent-bright); flex: none; font-size: 11px; }
 .outbox-text {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Render-crash fallback (main.tsx ErrorBoundary) */
+.errorBoundary {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  padding: 48px 24px; color: var(--fg, #eee); font-size: 13px;
+}
+.errorBoundary button {
+  padding: 6px 18px; border-radius: 8px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  background: color-mix(in srgb, currentColor 8%, transparent); color: inherit;
 }
 
 /* assistant-tail branch button (gooey-pi style): hover-only affordance

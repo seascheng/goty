@@ -1,8 +1,9 @@
-import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { store, fmtTokens, type Block, type PlanEntry, type ToolCall } from "./store";
+import { store, fmtTokens, type Block, type ConfigChoice, type PlanEntry, type ToolCall } from "./store";
+import { postToHost } from "./bridge";
 
 /* ——— omp-TUI-style line diff (renderDiff design: ±N gutter, dim context,
    word-level highlight on single-line replacements, … gap collapse) ——— */
@@ -130,11 +131,16 @@ function DiffView({ call }: { call: ToolCall }) {
   const path = typeof raw.path === "string" ? raw.path : null;
   const newText = typeof raw.content === "string" ? raw.content
     : typeof raw.newText === "string" ? raw.newText : null;
-  if (path == null || newText == null) return null;
   const oldText = call.oldText ?? "";
-  const rows = lineDiff(oldText, newText);
-  const adds = rows.filter((r) => r.type === "add").length;
-  const dels = rows.filter((r) => r.type === "del").length;
+  // The DP is O(n·m) — memo it or every parent re-render (streaming
+  // chunks bump the revision constantly) re-runs the whole matrix.
+  // newGuaranteed: the early return below never precedes the hooks.
+  const newGuaranteed = newText ?? "";
+  const rows = useMemo(() => lineDiff(oldText, newGuaranteed),
+                       [oldText, newGuaranteed]);
+  const adds = useMemo(() => rows.filter((r) => r.type === "add").length, [rows]);
+  const dels = useMemo(() => rows.filter((r) => r.type === "del").length, [rows]);
+  if (path == null || newText == null) return null;
   return (
     <div className="diff">
       <div className="diff-head">
@@ -399,7 +405,7 @@ function toolDisplayTitle(call: ToolCall): string {
 
 function ConfigChip({ option, icon, open, onToggle, onPick }: {
   option: { id: string; name: string; currentValue?: string | null;
-            options: { value: string; name: string }[] };
+            options: ConfigChoice[] };
   icon: React.ReactNode;
   open: boolean; onToggle: () => void; onPick: (value: string) => void;
 }) {
@@ -419,6 +425,7 @@ function ConfigChip({ option, icon, open, onToggle, onPick }: {
               onClick={() => onPick(o.value)}>
               <span>{o.name}</span>
               {o.value === option.currentValue && <span className="chip-check">✓</span>}
+              {o.source && <span className="chip-source">({o.source})</span>}
             </button>
           ))}
         </div>
@@ -456,20 +463,23 @@ function HistoryChip({ open, onToggle, onSelect }: {
             <button key={s.sessionId} className="chip-opt hist"
               onClick={() => onSelect(s.sessionId)}>
               <span className="hist-title">{s.title || histFallback(s)}</span>
-              <span className="hist-meta">{s.messageCount != null ? `${s.messageCount} 条` : ""}</span>
+              <span className="hist-meta">
+                {s.messageCount != null ? `${s.messageCount} 条` : ""}
+                {s.updatedAt ? ` · ${histFallback(s)}` : ""}
+              </span>
             </button>
           ))}
           <div className="hist-footer">
             <button className="chip-opt hist-act"
-              onClick={() => window.webkit?.messageHandlers.goty.postMessage({ type: "export" })}>
+              onClick={() => postToHost({ type: "export" })}>
               ⇪ 导出 HTML
             </button>
             <button className="chip-opt hist-act"
-              onClick={() => window.webkit?.messageHandlers.goty.postMessage({ type: "stats" })}>
+              onClick={() => postToHost({ type: "stats" })}>
               Σ 统计
             </button>
             <button className="chip-opt hist-act"
-              onClick={() => window.webkit?.messageHandlers.goty.postMessage({ type: "login" })}>
+              onClick={() => postToHost({ type: "login" })}>
               ⚿ 登录
             </button>
           </div>
@@ -478,8 +488,8 @@ function HistoryChip({ open, onToggle, onSelect }: {
               {store.loginProviders.map((p) => (
                 <button key={String(p.id ?? p.providerId ?? p.name)}
                   className="chip-opt hist-act"
-                  onClick={() => window.webkit?.messageHandlers.goty.postMessage(
-                    { type: "startLogin", providerId: String(p.id ?? p.providerId ?? p.name) })}>
+                  onClick={() => postToHost({ type: "startLogin",
+                    providerId: String(p.id ?? p.providerId ?? p.name) })}>
                   ⚿ 登录 {String(p.name ?? p.id ?? p.providerId)}
                 </button>
               ))}
@@ -502,6 +512,14 @@ function Composer({ working, phase }: { working: boolean;
   const histIdx = useRef<number | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
+  // Retry countdown tick: only live while the agent is backing off.
+  const [retryNow, setRetryNow] = useState(Date.now());
+  useEffect(() => {
+    if (!store.retry) return;
+    setRetryNow(Date.now());
+    const t = setInterval(() => setRetryNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [store.retry]);
 
   // Boot focus (DOM side): the app focuses the webview (responder
   // level); without this the page's activeElement stays BODY and every
@@ -527,7 +545,7 @@ function Composer({ working, phase }: { working: boolean;
 
   useEffect(() => {
     if (atOpen && store.files.length === 0) {
-      window.webkit?.messageHandlers.goty.postMessage({ type: "listFiles" });
+      postToHost({ type: "listFiles" });
     }
   }, [atOpen]);
 
@@ -555,13 +573,15 @@ function Composer({ working, phase }: { working: boolean;
     return () => document.removeEventListener("mousedown", onDown);
   }, []);
 
-  /// mode: normal (idle) · followUp (queue behind the running turn —
-  /// the working-Enter default) · steer (interrupt the turn).
+  /// mode: normal (idle) · steer (interrupt the running turn — the
+  /// working-Enter default, omp TUI parity: Enter steers, the
+  /// follow-up chord queues) · followUp (queue behind the running
+  /// turn — the ⌘⏎ path, omp's app.message.followUp).
   const submit = (mode: "normal" | "steer" | "followUp" = "normal") => {
     const trimmed = text.trim();
     if (!trimmed) return;
-    if (working && mode === "normal") mode = "followUp";
-    window.webkit?.messageHandlers.goty.postMessage({ type: "send", text: trimmed, mode });
+    if (working && mode === "normal") mode = "steer";
+    postToHost({ type: "send", text: trimmed, mode });
     if (mode === "followUp") {
       // QUEUED, not sent yet: omp holds it until the turn settles (probe
       // 2026-09-01: no user echo at enqueue, only at delivery). Echoing
@@ -602,7 +622,7 @@ function Composer({ working, phase }: { working: boolean;
 
 
   const pickConfig = (configId: string, value: string) => {
-    window.webkit?.messageHandlers.goty.postMessage({ type: "setConfig", configId, value });
+    postToHost({ type: "setConfig", configId, value });
     setOpenPop(null);
   };
 
@@ -653,7 +673,7 @@ function Composer({ working, phase }: { working: boolean;
     }
     if (e.key === "Escape" && working && !slashOpen && atMatches.length === 0) {
       e.preventDefault();
-      window.webkit?.messageHandlers.goty.postMessage({ type: "stop" });
+      postToHost({ type: "stop" });
       return;
     }
     if (slashOpen) {
@@ -662,18 +682,19 @@ function Composer({ working, phase }: { working: boolean;
       if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault(); pickSlash(slashMatches[slashIndex].name); return;
       }
-      if (e.key === "Escape") { e.preventDefault(); setText(""); return; }
     }
     if (e.key === "Enter" && e.metaKey && !e.shiftKey) {
-      // ⌘⏎ interrupts the running turn (steer); idle it just sends.
+      // ⌘⏎ queues behind the running turn (omp TUI's Ctrl+Enter /
+      // app.message.followUp chord); idle it just sends.
       e.preventDefault();
-      submit("steer");
+      submit(working ? "followUp" : "normal");
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      // While working, plain Enter QUEUES (follow_up) — never a silent
-      // no-op like before.
+      // While working, plain Enter STEERS — interrupt the run and
+      // inject (omp TUI parity; the queue rides ⌘⏎). Never a silent
+      // no-op.
       submit();
     }
   };
@@ -681,7 +702,7 @@ function Composer({ working, phase }: { working: boolean;
   return (
     <div className="composer">
       <div className="composer-box" ref={boxRef}>
-        {(store.reconnecting || store.starting || store.error != null) && (
+        {(store.reconnecting || store.starting || store.error != null || store.retry != null) && (
         <div className="composer-status">
           {store.reconnecting && (
             <span className="cstat warn" title="连接断开，正在自动重连；远端进程仍在运行">
@@ -697,8 +718,14 @@ function Composer({ working, phase }: { working: boolean;
             <span className="cstat error" title={store.error}>
               {store.error}
               <button className="chip-retry"
-                onClick={() => window.webkit?.messageHandlers.goty.postMessage(
-                  { type: "reconnect" })}>重试</button>
+                onClick={() => postToHost({ type: "reconnect" })}>重试</button>
+            </span>
+          )}
+          {store.retry && (
+            <span className="cstat retry" title={store.retry.errorText
+              ? `模型限流，自动重试中\n\n${store.retry.errorText}`
+              : "模型限流，自动重试中；可稍后手动重发"}>
+              <span className="spin" />重试中 {store.retry.attempt}/{store.retry.maxAttempts} · {Math.max(0, Math.ceil((store.retry.endsAt - retryNow) / 1000))}s
             </span>
           )}
         </div>
@@ -767,10 +794,10 @@ function Composer({ working, phase }: { working: boolean;
             onToggle={() => {
               const next = openPop !== "history";
               setOpenPop(next ? "history" : null);
-              if (next) window.webkit?.messageHandlers.goty.postMessage({ type: "listSessions" });
+              if (next) postToHost({ type: "listSessions" });
             }}
             onSelect={(sessionId) => {
-              window.webkit?.messageHandlers.goty.postMessage({ type: "loadSession", sessionId });
+              postToHost({ type: "loadSession", sessionId });
               store.apply({ type: "clearTranscript" });
               setOpenPop(null);
             }} />
@@ -780,8 +807,7 @@ function Composer({ working, phase }: { working: boolean;
               title={store.runtime.fastActive
                 ? "fast 模式激活中 — 点击关闭"
                 : "开启 fast 模式（优先吞吐档位）"}
-              onClick={() => window.webkit?.messageHandlers.goty.postMessage(
-                { type: "setFast", enabled: !store.runtime?.fastEnabled })}>
+              onClick={() => postToHost({ type: "setFast", enabled: !store.runtime?.fastEnabled })}>
               ⚡
             </button>
           )}
@@ -839,20 +865,20 @@ function Composer({ working, phase }: { working: boolean;
             </span>
           )}
           {working && (
-            <button className="action-btn steer" disabled={!text.trim()}
-              title="打断并发送 (⌘⏎) — 中断当前 turn，立即插话"
-              onClick={() => submit("steer")}>
-              ⇤
+            <button className="action-btn queue" disabled={!text.trim()}
+              title="排队发送 (⌘⏎) — 当前 turn 结束后依次处理"
+              onClick={() => submit("followUp")}>
+              ⇥
             </button>
           )}
           <button
             className={"action-btn " + (working ? "stop" : "send")
               + (phase === "awaitingPermission" ? " awaiting" : "")}
             disabled={working ? false : !text.trim()}
-            title={working ? "排队发送 (Enter) / 停止 (Esc)" : "发送 (Enter)"}
+            title={working ? "插话发送 (Enter，中断当前 turn) / 停止 (空文本或 Esc)" : "发送 (Enter)"}
             onClick={() => working
-              ? (text.trim() ? submit("followUp")
-                : window.webkit?.messageHandlers.goty.postMessage({ type: "stop" }))
+              ? (text.trim() ? submit("steer")
+                : postToHost({ type: "stop" }))
               : submit()}>
             <Icon kind={working ? "stop" : "send"} />
           </button>
@@ -896,8 +922,7 @@ const BranchButton = React.memo(
         disabled={disabled} title={title}
         onClick={() => {
           if (!entryId || busy) return;
-          window.webkit?.messageHandlers.goty.postMessage(
-            { type: "branchNewPane", entryId });
+          postToHost({ type: "branchNewPane", entryId });
         }}>{busy ? "⎿ 分支中…" : label}</button>
     );
   });
@@ -926,6 +951,8 @@ const BlockView = React.memo(
       case "thought": return <div className="thought"><Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown></div>;
       case "tool": return <ToolCard id={block.call.id} />;
       case "turnStats": return <div className="turn-stats">{block.text}</div>;
+      case "error": return <div className="block-error">Error: {block.text}</div>;
+      case "notice": return <div className="block-notice">{block.text}</div>;
     }
   },
   // Same block object usually means nothing changed; tool updates keep
@@ -1035,7 +1062,7 @@ export function App() {
       if ((e.target as HTMLElement | null)?.tagName === "TEXTAREA") return;
       if (!store.working) return;
       e.preventDefault();
-      window.webkit?.messageHandlers.goty.postMessage({ type: "stop" });
+      postToHost({ type: "stop" });
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -1096,7 +1123,7 @@ export function App() {
         // (tail-first load): page it in — single flight, happier's
         // loadOlder discipline.
         olderInFlight.current = true;
-        window.webkit?.messageHandlers.goty.postMessage({ type: "loadOlder" });
+        postToHost({ type: "loadOlder" });
       }
     }, { root: sc, rootMargin: "0px" });
     obs.observe(el);
@@ -1236,21 +1263,18 @@ function PermissionCard({ permission }: {
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && value.trim()) {
-                window.webkit?.messageHandlers.goty.postMessage(
-                  { type: "permission", optionId: value });
+                postToHost({ type: "permission", optionId: value });
               }
             }} />
           <button className="btn send" disabled={!value.trim()}
-            onClick={() => window.webkit?.messageHandlers.goty.postMessage(
-              { type: "permission", optionId: value })}>提交</button>
+            onClick={() => postToHost({ type: "permission", optionId: value })}>提交</button>
         </div>
       ) : (
         <div className="perm-options">
           {permission.options.map((o) => (
             <button key={o.optionId}
               className={"btn " + (o.kind?.startsWith("allow") ? "send" : "")}
-              onClick={() => window.webkit?.messageHandlers.goty.postMessage(
-                { type: "permission", optionId: o.optionId })}>
+              onClick={() => postToHost({ type: "permission", optionId: o.optionId })}>
               {o.name}
             </button>
           ))}

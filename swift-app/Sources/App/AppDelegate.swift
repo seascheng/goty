@@ -785,6 +785,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 (self?.hostPool[key] as? PaneHost)?.updateAgentCommand(command)
             }
         }
+
+        // Daemon-side fills (LIST-mined OSC titles, store session
+        // titles) only target panes no host is serving: the host's own
+        // live parse stays the authority where one exists.
+        coordinator.hasLiveHost = { [weak self] key in
+            self?.hostPool[key] != nil
+        }
     }
 
     /// Sidebar rows/server header → coordinator actions (launch wiring).

@@ -232,34 +232,45 @@ class PiSession: AgentSessioning {
                 self.delegate?.session(self, didEmit: [.ready])
             }
         }
-        var args = ["--mode", "rpc"]
-        appendSpawnArgs(&args, resume: sessionId)
-        // omp: the handshake is gated on the ready frame (see
-        // OmpSession.interceptProtocolFrame) — the process answers
-        // stdin normally once its RPC loop is up; a burst written
-        // before that strands all but the first line (PTY line
-        // discipline, probed 2026-08-31).
-        guard let opened = daemon.openPaneWithAttachment(
-            id: paneId, cwd: cwd, shell: shellName, args: args,
-            environment: environment, grid: grid,
-            noEcho: true, ringBytes: 16_777_216,
-            onFrame: { [weak self] kind, data in
-                self?.handleTransportFrame(kind: kind, data: data)
-            },
-            onDisconnect: { [weak self] in
-                guard let self else { return }
+        // The daemon round trip (attach/spawn handshake +, on a remote
+        // link, the store listing a respawn's --resume path needs) is
+        // BLOCKING socket I/O — over an ssh tunnel that's tens of ms.
+        // Run it off main; everything stateful below hops back or is
+        // lock-guarded (PaneSession write lock, responseLock).
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            var args = ["--mode", "rpc"]
+            self.appendSpawnArgs(&args, resume: sessionId)
+            // omp: the handshake is gated on the ready frame (see
+            // OmpSession.interceptProtocolFrame) — the process answers
+            // stdin normally once its RPC loop is up; a burst written
+            // before that strands all but the first line (PTY line
+            // discipline, probed 2026-08-31).
+            guard let opened = self.daemon.openPaneWithAttachment(
+                id: self.paneId, cwd: self.cwd, shell: self.shellName, args: args,
+                environment: self.environment, grid: self.grid,
+                noEcho: true, ringBytes: 16_777_216,
+                onFrame: { [weak self] kind, data in
+                    self?.handleTransportFrame(kind: kind, data: data)
+                },
+                onDisconnect: { [weak self] in
+                    guard let self else { return }
+                    self.connected = false
+                    self.delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
+                })
+            else {
                 self.connected = false
-                self.delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
-            })
-        else {
-            connected = false
-            delegate?.sessionDidFail(self, reason: "sessiond 不可用")
-            completion?(false)
-            return
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.delegate?.sessionDidFail(self, reason: "sessiond 不可用")
+                    completion?(false)
+                }
+                return
+            }
+            opened.session.start()
+            self.pane = opened.session
+            self.beginHandshakeAfterSpawn(completion: completion)
         }
-        opened.session.start()
-        pane = opened.session
-        beginHandshakeAfterSpawn(completion: completion)
     }
 
     /// Shared get_state handler: the pi immediate handshake and the omp
@@ -888,10 +899,12 @@ class PiSession: AgentSessioning {
         var options: [AgentConfigOption] = []
         let modelChoices: [AgentConfigChoice] = availableModels.compactMap { raw in
             guard let id = raw["id"] as? String else { return nil }
-            let value = (raw["provider"] as? String).map { "\($0)/\(id)" } ?? id
+            let provider = raw["provider"] as? String
+            let value = provider.map { "\($0)/\(id)" } ?? id
             return AgentConfigChoice(value: value,
                                      name: (raw["name"] as? String) ?? id,
-                                     description: nil)
+                                     description: nil,
+                                     source: provider)
         }
         var currentModelId: String?
         if let model = state["model"] as? [String: Any] {

@@ -83,12 +83,16 @@ final class OmpSession: PiSession {
         // MACHINE THE PANE RUNS ON (daemon listing cache first; the
         // local store read only works when the GUI shares the
         // filesystem). The resume also opens the replay gate: the
-        // continued turn's live chunks race the store read, and only
-        // the gate keeps the final transcript free of wipes,
-        // duplicates, and lost turn stats (see beginReplayGate).
         if let sessionId, let path = resumePath(for: sessionId) {
             args += ["--resume", path]
-            beginReplayGate(sessionId: sessionId)
+            // Main-thread hop: the gate's buffers (replayGateActive /
+            // gatedEvents) are main-only state, and this runs on the
+            // openPane worker queue now. Ordering holds — the enqueued
+            // block lands before the first frame's main-async emit,
+            // because the reader only starts after openPane returns.
+            DispatchQueue.main.async { [weak self] in
+                self?.beginReplayGate(sessionId: sessionId)
+            }
         }
     }
 

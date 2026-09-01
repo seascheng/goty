@@ -25,15 +25,20 @@ final class ClaudeFrameMapper {
     private(set) var framesIgnored = 0
     /// Partial-streaming dedup (--include-partial-messages): the
     /// interleaved COMPLETE assistant frames repeat what the deltas
-    /// already delivered. Characters already streamed for the current
-    /// message, per block kind — the frame emits only the remainder.
-    /// Zero throughout plain --print runs and history replay (no
-    /// stream_events there), so complete frames pass through in full.
-    /// One text and one thinking block per message is claude's actual
-    /// shape; a second block of the same kind would dedup against the
-    /// first's length (never observed).
-    private var streamedTextLen = 0
-    private var streamedThinkingLen = 0
+    /// already delivered, so each emits only the remainder.
+    ///
+    /// Two wire shapes share this ledger. LIVE frames carry no message
+    /// id — they dedup against the delta counters (`pendingDelta*`).
+    /// HISTORY jsonl frames carry ids and repeat one message as growing
+    /// frames (same id, more blocks) with no stream_events — they dedup
+    /// per id (`delivered*`). Flat counters keyed replayed history to
+    /// "the deltas that never came": later messages deduped against
+    /// earlier ones' lengths and lost 78% of text / 92% of thinking.
+    private var deliveredText: [String: Int] = [:]
+    private var deliveredThinking: [String: Int] = [:]
+    private var pendingDeltaText = 0
+    private var pendingDeltaThinking = 0
+    private var lastMessageId: String?
     /// Content block the current delta extends (stream-json `index`);
     /// nil until the first delta of a message.
     private var lastBlockIndex: Int?
@@ -99,6 +104,18 @@ final class ClaudeFrameMapper {
 
     private func mapAssistant(_ frame: [String: Any]) -> [AgentSessionEvent] {
         let message = frame["message"] as? [String: Any] ?? [:]
+        let messageId = message["id"] as? String
+        if let messageId, messageId != lastMessageId {
+            // Fresh id (history): own ledger, seeded with any deltas
+            // streamed under it, so complete frames never re-emit what
+            // the deltas delivered. Growth repeats of the same id keep
+            // deduping against their ledger.
+            lastMessageId = messageId
+            deliveredText[messageId] = pendingDeltaText
+            deliveredThinking[messageId] = pendingDeltaThinking
+            pendingDeltaText = 0
+            pendingDeltaThinking = 0
+        }
         let blocks = message["content"] as? [[String: Any]] ?? []
         var events: [AgentSessionEvent] = []
         for block in blocks {
@@ -107,15 +124,27 @@ final class ClaudeFrameMapper {
             case "text":
                 guard let text = block["text"] as? String, !text.isEmpty else { continue }
                 lastAssistantText = text
-                let remainder = ClaudeFrameMapper.unstreamed(
-                    text, already: &streamedTextLen)
+                let remainder: String
+                if let messageId {
+                    remainder = ClaudeFrameMapper.unstreamed(
+                        text, already: &deliveredText[messageId, default: 0])
+                } else {
+                    remainder = ClaudeFrameMapper.unstreamed(
+                        text, already: &pendingDeltaText)
+                }
                 if !remainder.isEmpty {
                     events.append(.messageChunk(remainder))
                 }
             case "thinking":
                 guard let text = block["thinking"] as? String, !text.isEmpty else { continue }
-                let remainder = ClaudeFrameMapper.unstreamed(
-                    text, already: &streamedThinkingLen)
+                let remainder: String
+                if let messageId {
+                    remainder = ClaudeFrameMapper.unstreamed(
+                        text, already: &deliveredThinking[messageId, default: 0])
+                } else {
+                    remainder = ClaudeFrameMapper.unstreamed(
+                        text, already: &pendingDeltaThinking)
+                }
                 if !remainder.isEmpty {
                     events.append(.thoughtChunk(remainder))
                 }
@@ -164,8 +193,8 @@ final class ClaudeFrameMapper {
               let type = event["type"] as? String else { return [] }
         switch type {
         case "message_start":
-            streamedTextLen = 0
-            streamedThinkingLen = 0
+            pendingDeltaText = 0
+            pendingDeltaThinking = 0
             lastBlockIndex = nil
             return []
         case "content_block_delta":
@@ -173,11 +202,11 @@ final class ClaudeFrameMapper {
             switch delta["type"] as? String {
             case "text_delta":
                 guard let text = delta["text"] as? String, !text.isEmpty else { return [] }
-                streamedTextLen += text.count
+                pendingDeltaText += text.count
                 return boundaryed(.messageChunk(text), event: event)
             case "thinking_delta":
                 guard let text = delta["thinking"] as? String, !text.isEmpty else { return [] }
-                streamedThinkingLen += text.count
+                pendingDeltaThinking += text.count
                 return boundaryed(.thoughtChunk(text), event: event)
             default:
                 return []
@@ -215,10 +244,12 @@ final class ClaudeFrameMapper {
         let message = frame["message"] as? [String: Any] ?? [:]
         // History files carry user prompts as plain-string content (the
         // live --print stream never echoes them) — replay needs them as
-        // userChunk so the transcript shows the asking side. Block-form
-        // user frames are the tool_result carrier.
+        // userChunk so the transcript shows the asking side. Synthetic
+        // string frames (command echoes, task receipts) are shaped by
+        // shapedUserEcho. Block-form user frames are the tool_result
+        // carrier.
         if let text = message["content"] as? String, !text.isEmpty {
-            return [.userMessage(text)]
+            return ClaudeFrameMapper.shapedUserEcho(text)
         }
         let blocks = message["content"] as? [[String: Any]] ?? []
         var events: [AgentSessionEvent] = []
@@ -243,6 +274,11 @@ final class ClaudeFrameMapper {
 
     private func mapResult(_ frame: [String: Any]) -> [AgentSessionEvent] {
         sessionId = frame["session_id"] as? String ?? sessionId
+        // Turn boundary: complete frames after a result are a NEW
+        // message — reset the id-less delta counters (id-keyed ledgers
+        // reset per id already).
+        pendingDeltaText = 0
+        pendingDeltaThinking = 0
         var events: [AgentSessionEvent] = []
         if frame["is_error"] as? Bool == true,
            let text = frame["result"] as? String, !text.isEmpty,
@@ -269,6 +305,39 @@ final class ClaudeFrameMapper {
     }
 
     // MARK: - shared shaping
+
+    /// String user frames are mostly NOT typing: claude records slash
+    /// commands as command XML, background-task receipts as
+    /// task-notification XML, plus caveat/stdout wrappers around local
+    /// command transcripts (shapes observed across this project's
+    /// history). Typing passes through; a command renders as its
+    /// compact "/name args" form; receipts and wrappers drop — the
+    /// tool cards and results already tell the story.
+    static func shapedUserEcho(_ text: String) -> [AgentSessionEvent] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("<command-name>") {
+            let name = tagBody("command-name", trimmed) ?? ""
+            let args = tagBody("command-args", trimmed) ?? ""
+            let compact = args.isEmpty ? name : "\(name) \(args)"
+            return compact.isEmpty ? [] : [.userMessage(compact)]
+        }
+        let synthetic = ["<task-notification>", "<local-command-caveat>",
+                         "<local-command-stdout>"]
+        if synthetic.contains(where: { trimmed.hasPrefix($0) }) {
+            return []
+        }
+        return [.userMessage(text)]
+    }
+
+    /// First `<tag>…</tag>` body in `xml`, whitespace-trimmed.
+    private static func tagBody(_ tag: String, _ xml: String) -> String? {
+        guard let open = xml.range(of: "<\(tag)>"),
+              let close = xml.range(of: "</\(tag)>",
+                                    range: open.upperBound..<xml.endIndex)
+        else { return nil }
+        return String(xml[open.upperBound..<close.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     /// tool_result content: string or [{type:"text",text:…}] → AgentContent.
     static func normalizeContent(_ raw: Any?) -> [AgentContent] {

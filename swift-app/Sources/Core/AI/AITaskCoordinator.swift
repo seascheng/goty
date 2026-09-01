@@ -5,10 +5,10 @@ import Foundation
 
 /// The bounded ReAct loop. Model turns drive tool dispatch through the
 /// target's executor; replies STREAM into the card live. Safety is
-/// proportionate: read-only probes and ordinary mutations (write/edit/
-/// non-destructive bash) run auto-approved in the open — every round is
-/// visible — and only DESTRUCTIVE operations (rm, dd, git reset…) gate
-/// on an explicit confirmation. 25 tool calls per task, +25 on continue.
+/// proportionate: read-only probes and ordinary bash run auto-approved
+/// in the open (every round is visible); write/edit and DESTRUCTIVE
+/// operations (rm, dd, git reset…) gate on the fingerprinted proposal
+/// until the user confirms. 25 tool calls per task, +25 on continue.
 final class AITaskCoordinator {
     private let model: ModelClient
     private let executorFor: (ExecutionTarget) -> CommandExecutor
@@ -27,6 +27,12 @@ final class AITaskCoordinator {
     /// Live-emit throttle: at most one snapshot per 100ms per task —
     /// markdown re-render per token would stutter the card.
     private var lastLiveEmit: [UUID: Date] = [:]
+    /// Cancellation handles for what a task has in flight RIGHT NOW:
+    /// the model's stream task and the running exec process. cancel()
+    /// tears both down — a cancelled task must stop burning the
+    /// network and the target's CPU, not merely ignore late results.
+    private var inFlightStream: [UUID: Task<Void, Never>] = [:]
+    private var inFlightExec: [UUID: ProcessRunnerHandle] = [:]
     private let queue = DispatchQueue(label: "goty.ai.coord")
 
     /// Fires on the main queue with a full task snapshot after every
@@ -52,8 +58,9 @@ final class AITaskCoordinator {
             // budget-charged. Runs through the target's own executor
             // (local targets get a LocalExecutor from the factory).
             let exec = self.executorFor(context.target)
-            exec.run("whoami; hostname; uname -srm", cwd: nil, timeout: 15) { [weak self] result in
+            self.inFlightExec[id] = exec.run("whoami; hostname; uname -srm", cwd: nil, timeout: 15) { [weak self] result in
                 self?.queue.async {
+                    self?.inFlightExec[id] = nil
                     guard let self, self.tasks[id] != nil else { return }
                     if case .success(let r) = result {
                         self.hostFacts[id] = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -77,9 +84,10 @@ final class AITaskCoordinator {
             let call = self.pendingCall[taskId]
             switch proposal.op {
             case .bash(let command):
-                self.executorFor(task.context.target)
+                self.inFlightExec[taskId] = self.executorFor(task.context.target)
                     .run(command, cwd: task.context.target.cwd, timeout: 60) { [weak self] r in
                         self?.queue.async {
+                            self?.inFlightExec[taskId] = nil
                             self?.finishConfirmed(taskId, call, Self.describeExec(r))
                         }
                     }
@@ -130,6 +138,13 @@ final class AITaskCoordinator {
             else { return }   // terminal phases stay put (late close click)
             task.advance(to: .cancelled)
             self.tasks[taskId] = task
+            // Kill what is RUNNING, not just what it reports: the
+            // model stream keeps burning tokens and the exec process
+            // keeps burning the target's CPU until they are torn down.
+            self.inFlightStream[taskId]?.cancel()
+            self.inFlightStream[taskId] = nil
+            self.inFlightExec[taskId]?.cancel()
+            self.inFlightExec[taskId] = nil
             self.emit(taskId)
         }
     }
@@ -153,12 +168,15 @@ final class AITaskCoordinator {
             wire[id] = Self.initialMessages(for: task, facts: hostFacts[id] ?? "")
         }
         aiDebug("step: calling model, rounds=\(task.rounds.count)")
-        model.stream(messages: wire[id]!, tools: Self.toolSpecs,
+        inFlightStream[id] = model.stream(messages: wire[id]!, tools: Self.toolSpecs,
                      onDelta: { [weak self] delta in
                          self?.queue.async { self?.liveDelta(id, delta) }
                      },
                      completion: { [weak self] result in
-                         self?.queue.async { self?.handle(id, result) }
+                         self?.queue.async {
+                             self?.inFlightStream[id] = nil
+                             self?.handle(id, result)
+                         }
                      })
     }
 
@@ -235,34 +253,40 @@ final class AITaskCoordinator {
             let command = Self.argString(call, "command") ?? ""
             let risk = ReadOnlyPolicy.classify(command)
             if risk == .destructive {
-                // Only destructive operations gate: reads and ordinary
+                // Only destructive bash gates: reads and ordinary
                 // mutations run in the open (every round is visible).
+                // write/edit always gate — see their cases above.
                 propose(id, call, AIProposal(op: .bash(command), explanation: "",
                                              risk: risk, rollbackHint: nil))
             } else {
                 let timeout = Self.argAny(call, "timeout") as? Double ?? 60
                 let cwd = Self.argString(call, "cwd") ?? task.context.target.cwd
-                exec.run(command, cwd: cwd, timeout: timeout) { [weak self] r in
+                inFlightExec[id] = exec.run(command, cwd: cwd, timeout: timeout) { [weak self] r in
                     self?.queue.async {
+                        self?.inFlightExec[id] = nil
                         self?.finishRound(id, call, Self.describeExec(r))
                     }
                 }
-            }
+        }
         case "write":
-            exec.write(path: Self.argString(call, "path") ?? "",
-                       content: Self.argString(call, "content") ?? "") { [weak self] r in
-                self?.queue.async {
-                    self?.finishRound(id, call, Self.describeExec(r))
-                }
-            }
+            // File mutations are NEVER silent: the toolSpec promises
+            // confirmation and the card's fingerprinted proposal is the
+            // gate. The confirm path (below) is the only executor
+            // entry for write/edit.
+            let path = Self.argString(call, "path") ?? ""
+            let content = Self.argString(call, "content") ?? ""
+            propose(id, call, AIProposal(
+                op: .write(path: path, content: content),
+                explanation: "写入 \(path)(\(content.utf8.count) 字节)",
+                risk: .mutating, rollbackHint: nil))
         case "edit":
-            exec.edit(path: Self.argString(call, "path") ?? "",
-                      oldText: Self.argString(call, "oldText") ?? "",
-                      newText: Self.argString(call, "newText") ?? "") { [weak self] r in
-                self?.queue.async {
-                    self?.finishRound(id, call, Self.describeExec(r))
-                }
-            }
+            let path = Self.argString(call, "path") ?? ""
+            let oldText = Self.argString(call, "oldText") ?? ""
+            let newText = Self.argString(call, "newText") ?? ""
+            propose(id, call, AIProposal(
+                op: .edit(path: path, oldText: oldText, newText: newText),
+                explanation: "编辑 \(path)(替换 \(oldText.utf8.count)→\(newText.utf8.count) 字节)",
+                risk: .mutating, rollbackHint: nil))
         case "fetch_content":
             // Web tools run AGENT-SIDE (the Mac), never the target's
             // executor — docs are local even for SSH targets.
@@ -350,7 +374,7 @@ final class AITaskCoordinator {
                  "required":["path","oldText","newText"]}
                  """),
         ToolSpec(name: "bash",
-                 description: "Run a shell command. Read-only commands run auto-approved; anything mutating requires user confirmation.",
+                 description: "Run a shell command. Read-only and ordinary commands run automatically; destructive operations (rm, git reset…) require user confirmation.",
                  parametersJSON: """
                  {"type":"object","properties":{"command":{"type":"string"},\
                  "cwd":{"type":"string"},"timeout":{"type":"number"}},\
@@ -376,9 +400,10 @@ final class AITaskCoordinator {
         if let cwd = target.cwd { host += ", working directory: \(cwd)" }
         let system = """
         You are a terminal task agent working on the user's machine. You have \
-        four tools: read, write, edit, bash. Read-only probes run automatically; \
-        every mutation requires explicit user confirmation. Prefer read-only \
-        probes; produce minimal mutations. \(host). Host facts: \(facts.isEmpty ? "unknown" : facts).
+        four tools: read, write, edit, bash. Read-only probes and ordinary \
+        commands run automatically; write, edit and destructive operations \
+        require explicit user confirmation. Prefer read-only probes; produce \
+        minimal mutations. \(host). Host facts: \(facts.isEmpty ? "unknown" : facts).
         """
         var user = "Request: \(task.context.request)"
         if !task.context.visibleOutput.isEmpty {

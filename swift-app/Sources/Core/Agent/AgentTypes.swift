@@ -168,13 +168,18 @@ struct AgentConfigChoice {
     let value: String
     let name: String
     let description: String?
+    /// Provenance label for the row (a model's provider — e.g.
+    /// "openrouter" in "openrouter/glm-4.7"): distinguishes same-name
+    /// models across providers in the picker.
+    let source: String?
 
     /// Explicit memberwise — the failable wire init suppresses the
     /// synthesized one; native adapters build choices directly.
-    init(value: String, name: String, description: String?) {
+    init(value: String, name: String, description: String?, source: String? = nil) {
         self.value = value
         self.name = name
         self.description = description
+        self.source = source
     }
 
     init?(raw: [String: Any]) {
@@ -183,6 +188,7 @@ struct AgentConfigChoice {
         self.value = value
         self.name = name
         self.description = raw["description"] as? String
+        self.source = raw["source"] as? String
     }
 }
 
@@ -328,6 +334,15 @@ enum AgentSessionEvent {
     case plan([AgentPlanEntry])
     case permissionRequested(AgentPermissionPrompt)
     case turnEnded(stopReason: String?)
+    /// Provider/model failure recorded by omp on the assistant message.
+    /// The web store renders this in the composer error chip.
+    case error(text: String)
+    /// omp auto-retry schedule (auto_retry_start): attempt N of M with
+    /// a delayMs backoff. The composer renders a live countdown; the
+    /// turn keeps working until auto_retry_end resolves it.
+    case retryScheduled(attempt: Int, maxAttempts: Int, delayMs: Int,
+                          errorText: String?)
+
     /// The adapter replaced the provisional transcript (ring replay)
     /// with an authoritative rebuild (session/load) — the page must
     /// clear before the authoritative events land. Maps to the
@@ -363,6 +378,62 @@ enum AgentSessionEvent {
 }
 
 extension AgentSessionEvent {
+    /// omp prefixes provider failures with the HTTP status before a JSON
+    /// payload (for example, `429 {"error":{"message":"..."}}`).
+    /// Prefer the provider's human message while preserving a raw fallback.
+    static func providerErrorText(from message: [String: Any]) -> String? {
+        guard let raw = message["errorMessage"] as? String else { return nil }
+        return providerErrorText(raw: raw)
+    }
+
+    /// Extract the human message from a raw provider error payload
+    /// (`"429 {"type":"error","error":{...}}"` → `error.message`,
+    /// tidied of the `[code]` prefix and `[requestId]` tail).
+    static func providerErrorText(raw: String) -> String? {
+        guard !raw.isEmpty else { return nil }
+        guard let start = raw.firstIndex(of: "{"),
+              let data = raw[start...].data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let error = object["error"] as? [String: Any],
+              let text = error["message"] as? String,
+              !text.isEmpty else {
+            return raw
+        }
+        return tidyProviderMessage(text)
+    }
+
+    /// omp wraps the human message in bracketed tokens:
+    /// `[1308][Usage limit reached for 5 hour. Your limit will reset
+    /// at 2026-09-01 19:37:34][20260901172912…]` — the code prefix and
+    /// the trailing request-id tail are noise; the clean message is
+    /// what the UI must show (the reset time is the critical fact).
+    static func tidyProviderMessage(_ message: String) -> String {
+        var m = message
+        // Drop a trailing bracketed request id (long hex token).
+        if m.hasSuffix("]"),
+           let open = m.lastIndex(of: "["),
+           open > m.startIndex {
+            let tail = m[m.index(after: open)...].dropLast()
+            if tail.count > 16, tail.allSatisfy({ $0.isHexDigit }) {
+                m = String(m[..<open])
+            }
+        }
+        // Drop a leading [code] token (short numeric bracket).
+        if m.hasPrefix("["),
+           let close = m.firstIndex(of: "]"),
+           close > m.startIndex {
+            let code = m[m.index(after: m.startIndex)..<close]
+            if !code.isEmpty, code.allSatisfy({ $0.isNumber }) {
+                m = String(m[m.index(after: close)...])
+            }
+        }
+        // Drop the brackets wrapping the message itself ([text] → text).
+        if m.hasPrefix("["), m.hasSuffix("]") {
+            m = String(m.dropFirst().dropLast())
+        }
+        return m
+    }
+
     /// The exact JS event shape the web store consumes (store.ts
     /// IncomingEventSchema) — one mapping for the app, the probes and
     /// the tests; the hand copies here used to drift and lose fields.
@@ -420,6 +491,15 @@ extension AgentSessionEvent {
             return ["type": "clearTranscript"]
         case .turnEnded:
             return ["type": "turnEnded"]
+        case .error(let text):
+            return ["type": "error", "text": text]
+        case .retryScheduled(let attempt, let maxAttempts, let delayMs,
+                              let errorText):
+            return ["type": "retryScheduled",
+                    "attempt": attempt, "maxAttempts": maxAttempts,
+                    "delayMs": delayMs,
+                    "errorText": errorText ?? NSNull()]
+
         case .configChanged(let options):
             return ["type": "configOptions", "options": options.map { option in
                 ["id": option.id, "name": option.name,
@@ -427,7 +507,8 @@ extension AgentSessionEvent {
                  "currentValue": option.currentValue ?? NSNull(),
                  "options": option.options.map { choice in
                     ["value": choice.value, "name": choice.name,
-                     "description": choice.description ?? NSNull()] as [String: Any]
+                     "description": choice.description ?? NSNull(),
+                     "source": choice.source ?? NSNull()] as [String: Any]
                  }] as [String: Any]
             }]
         case .commandsChanged(let commands):

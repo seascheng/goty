@@ -412,6 +412,10 @@ final class SessionDaemon {
         /// Live agent TUI state ("working"/"blocked"/"idle") from the
         /// omp/pi extension reporting to this daemon; nil = none.
         let agent: String?
+        /// The pane's last OSC 0/2 title, scanned daemon-side from the
+        /// ring tail (nil on older daemons) — titles for panes this GUI
+        /// run has never attached to.
+        let title: String?
         /// Background async-job rows from the same extension report
         /// (capability 6); empty = none or older daemon.
         let agentJobs: [AgentJobSnapshot]
@@ -431,6 +435,7 @@ final class SessionDaemon {
                   let alive = item["alive"] as? Bool else { return nil }
             return PaneInfo(id: id, alive: alive, cwd: item["cwd"] as? String,
                             fg: item["fg"] as? String, agent: item["agent"] as? String,
+                            title: item["title"] as? String,
                             agentJobs: ((item["agent_jobs"] as? [[String: Any]]) ?? [])
                                 .compactMap(AgentJobSnapshot.init(raw:)))
         }

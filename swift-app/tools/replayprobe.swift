@@ -52,6 +52,8 @@ final class ProbeDelegate: AgentSessionDelegate {
             case .plan: eventCounts["plan", default: 0] += 1
             case .permissionRequested: eventCounts["permission", default: 0] += 1
             case .turnEnded: eventCounts["turnEnded", default: 0] += 1
+            case .retryScheduled: eventCounts["retryScheduled", default: 0] += 1
+
             case .configChanged: eventCounts["config", default: 0] += 1
             case .commandsChanged: eventCounts["commands", default: 0] += 1
             case .usageUpdate: eventCounts["usage", default: 0] += 1

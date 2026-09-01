@@ -15,22 +15,26 @@ final class SSHExecutor: CommandExecutor {
     }
 
     private func sshRun(_ command: String, stdin: Data?, timeout: TimeInterval,
-                        completion: @escaping (Result<ExecResult, ExecFailure>) -> Void) {
+                        completion: @escaping (Result<ExecResult, ExecFailure>) -> Void)
+            -> ProcessRunnerHandle {
         ProcessRunner.run(
             argv: ["/usr/bin/ssh"] + SshTransport.options(host: host, command: command),
             cwd: nil, env: nil, stdin: stdin, timeout: timeout, completion: completion)
     }
 
+    @discardableResult
     func run(_ command: String, cwd: String?, timeout: TimeInterval,
-             completion: @escaping (Result<ExecResult, ExecFailure>) -> Void) {
+             completion: @escaping (Result<ExecResult, ExecFailure>) -> Void)
+            -> ProcessRunnerHandle {
         let full = cwd != nil
             ? "cd \(Shell.forceQuoted(cwd!)) && \(command)"
             : command
-        sshRun(full, stdin: nil, timeout: timeout, completion: completion)
+        return sshRun(full, stdin: nil, timeout: timeout, completion: completion)
     }
 
+
     func read(path: String, completion: @escaping (Result<String, ExecFailure>) -> Void) {
-        sshRun("cat -- \(Shell.forceQuoted(path))", stdin: nil, timeout: 30) { r in
+        _ = sshRun("cat -- \(Shell.forceQuoted(path))", stdin: nil, timeout: 30) { r in
             switch r {
             case .success(let e): completion(.success(e.stdout))
             case .failure(let f): completion(.failure(f))
@@ -40,7 +44,7 @@ final class SSHExecutor: CommandExecutor {
 
     func write(path: String, content: String,
                completion: @escaping (Result<ExecResult, ExecFailure>) -> Void) {
-        sshRun("cat > \(Shell.forceQuoted(path))", stdin: Data(content.utf8),
+        _ = sshRun("cat > \(Shell.forceQuoted(path))", stdin: Data(content.utf8),
                timeout: 30, completion: completion)
     }
 

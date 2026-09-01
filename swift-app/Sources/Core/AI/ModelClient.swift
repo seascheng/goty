@@ -80,18 +80,27 @@ protocol ModelClient: AnyObject {
     func complete(messages: [ChatMessage], tools: [ToolSpec],
                    completion: @escaping (Result<ModelReply, ModelError>) -> Void)
     /// Streaming variant: onDelta fires as chunks arrive (any thread);
-    /// completion carries the assembled reply. The default falls back
-    /// to the buffered call (fakes, non-streaming endpoints).
+    /// completion carries the assembled reply. Returns the transport
+    /// task so the caller can CANCEL an in-flight turn (nil where the
+    /// implementation has nothing cancellable — fakes, buffered calls).
+    /// REQUIREMENT, not extension-only: cancel must reach the real
+    /// transport through the existential.
+    @discardableResult
     func stream(messages: [ChatMessage], tools: [ToolSpec],
                 onDelta: @escaping (StreamDelta) -> Void,
                 completion: @escaping (Result<ModelReply, ModelError>) -> Void)
+            -> Task<Void, Never>?
 }
 
 extension ModelClient {
+    /// Buffered fallback: nothing streaming to cancel.
+    @discardableResult
     func stream(messages: [ChatMessage], tools: [ToolSpec],
                 onDelta: @escaping (StreamDelta) -> Void,
-                completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
+                completion: @escaping (Result<ModelReply, ModelError>) -> Void)
+            -> Task<Void, Never>? {
         complete(messages: messages, tools: tools, completion: completion)
+        return nil
     }
 }
 
@@ -129,26 +138,30 @@ final class OpenAICompatibleClient: ModelClient {
                 stream: false, onDelta: nil, completion: completion)
     }
 
+    @discardableResult
     func stream(messages: [ChatMessage], tools: [ToolSpec],
                 onDelta: @escaping (StreamDelta) -> Void,
-                completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
+                completion: @escaping (Result<ModelReply, ModelError>) -> Void)
+            -> Task<Void, Never>? {
         perform(messages: messages, tools: tools, allowThinking: true,
                 stream: true, onDelta: onDelta, completion: completion)
     }
 
+    @discardableResult
     private func perform(messages: [ChatMessage], tools: [ToolSpec], allowThinking: Bool,
                          stream: Bool, onDelta: ((StreamDelta) -> Void)?,
-                         completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
+                         completion: @escaping (Result<ModelReply, ModelError>) -> Void)
+            -> Task<Void, Never>? {
         guard !baseUrl.isEmpty, !model.isEmpty else {
-            completion(.failure(.notConfigured)); return
+            completion(.failure(.notConfigured)); return nil
         }
-        let path = apiType == .anthropic ? "/v1/messages" : "/chat/completions"
         var url: URL
         do {
             var base = baseUrl
             while base.hasSuffix("/") { base.removeLast() }
+            let path = apiType == .anthropic ? "/messages" : "/chat/completions"
             guard let parsed = URL(string: base + path) else {
-                completion(.failure(.transport("bad base URL"))); return
+                completion(.failure(.transport("bad base URL"))); return nil
             }
             url = parsed
         }
@@ -175,9 +188,9 @@ final class OpenAICompatibleClient: ModelClient {
                                                  stream: stream).utf8)
         }
         if stream {
-            streamRequest(req, messages: messages, tools: tools, allowThinking: allowThinking,
-                          onDelta: onDelta, completion: completion)
-            return
+            return streamRequest(req, messages: messages, tools: tools,
+                                 allowThinking: allowThinking,
+                                 onDelta: onDelta, completion: completion)
         }
         Self.fallbackDataTask(with: req) { data, response, error in
             if let error {
@@ -203,6 +216,8 @@ final class OpenAICompatibleClient: ModelClient {
             }
             completion(.success(reply))
         }
+        // Complete path answers through the callback; nothing to cancel.
+        return nil
     }
 
     // MARK: - Transport (system proxy first, direct fallback)
@@ -245,11 +260,13 @@ final class OpenAICompatibleClient: ModelClient {
     /// thread; the coordinator owns its own queue hop. A 400 thinking
     /// rejection retries once buffered (rare path — not worth a second
     /// stream pass).
+    @discardableResult
     private func streamRequest(_ req: URLRequest, messages: [ChatMessage], tools: [ToolSpec],
                                allowThinking: Bool, onDelta: ((StreamDelta) -> Void)?,
                                session: URLSession = .shared, directFallback: Bool = true,
-                               completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
-        Task {
+                               completion: @escaping (Result<ModelReply, ModelError>) -> Void)
+            -> Task<Void, Never> {
+        let task = Task {
             var receivedAny = false   // never double-fire deltas on fallback
             do {
                 let (bytes, response) = try await session.bytes(for: req)
@@ -275,19 +292,26 @@ final class OpenAICompatibleClient: ModelClient {
                 }
                 completion(.success(reply))
             } catch {
+                // USER CANCEL: the transport throws as soon as the task
+                // is cancelled — no direct-retry, the coordinator is
+                // already gone.
+                if Task.isCancelled {
+                    return
+                }
                 // Proxy-stalled first byte (the -1200/-1001 class): one
                 // direct retry — but only while NOTHING streamed, or a
                 // resumed task would repeat its deltas.
                 if directFallback, !receivedAny {
-                    streamRequest(req, messages: messages, tools: tools,
-                                  allowThinking: allowThinking, onDelta: onDelta,
-                                  session: Self.directSession, directFallback: false,
-                                  completion: completion)
+                    _ = streamRequest(req, messages: messages, tools: tools,
+                                      allowThinking: allowThinking, onDelta: onDelta,
+                                      session: Self.directSession, directFallback: false,
+                                      completion: completion)
                     return
                 }
                 completion(.failure(.transport(Self.netMessage(error, for: req))))
             }
         }
+        return task
     }
 
     // MARK: request/response shaping (pure, test-covered)

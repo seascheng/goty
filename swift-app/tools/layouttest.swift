@@ -1729,6 +1729,55 @@ func run() {
     try? FileManager.default.removeItem(atPath: auxURL.path)
     try? FileManager.default.removeItem(atPath: legacyAuxURL.path)
 
+    // — Background tab tracking (2026-09-01): fills for panes with NO
+    //   host this GUI run — daemon-mined OSC titles and the extension
+    //   path's done-unseen semantics. Seeded straight in (the poll
+    //   loop needs a live daemon).
+    print("— background tabs: daemon titles + done-unseen —")
+    let bgURL = URL(fileURLWithPath:
+        NSTemporaryDirectory() + "goty-bg-\(UUID().uuidString).json")
+    let bgId = UUID()
+    let bgJSON = """
+    {"focusedIndex":0,"workspaces":[{"id":"\(bgId.uuidString)","name":"Local",
+    "tabs":[{"id":"t1","name":"1","panes":[{"id":"p1","cwd":"/tmp"}]},
+    {"id":"t2","name":"2","panes":[{"id":"p2","cwd":"/work"}]}],
+    "focusedTabIndex":0}],"parked":[]}
+    """.data(using: .utf8)!
+    try? bgJSON.write(to: bgURL, options: .atomic)
+    let bgStore = WorkspaceStore(sessionName: "goty", fileURL: bgURL)
+    let bgCoord = WorkspaceCoordinator()
+    bgCoord.store = bgStore
+    bgCoord.workspaceConnected(bgId)
+    var hosted: Set<HostKey> = []
+    bgCoord.hasLiveHost = { hosted.contains($0) }
+    // Daemon-mined titles fill only host-less panes (a live host's own
+    // OSC parse stays the authority).
+    bgCoord.applyPaneTitles([(bgId, ["p1": "vim — main.c", "p2": ""])])
+    check(bgCoord.surfaceTitle(for: bgStore.workspaces[0].tabs[0]) == "vim — main.c"
+              && bgCoord.surfaceTitle(for: bgStore.workspaces[0].tabs[1]) == nil,
+          "daemon-mined titles land for host-less panes; empty ones don't")
+    hosted.insert(HostKey(workspace: bgId, pane: "p2"))
+    bgCoord.applyPaneTitles([(bgId, ["p2": "never lands"])])
+    check(bgCoord.surfaceTitle(for: bgStore.workspaces[0].tabs[1]) == nil,
+          "a pane with a live host is never daemon-filled")
+    hosted.removeAll()
+    // Extension-path seen semantics: live work always seen; a finish
+    // while the tab is NOT focused holds the done dot and fires the
+    // unseen hook exactly once.
+    var unseen: [String] = []
+    bgCoord.turnCompletedUnseen = { _, pane in unseen.append(pane) }
+    bgCoord.applyForegrounds([(bgId, [:], ["p1": "working", "p2": "working"])])
+    check(bgCoord.agentStatus(paneId: "p2")?.reported == .working
+              && bgCoord.agentStatus(paneId: "p2")?.seen == true,
+          "live extension-reported work is always seen")
+    bgCoord.applyForegrounds([(bgId, [:], ["p2": "idle"])])
+    check(unseen == ["p2"] && bgCoord.agentStatus(paneId: "p2")?.seen == false,
+          "a background finish fires turnCompletedUnseen once and holds the done dot")
+    bgCoord.applyForegrounds([(bgId, [:], ["p2": "idle"])])
+    check(unseen == ["p2"],
+          "repeated idle reports do not re-fire the unseen hook")
+    try? FileManager.default.removeItem(atPath: bgURL.path)
+
     // The prompt predicate (PaneHost's @ai arming gate): no report /
     // shell basenames pass (prompt is the default assumption),
     // programs don't.

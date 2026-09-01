@@ -335,13 +335,13 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                 self.session.followUp(text)
                 self.recordQueued(text)
             default:
-                // Working-session guard: a stale-idle composer (or an
-                // event the UI misrouted) must NEVER let a message
-                // evaporate in send()'s isWorking guard — queue it as a
-                // follow-up instead; omp delivers it after the turn.
+                // Stale-idle composer (UI thought idle, the session is
+                // actually working): omp tags these Enters "steer" too —
+                // interrupt-and-inject matches the streaming-Enter and
+                // the message can never evaporate in send()'s isWorking
+                // guard (omp input-controller's race coverage).
                 if self.session.isWorking {
-                    self.session.followUp(text)
-                    self.recordQueued(text)
+                    self.session.steer(text)
                     return
                 }
                 self.setTurnState(.thinking)
@@ -814,7 +814,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                      .permissionRequested, .thoughtChunk, .starting,
                      .runtimeStatus, .notice, .backgroundJobs, .subagentUpdate,
                      .entryMark, .openURL, .sessionStats,
-                     .historyTruncated, .transcriptPrepend:
+                     .historyTruncated, .transcriptPrepend, .error,
+                     .retryScheduled:
                     break
                 case .transcriptReset:
                     // Adapter rebuild incoming (death healing): drop the

@@ -190,7 +190,9 @@ pub struct PaneInfo {
     /// reported (older daemons, non-agent panes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
-    /// Live background jobs from the same extension report; empty or
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Background async-job rows from the same extension report; empty or
     /// absent = no jobs (older daemons/extensions).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_jobs: Vec<AgentJobInfo>,

@@ -144,6 +144,87 @@ impl ReplayRing {
         }
         true
     }
+
+    /// The last `max` bytes of the stream, oldest first — a bounded
+    /// window for daemon-side scans (OSC title extraction).
+    fn tail_bytes(&self, max: usize) -> Vec<u8> {
+        if max == 0 {
+            return Vec::new();
+        }
+        // Newest segments first; each segment's tail in natural order.
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        let mut got = 0usize;
+        for segment in self.segments.iter().rev() {
+            if got >= max {
+                break;
+            }
+            let (a, b) = segment.bytes.as_slices();
+            let avail = a.len() + b.len();
+            let take = (max - got).min(avail);
+            let skip = avail - take;
+            let skip_a = skip.min(a.len());
+            let mut chunk = Vec::with_capacity(take);
+            chunk.extend_from_slice(&a[skip_a..]);
+            chunk.extend_from_slice(&b[..take - (a.len() - skip_a)]);
+            got += chunk.len();
+            chunks.push(chunk);
+        }
+        let mut out = Vec::with_capacity(got);
+        for chunk in chunks.into_iter().rev() {
+            out.extend_from_slice(&chunk);
+        }
+        out
+    }
+}
+
+/// The program's last OSC 0/2 title (what a terminal would show), from
+/// a bounded byte window. BEL and ST both terminate; the LAST complete
+/// sequence wins — a title set before a later clear stays cleared only
+/// when the clear itself is a title sequence, matching emulator
+/// behavior (last-write-wins on the title property).
+fn last_osc_title(bytes: &[u8]) -> Option<String> {
+    let mut best: Option<&[u8]> = None;
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] != 0x1b || bytes[i + 1] != b']' {
+            i += 1;
+            continue;
+        }
+        // OSC 0 (icon+window) and OSC 2 (window) both set the title.
+        let rest = &bytes[i + 2..];
+        let is_title = rest.first() == Some(&b'0') || rest.first() == Some(&b'2');
+        let after = if is_title { &rest[1..] } else { rest };
+        let semicolon = after.first() == Some(&b';');
+        if is_title && semicolon {
+            let body = &after[1..];
+            // Find the terminator: BEL or ST (ESC \).
+            let mut j = 0;
+            let mut end = None;
+            while j < body.len() {
+                if body[j] == 0x07 {
+                    end = Some(j);
+                    break;
+                }
+                if body[j] == 0x1b && body.get(j + 1) == Some(&b'\\') {
+                    end = Some(j);
+                    break;
+                }
+                j += 1;
+            }
+            if let Some(end) = end {
+                best = Some(&body[..end]);
+                i += 2 + 2 + end + 1; // ESC ] <n> ; … <terminator>
+                continue;
+            }
+            // Unterminated: the window cut a sequence in half — stop;
+            // anything found earlier stands.
+            break;
+        }
+        i += 2;
+    }
+    let title = best?;
+    let text = String::from_utf8_lossy(title).trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 /// Bracketed-paste (DECSET/DECRST 2004) tracker. Private modes live in
@@ -309,20 +390,33 @@ impl Pane {
         {
             return None;
         }
-        if !state.alive {
-            let payload = protocol::json(&ExitStatus {
-                code: state.exit_code,
-            })
-            .ok()?;
-            if sender
-                .send(OutFrame::new(protocol::kind::EXITED, payload))
-                .is_err()
-            {
-                return None;
-            }
-        }
         state.subscriber = Some(sender);
         Some(epoch)
+    }
+
+    /// 64KB of stream tail is plenty for a title scan (a program that
+    /// floods OSC faster than this would churn the real title too).
+    const TITLE_SCAN_WINDOW: usize = 64 * 1024;
+
+    pub fn info(&self) -> crate::protocol::PaneInfo {
+        let mut title = None;
+        let alive = self
+            .state
+            .lock()
+            .map(|s| {
+                title = last_osc_title(&s.ring.tail_bytes(Self::TITLE_SCAN_WINDOW));
+                s.alive
+            })
+            .unwrap_or(false);
+        crate::protocol::PaneInfo {
+            pane_id: self.id.clone(),
+            alive,
+            cwd: self.cwd(),
+            fg: self.foreground_command(),
+            agent: None,
+            agent_jobs: Vec::new(),
+            title,
+        }
     }
 
     pub fn detach(&self, epoch: u64) {
@@ -380,17 +474,6 @@ impl Pane {
             && let Some(master) = master.as_ref()
         {
             let _ = master.resize(pty_size(size));
-        }
-    }
-
-    pub fn info(&self) -> crate::protocol::PaneInfo {
-        crate::protocol::PaneInfo {
-            pane_id: self.id.clone(),
-            alive: self.state.lock().map(|s| s.alive).unwrap_or(false),
-            cwd: self.cwd(),
-            fg: self.foreground_command(),
-            agent: None,
-            agent_jobs: Vec::new(),
         }
     }
 
@@ -738,6 +821,37 @@ mod tests {
             Some(size(120))
         );
         assert_eq!(frames[3].payload, b"new");
+    }
+
+    #[test]
+    fn tail_bytes_returns_the_last_window_in_order() {
+        let mut ring = ReplayRing::new(size(80), RING_CAP);
+        ring.append(b"abcdef");
+        assert_eq!(ring.tail_bytes(4), b"cdef");
+        assert_eq!(ring.tail_bytes(100), b"abcdef");
+        assert_eq!(ring.tail_bytes(0), b"");
+        // Across a geometry boundary the newest segment wins the window.
+        assert!(ring.resize(size(120)));
+        ring.append(b"XY");
+        assert_eq!(ring.tail_bytes(3), b"fXY");
+    }
+
+    #[test]
+    fn osc_title_last_write_wins_with_both_terminators() {
+        let bel = b"\x1b]0;first\x07middle\x1b]2;second\x07";
+        assert_eq!(last_osc_title(bel), Some("second".to_string()));
+        let st = b"\x1b]0;st-title\x1b\\tail";
+        assert_eq!(last_osc_title(st), Some("st-title".to_string()));
+        assert_eq!(last_osc_title(b"\x1b]52;clipboard!\x07"), None);
+        assert_eq!(last_osc_title(b"plain output, no osc"), None);
+        // A window that cuts a sequence in half keeps the earlier title.
+        let cut = b"\x1b]0;kept\x07\x1b]2;cut-of";
+        assert_eq!(last_osc_title(cut), Some("kept".to_string()));
+        assert_eq!(
+            last_osc_title("\x1b]2;  多字节 \x07".as_bytes()),
+            Some("多字节".to_string())
+        );
+        assert_eq!(last_osc_title(b"\x1b]0;   \x07"), None);
     }
 
     #[test]

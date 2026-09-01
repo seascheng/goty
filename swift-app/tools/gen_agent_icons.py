@@ -20,7 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "Assets" / "AgentIcons"
-TARGET = ROOT / "Sources" / "Core" / "Agents" / "AgentIcons.swift"
+TARGET = ROOT / "Sources" / "UI" / "Agents" / "AgentIcons.swift"
 
 def is_monochrome(png: Path) -> bool:
     """True when every opaque pixel is grayscale (a tintable mask)."""

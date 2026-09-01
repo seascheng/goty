@@ -238,13 +238,17 @@ final class RightPanelView: NSView, ThemeRefreshable {
 
     /// Point the Git tab at the focused pane's repository.
     func setScmTarget(cwd: String?, host: String?) {
-        scmView.setTarget(cwd: cwd, host: host, fetchNow: !isHidden)
+        scmView.setTarget(cwd: cwd, host: host,
+                          fetchNow: !isHidden && currentTab == .git)
     }
 
     /// Poll entry for the Git tab (TTL-guarded in the store). No-op
-    /// while the panel is collapsed — a hidden panel must not run git.
+    /// while the panel is collapsed OR another tab is showing — a
+    /// hidden view must not run git. Switching back to the Git tab
+    /// re-renders from cache on the next tick (the store's TTL keeps
+    /// the answer hot), so the gate costs no staleness.
     func refreshScm(force: Bool = false) {
-        guard !isHidden else { return }
+        guard !isHidden, currentTab == .git else { return }
         scmView.refresh(force: force)
     }
 

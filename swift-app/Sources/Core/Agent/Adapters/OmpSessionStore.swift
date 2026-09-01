@@ -136,12 +136,13 @@ enum OmpSessionStore {
 
     /// Raw JSONL → events. Split from load(): remote panes fetch the
     /// same bytes through their daemon and parse identically.
-    static func parse(_ raw: String) -> Loaded {
+    static func parse(_ raw: String, includeTerminalError: Bool = true) -> Loaded {
         var events: [AgentSessionEvent] = []
         var openToolIds: Set<String> = []
         var aborted = false
         var title: String?
         var lastAssistantStop: String?
+        var lastAssistantError: String?
         for line in raw.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data),
@@ -163,11 +164,19 @@ enum OmpSessionStore {
                     // Session-tree anchor: entries carry their tree id —
                     // the 分支 button on a user bubble targets exactly
                     // this entry (omp /branch semantics).
+
                     if let entryId = entry["id"] as? String {
                         events.append(.entryMark(role: "user", entryId: entryId))
                     }
                 case "assistant":
-                    if let stop = message["stopReason"] as? String { lastAssistantStop = stop }
+                    // omp records a provider failure on the empty final
+                    // assistant entry; only the current tail should alter
+                    // the composer's global error state.
+
+                    let stop = message["stopReason"] as? String
+                    lastAssistantStop = stop
+                    lastAssistantError = stop == "error"
+                        ? AgentSessionEvent.providerErrorText(from: message) : nil
                     var firstBlock = true
                     for block in blocks {
                         switch block["type"] as? String {
@@ -210,16 +219,17 @@ enum OmpSessionStore {
                     break
                 }
             case "custom":
-                guard entry["customType"] as? String == "tool_execution_start",
-                      let data = entry["data"] as? [String: Any],
-                      let toolCallId = data["toolCallId"] as? String else { break }
-                let toolName = (data["toolName"] as? String) ?? "tool"
-                let intent = (data["intent"] as? String) ?? toolName
                 // Parity with the LIVE frame path (PiFrameMapper
                 // mapToolExecutionStart): replayed tool cards keep the
                 // same title derivation — kind + raw args — so "Read
                 // path:1-3" survives a restart instead of degrading to
                 // icon + intent.
+
+                guard entry["customType"] as? String == "tool_execution_start",
+                      let data = entry["data"] as? [String: Any],
+                      let toolCallId = data["toolCallId"] as? String else { break }
+                let toolName = (data["toolName"] as? String) ?? "tool"
+                let intent = (data["intent"] as? String) ?? toolName
                 let arguments = data["args"] as? [String: Any]
                 events.append(.toolCallUpdate(
                     id: toolCallId,
@@ -234,6 +244,9 @@ enum OmpSessionStore {
             default:
                 break
             }
+        }
+        if includeTerminalError, let text = lastAssistantError {
+            events.append(.error(text: text))
         }
         aborted = lastAssistantStop == "aborted"
         return Loaded(events: events, aborted: aborted, title: title,
@@ -405,6 +418,6 @@ enum OmpSessionStore {
         }
         guard cut > 2 else { return Loaded(events: [], aborted: false, title: nil) }
         let older = lines[2..<cut].joined(separator: "\n")
-        return parse(older)
+        return parse(older, includeTerminalError: false)
     }
 }

@@ -66,6 +66,12 @@ final class PiLegacySession: PiSession {
             for message in messages {
                 events += replayMapper.mapReplayedMessage(message)
             }
+            if let assistant = messages.last(where: { $0["role"] as? String == "assistant" }),
+               assistant["stopReason"] as? String == "error",
+               let text = AgentSessionEvent.providerErrorText(from: assistant) {
+                events.append(.error(text: text))
+            }
+
             self.emit(events)
             completion(true)
         }

@@ -23,6 +23,11 @@ final class PiFrameMapper {
     /// Content block the current delta run extends (wire contentIndex);
     /// nil until the first delta of a message.
     private var lastContentIndex: Int?
+    /// Last failed auto-retry's full error text (omp auto_retry_end
+    /// success:false). A terminal agent_end right after must not
+    /// replace it with the bare provider message — the retry story
+    /// ("Retry failed … Original error: 429 …") is the useful one.
+    private var lastRetryFailure: String?
     /// omp: agent_end terminates the run (isTerminal false = a mid-run
     /// boundary that must not close streaming rows). pi: agent_settled is
     /// the terminal frame instead.
@@ -61,10 +66,46 @@ final class PiFrameMapper {
             // continuing run (omp auto-retry); it must not finalize
             // streaming rows.
             if terminalOnAgentEnd, frame["isTerminal"] as? Bool != false {
-                return [.turnEnded(stopReason: frame["stopReason"] as? String)]
+                let assistant = (frame["messages"] as? [[String: Any]])?
+                    .last(where: { $0["role"] as? String == "assistant" })
+                let stop = (assistant?["stopReason"] as? String)
+                    ?? (frame["stopReason"] as? String)
+                var events: [AgentSessionEvent] = [.turnEnded(stopReason: stop)]
+                if stop == "error", let assistant,
+                   lastRetryFailure == nil,
+                   let text = AgentSessionEvent.providerErrorText(from: assistant) {
+                    events.append(.error(text: text))
+                }
+                lastRetryFailure = nil
+                return events
             }
             framesIgnored += 1
             return []
+        case "auto_retry_start":
+            // omp backs off and retries provider failures (429 etc.)
+            // — the turn is NOT over. The preceding agent_end was a
+            // non-terminal boundary; leave working state untouched,
+            // but carry the schedule so the composer can show a
+            // countdown instead of a bare spinner (TUI parity).
+            let schedule = (frame["attempt"] as? Int ?? 0,
+                            frame["maxAttempts"] as? Int ?? 0,
+                            frame["delayMs"] as? Int ?? 0)
+            // The retry's own payload carries the ORIGINAL provider
+            // error — surface its human message with the countdown so
+            // the user sees what the agent is waiting out.
+            let rawError = frame["errorMessage"] as? String
+            let errorText = rawError.flatMap(AgentSessionEvent.providerErrorText(raw:))
+            return [.retryScheduled(attempt: schedule.0,
+                                    maxAttempts: schedule.1,
+                                    delayMs: schedule.2,
+                                    errorText: errorText)]
+        case "auto_retry_end":
+            guard frame["success"] as? Bool == false else { return [] }
+            let text = Self.readableRetryFailure(frame)
+                ?? (frame["errorMessage"] as? String)
+                ?? "Auto-retry failed"
+            lastRetryFailure = text
+            return [.error(text: text)]
         case "agent_start", "turn_start", "message_start",
              "extension_ui_request":
             // Deltas and message_end carry the content; extension UI
@@ -84,6 +125,15 @@ final class PiFrameMapper {
         case "notice":
             return [.notice((frame["message"] as? String)
                 ?? (frame["text"] as? String) ?? "")]
+        case "command_output":
+            // Builtin slash-command stdout (/compact, /stats, /models…):
+            // omp answers the prompt with agentInvoked:false and reports
+            // the run's text here — the ONLY feedback a command gives
+            // (probed 18.0.11: "Compaction failed: Nothing to compact").
+            // Dropped frames made /compact a silent no-op in the GUI.
+            let text = (frame["text"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return text.isEmpty ? [] : [.notice(text)]
         case "goal_updated":
             let goal = (frame["goal"] as? String)
                 ?? (frame["message"] as? String) ?? ""
@@ -98,6 +148,23 @@ final class PiFrameMapper {
             framesIgnored += 1
             return []
         }
+    }
+    /// omp's finalError is `"Provider requested 1800000ms wait, exceeds
+    /// retry.maxDelayMs (300000ms). Original error: 429 {json}"` — the
+    /// key facts (limit window, reset time) sit inside the JSON. Swap
+    /// the raw payload for its human `error.message` so the failure
+    /// reads in one glance.
+    static func readableRetryFailure(_ frame: [String: Any]) -> String? {
+        guard let raw = frame["finalError"] as? String, !raw.isEmpty else {
+            return nil
+        }
+        let marker = "Original error: "
+        guard let range = raw.range(of: marker) else { return raw }
+        let original = String(raw[range.upperBound...])
+        guard let readable = AgentSessionEvent.providerErrorText(raw: original) else {
+            return raw
+        }
+        return String(raw[..<range.lowerBound]) + marker + readable
     }
 
     /// History replay: whole PiAgentMessage records from get_messages.
@@ -194,6 +261,11 @@ final class PiFrameMapper {
                 where block["type"] as? String == "toolCall" {
                 events += toolCallStarted(block)
             }
+            if message["stopReason"] as? String == "error",
+               let text = AgentSessionEvent.providerErrorText(from: message) {
+                events.append(.error(text: text))
+            }
+
             if let entryId = message["id"] as? String {
                 events.append(.entryMark(role: "agent", entryId: entryId))
             }

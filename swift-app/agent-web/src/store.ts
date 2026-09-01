@@ -27,14 +27,14 @@ export type Permission = { requestID: string; toolCallTitle?: string | null;
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 /// A block before it gets its stable identity stamp.
 type BlockInput = DistributiveOmit<Block, "id">;
-
-
 export type Block =
   | { kind: "user"; id: number; text: string; entryId?: string }
   | { kind: "agent"; id: number; text: string; entryId?: string }
   | { kind: "thought"; id: number; text: string }
   | { kind: "tool"; id: number; call: ToolCall }
   | { kind: "turnStats"; id: number; text: string }
+  | { kind: "error"; id: number; text: string }
+  | { kind: "notice"; id: number; text: string }
 
 /// Compact token counts (k/M/G), shared by the transcript's turn-stats
 /// rows and the composer usage segments.
@@ -76,6 +76,7 @@ const ConfigChoiceSchema = z.object({
   value: z.string(),
   name: z.string(),
   description: z.string().nullish(),
+  source: z.string().nullish(),
 });
 export type ConfigChoice = z.infer<typeof ConfigChoiceSchema>;
 const ConfigOptionSchema = z.object({
@@ -127,6 +128,13 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("permissionResolved") }),
   z.object({ type: z.literal("phase"), value: z.string().nullish() }),
   z.object({ type: z.literal("error"), text: z.string() }),
+  z.object({
+    type: z.literal("retryScheduled"),
+    attempt: z.number().nullish(),
+    maxAttempts: z.number().nullish(),
+    delayMs: z.number().nullish(),
+    errorText: z.string().nullish(),
+  }),
   z.object({ type: z.literal("reconnecting"), value: z.boolean() }),
   z.object({ type: z.literal("turnEnded") }),
   z.object({ type: z.literal("branchState"), active: z.boolean() }),
@@ -286,6 +294,11 @@ class Store {
   /// session directory after handshake, history load, and each turn).
   sessionTitle: string | null = null;
   error: string | null = null;
+  /// Auto-retry countdown (agent-reported backoff schedule): attempt
+  /// N of M, ends at `endsAt` (ms epoch). Cleared when the turn
+  /// resumes (chunks arrive), settles, or the user gets the failure.
+  retry: { attempt: number; maxAttempts: number; endsAt: number;
+           errorText: string | null } | null = null;
   /// The transport is down and Swift is riding the reconnect backoff.
   reconnecting = false;
   /// Turn wall-clock: `turnStartedAt` set when a turn starts
@@ -293,7 +306,6 @@ class Store {
   /// transcript tail shows the duration as the turn's closing stats.
   turnStartedAt: number | null = null;
   lastTurnMs: number | null = null;
-  status = "连接中…";
   usage: { used?: number | null; size?: number | null;
            input?: number | null; output?: number | null;
            costAmount?: number | null; costCurrency?: string | null } | null = null;
@@ -362,27 +374,52 @@ class Store {
   applyAll(rawList: unknown[]) {
     let applied = 0;
     let rejected = 0;
+    let crashed = 0;
     for (const raw of rawList) {
       const event = parseEvent(raw);
       if (!event) { rejected += 1; continue; }
-      this.applyParsed(event);
-      applied += 1;
+      // One poison event must not take the whole batch — a replay
+      // burst is thousands of events — nor the pane (the boundary in
+      // main.tsx catches what escapes here).
+      try { this.applyParsed(event); applied += 1; }
+      catch (err) { crashed += 1; console.error("goty: event crashed reducer", event.type, err); }
     }
     if (rejected > 0) {
       this.rejectedCount += rejected;
       console.warn("goty: rejected", rejected, "unparseable events in batch");
     }
+    if (crashed > 0) this.rejectedCount += crashed;
     if (applied === 0) return;
     this.appliedCount += applied;
     this.revision += 1;
     this.emit();
   }
-
   apply(raw: unknown) {
     const event = parseEvent(raw);
     if (!event) { this.rejectedCount += 1; return; }
     this.applyParsed(event);
     this.appliedCount += 1;
+    this.revision += 1;
+    this.emit();
+  }
+
+  /// Post-crash blank slate (ErrorBoundary 重试): drop every VIEW
+  /// structure; live pushes rebuild them. Transport accounting is
+  /// cumulative by contract and stays.
+  reset() {
+    this.blocks = [];
+    this.toolOrder = [];
+    this.tools.clear();
+    this.permission = null;
+    this.plan = null;
+    this.jobs = [];
+    this.subagents = [];
+    this.pendingQueue = [];
+    this.hasOlder = false;
+    this.error = null;
+    this.tailSealed = false;
+    this.chunkSealed = false;
+    this.generation += 1;
     this.revision += 1;
     this.emit();
   }
@@ -403,7 +440,11 @@ class Store {
       case "userChunk":
         this.userTail(event.text); break;
       case "agentChunk":
-        if (event.text) this.tail("agent").text += event.text; break;
+        if (event.text) this.tail("agent").text += event.text;
+        // A chunk after a retry schedule means the retried call is
+        // streaming — the countdown is over.
+        this.retry = null;
+        break;
       case "chunkBoundary":
         // The model switched content blocks: seal the current run so
         // the NEXT chunk opens a fresh block below, in true stream
@@ -515,9 +556,7 @@ class Store {
         for (const text of this.pendingQueue) {
           this.push({ kind: "user", text });
         }
-        this.pendingQueue = [];
-        this.working = false;
-        this.phase = null;
+        this.retry = null;
         break;
       }
       case "sessions": this.sessions = coerceList(event.sessions, AgentSessionSummarySchema); break;
@@ -528,6 +567,7 @@ class Store {
           if (this.turnStartedAt == null) this.turnStartedAt = Date.now();
         } else {
           this.phase = null;
+          this.retry = null;
         }
         break;
       case "phase":
@@ -543,7 +583,21 @@ class Store {
         this.working = false;
         this.phase = null;
         this.reconnecting = false;
+        this.retry = null;
         this.error = event.text;
+        // TUI parity: the failure also lands as a transcript line so a
+        // reopened pane still shows what happened.
+        this.push({ kind: "error", text: event.text });
+        break;
+      case "retryScheduled":
+        // The agent is backing off before retrying a provider failure —
+        // the composer swaps its working spinner for a live countdown.
+        this.retry = {
+          attempt: event.attempt ?? 0,
+          maxAttempts: event.maxAttempts ?? 0,
+          endsAt: Date.now() + (event.delayMs ?? 0),
+          errorText: event.errorText ?? null,
+        };
         break;
       case "sessionTitle": this.sessionTitle = event.title ?? null; break;
       case "theme": {
@@ -559,7 +613,12 @@ class Store {
         if (event.value) this.error = null;
         break;
       case "starting": this.starting = event.agent; break;
-      case "status": this.status = event.text; break;
+      case "status":
+        // Agent notices (extension setStatus, command_output…): transcript
+        // lines, not a hidden field — /compact's "Compaction failed: …"
+        // used to vanish here with no reader.
+        if (event.text) this.push({ kind: "notice", text: event.text });
+        break;
       case "configOptions": this.configOptions = coerceList(event.options, ConfigOptionSchema); break;
       case "commands": this.commands = coerceList(event.commands, AgentCommandSchema); break;
       case "usage": this.usage = event; break;
@@ -567,6 +626,7 @@ class Store {
         this.blocks = []; this.toolOrder = []; this.tools.clear();
         this.permission = null; this.working = false;
         this.phase = null; this.error = null; this.reconnecting = false;
+        this.retry = null;
         this.turnStartedAt = null;
         this.pendingQueue = []; this.tailSealed = false; this.chunkSealed = false;
         this.hasOlder = false;

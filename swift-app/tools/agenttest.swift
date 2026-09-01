@@ -86,6 +86,13 @@ enum AgentTest {
         print("— PiFrameMapper (omp rpc) —")
         var events: [AgentSessionEvent] = []
         let rpcMapper = PiFrameMapper(terminalOnAgentEnd: true)
+        let rateLimitAssistant: [String: Any] = [
+            "role": "assistant",
+            "content": [],
+            "stopReason": "error",
+            "errorMessage": #"429 {"type":"error","error":{"message":"[1308][Usage limit reached for 5 hour. Your limit will reset at 19:37:34]"}}"#
+        ]
+
 
         // Live delta stream (message_update.assistantMessageEvent).
         events += rpcMapper.map(["type": "message_update", "assistantMessageEvent": [
@@ -157,6 +164,66 @@ enum AgentTest {
         if case .turnEnded?? = events.last { failures += 1; print("FAIL  non-terminal agent_end settled the turn") }
         events += rpcMapper.map(["type": "agent_end"])
         if case .turnEnded?? = events.last {} else { failures += 1; print("FAIL  terminal agent_end ends turn") }
+        let rateLimitEvents = rpcMapper.map([
+            "type": "agent_end", "messages": [rateLimitAssistant]
+        ])
+        check(rateLimitEvents.contains(where: {
+            if case .turnEnded(let stop) = $0 { return stop == "error" }
+            return false
+        }), "provider error retains terminal stop reason")
+        check(rateLimitEvents.contains(where: {
+            if case .error(let text) = $0 {
+                return text == "Usage limit reached for 5 hour. Your limit will reset at 19:37:34"
+            }
+            return false
+        }), "live provider error surfaces its human message")
+        let errorJS = AgentSessionEvent.error(text: "quota exhausted").jsRepresentation
+        check(errorJS["type"] as? String == "error"
+              && errorJS["text"] as? String == "quota exhausted",
+              "provider error maps to web error event")
+        // omp auto-retry: 429 → auto_retry_start (turn continues),
+        // backoff exceeds retry.maxDelayMs → auto_retry_end
+        // success:false carries the full retry story; the terminal
+        // agent_end must not overwrite it with the bare provider text.
+        let retryStart = rpcMapper.map(["type": "auto_retry_start",
+                                        "attempt": 1, "maxAttempts": 3,
+                                        "delayMs": 15_000,
+                                        "errorMessage": #"429 {"type":"error","error":{"message":"[1308][Usage limit reached for 5 hour. Your limit will reset at 19:37:34]"}}"#,
+                                        "errorId": 659456])
+        if let scheduleEvent = retryStart.first,
+           case .retryScheduled(let attempt, let maxAttempts, let delayMs, let errorText) = scheduleEvent,
+           attempt == 1, maxAttempts == 3, delayMs == 15_000,
+           errorText == "Usage limit reached for 5 hour. Your limit will reset at 19:37:34" {
+        } else {
+            failures += 1; print("FAIL  auto_retry_start schedules the countdown")
+        }
+        let retryEnd = rpcMapper.map(["type": "auto_retry_end", "success": false,
+                                      "attempt": 1,
+                                      "finalError": #"Provider requested 1800000ms wait, exceeds retry.maxDelayMs (300000ms). Original error: 429 {"type":"error","error":{"message":"[1308][Usage limit reached for 5 hour. Your limit will reset at 19:37:34]"}}"#])
+        check(retryEnd.contains(where: {
+            if case .error(let text) = $0 {
+                return text.contains("Provider requested 1800000ms wait")
+                    && text.contains("Original error: Usage limit reached for 5 hour. Your limit will reset at 19:37:34")
+                    && !text.contains(#"{"type":"error""#)
+            }
+            return false
+        }), "failed auto-retry surfaces the readable limit story")
+        let retryTerminal = rpcMapper.map([
+            "type": "agent_end", "messages": [rateLimitAssistant]
+        ])
+        let retryErrors = retryTerminal.filter {
+            if case .error = $0 { return true }
+            return false
+        }
+        check(retryErrors.count == 0, "terminal agent_end keeps the retry story, not the bare 429")
+        check(retryTerminal.contains(where: {
+            if case .turnEnded = $0 { return true }
+            return false
+        }), "retry-failed turn still settles")
+        let retrySucceeded = rpcMapper.map(["type": "auto_retry_end",
+                                            "success": true, "attempt": 2])
+        check(retrySucceeded.isEmpty, "successful retry emits nothing")
+
 
         // available_commands_update carries omp's slash commands.
         events += rpcMapper.map(["type": "available_commands_update",
@@ -338,6 +405,38 @@ enum AgentTest {
         check(streamThoughtChunks == ["The user wants a count."],
               "thinking delta streams once, interleaved frame deduped (got \(streamThoughtChunks))")
         check(streamTextChunks.joined() == "1\n2\n3", "streamed text reassembles")
+        // Synthetic string user frames: command echoes compact to
+        // "/name args", task receipts and local-command wrappers drop.
+        let commandEcho = ClaudeFrameMapper.shapedUserEcho(
+            "<command-name>/rename</command-name>\n"
+            + "<command-message>rename</command-message>\n"
+            + "<command-args>对接 claudecode</command-args>")
+        check(commandEcho.compactMap {
+            if case .userMessage(let text) = $0 { return text } else { return nil }
+        } == ["/rename 对接 claudecode"], "claude command echo compacts to /name args")
+        check(ClaudeFrameMapper.shapedUserEcho(
+            "<task-notification>\n<task-id>t</task-id>\n</task-notification>").isEmpty,
+            "claude task receipt drops")
+        check(ClaudeFrameMapper.shapedUserEcho("真人输入").count == 1,
+            "claude real typing passes through")
+        // History persists one message as growing same-id frames —
+        // dedup is per id, never across messages (flat counters lost
+        // 78% of text / 92% of thinking on real sessions).
+        let growthMapper = ClaudeFrameMapper()
+        func growFrame(_ id: String, _ text: String) -> [String: Any] {
+            ["type": "assistant",
+             "message": ["id": id, "role": "assistant",
+                         "content": [["type": "text", "text": text]]]]
+        }
+        var grownText: [String] = []
+        for frame in [growFrame("m1", "第一段"), growFrame("m1", "第一段第二段"),
+                      growFrame("m2", "第二消息")] {
+            for event in growthMapper.map(frame) {
+                if case .messageChunk(let text) = event { grownText.append(text) }
+            }
+        }
+        check(grownText == ["第一段", "第二段", "第二消息"],
+              "replay dedup is per message id (got \(grownText))")
         // TodoWrite tool_use feeds the plan dock (omp todoPhases parity).
         let todoFrame = #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"TodoWrite","input":{"todos":[{"content":"调研","status":"completed"},{"content":"实现","status":"in_progress"}]}}]}}"#
         if let data = todoFrame.data(using: .utf8),
@@ -444,6 +543,26 @@ enum AgentTest {
                                          secondsSinceSend: 30) == false,
               "already-idle session needs no heal")
 
+        print("— omp store provider errors —")
+        let rateLimitRecord: [String: Any] = [
+            "type": "message", "id": "error-entry", "message": rateLimitAssistant
+        ]
+        let rateLimitRaw = String(data: try! JSONSerialization.data(withJSONObject: rateLimitRecord),
+                                  encoding: .utf8)!
+        let storedRateLimit = OmpSessionStore.parse(rateLimitRaw)
+        check(storedRateLimit.events.contains(where: {
+            if case .error(let text) = $0 {
+                return text.contains("Usage limit reached for 5 hour")
+            }
+            return false
+        }), "stored provider error survives transcript parse")
+        let historicalRateLimit = OmpSessionStore.parse(rateLimitRaw, includeTerminalError: false)
+        check(!historicalRateLimit.events.contains(where: {
+            if case .error = $0 { return true }
+            return false
+        }), "older transcript page cannot replace the current error")
+
+
         print("— omp store open-tail detection —")
         // A toolCall started but never completed (read raced the settle)
         // must report openTools > 0; the completing toolResult closes it.
@@ -502,6 +621,20 @@ enum AgentTest {
             if case .turnEnded = $0 { return true }; return false
         }), "agent_settled maps turnEnded")
         check(piMapper.framesIgnored >= 9, "extension ui requests counted (\(piMapper.framesIgnored))")
+        let piRateLimitEvents = piMapper.map([
+            "type": "message_end", "message": rateLimitAssistant
+        ])
+        check(piRateLimitEvents.contains(where: {
+            if case .error(let text) = $0 {
+                return text.contains("Usage limit reached for 5 hour")
+            }
+            return false
+        }), "pi assistant error surfaces before agent_settled")
+        check(piMapper.map(["type": "agent_settled"]).contains(where: {
+            if case .turnEnded = $0 { return true }
+            return false
+        }), "pi rate-limit turn still settles")
+
         // Replay: get_messages payload from pi-resume.jsonl.
         let piResumeFixture = (CommandLine.arguments.count > 1
             ? CommandLine.arguments[1] : "tools/fixtures") + "/pi-resume.jsonl"
@@ -534,6 +667,32 @@ enum AgentTest {
         let piSummaries = PiSessionStore.summaries(cwd: "/private/tmp/probe-cwd")
         check(piSummaries.contains { $0.title?.contains("HELLO_PI") == true },
               "pi session title derives from first user message")
+
+        // Capability alignment: the Swift client's capability constants
+        // must trail the Rust daemon's CAPABILITY — the three live in
+        // two languages and drift silently otherwise (a client asking
+        // above the daemon's level degrades instead of erroring).
+        var rustSource = #filePath
+        if !rustSource.hasPrefix("/") {
+            rustSource = FileManager.default.currentDirectoryPath + "/" + rustSource
+        }
+        let protoPath = URL(fileURLWithPath: rustSource)  // tools/agenttest.swift
+            .deletingLastPathComponent()                   // tools/
+            .deletingLastPathComponent()                   // swift-app/
+            .appendingPathComponent("sessiond/src/protocol.rs").path
+        if let proto = try? String(contentsOfFile: protoPath, encoding: .utf8),
+           let line = proto.split(separator: "\n")
+               .first(where: { $0.contains("pub const CAPABILITY") }),
+           let rustCap = Int(String(line.split(separator: "=", maxSplits: 1).last ?? "")
+               .trimmingCharacters(in: .whitespacesAndNewlines)
+               .trimmingCharacters(in: CharacterSet(charactersIn: "; "))) {
+            check(SessionDaemon.storeCapability <= rustCap,
+                  "Swift storeCapability (\(SessionDaemon.storeCapability)) <= Rust CAPABILITY (\(rustCap))")
+            check(SessionDaemon.expectedCapability <= SessionDaemon.storeCapability,
+                  "Swift expectedCapability (\(SessionDaemon.expectedCapability)) <= storeCapability")
+        } else {
+            check(false, "sessiond protocol.rs CAPABILITY parseable")
+        }
 
         try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }

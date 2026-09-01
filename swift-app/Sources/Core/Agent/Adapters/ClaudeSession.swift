@@ -103,7 +103,13 @@ final class ClaudeSession: AgentSessioning {
             // the reply lands as one block (no live thinking, no
             // progressive text). The interleaved COMPLETE assistant
             // frames are deduped in the mapper by streamed length.
-            + "--include-partial-messages"
+            + "--include-partial-messages "
+            // Permission gate: without this flag --print auto-denies any
+            // tool not already allowed and NEVER asks the client — the
+            // can_use_tool control_request frames in handleFrame (and the
+            // permission card) only arrive with it. Verified against
+            // claude 2.1.236; matches happier's raw stream-json query.
+            + "--permission-prompt-tool stdio"
         if let model, model.allSatisfy({ c in c.isLetter || c.isNumber || ".-_".contains(c) }) {
             cmd += " --model \(model)"
         }
@@ -455,7 +461,15 @@ final class ClaudeSession: AgentSessioning {
         }) {
             isWorking = true
         }
-        if !events.isEmpty { emit(events) }
+        // Live string user frames are synthetic (command echoes, task
+        // receipts): typed text never echoes on the --print stream —
+        // send() already bubbled it locally, so the mapper's
+        // userMessage here would only double-bubble it.
+        let live = events.filter { event in
+            if case .userMessage = event { return false }
+            return true
+        }
+        if !live.isEmpty { emit(live) }
     }
 
     private func emit(_ events: [AgentSessionEvent]) {

@@ -351,9 +351,11 @@ import Foundation
             var ran: [String] = []
             var wrote: [String] = []
             func run(_ c: String, cwd: String?, timeout: TimeInterval,
-                     completion: @escaping (Result<ExecResult, ExecFailure>) -> Void) {
+                     completion: @escaping (Result<ExecResult, ExecFailure>) -> Void)
+                    -> ProcessRunnerHandle {
                 ran.append(c)
                 completion(.success(ExecResult(exitCode: 0, stdout: "out:\(c)", stderr: "")))
+                return ProcessRunnerHandle()
             }
             func read(path: String, completion: @escaping (Result<String, ExecFailure>) -> Void) {
                 completion(.success("file-content"))
@@ -487,17 +489,24 @@ import Foundation
             check(last?.rounds.count == 29, "remaining rounds run after continue")
         }
 
-        // write tool: auto-executes now — only destructive ops confirm
+        // write/edit: ALWAYS gate on the fingerprinted proposal (the
+        // toolSpec promises confirmation); confirm is the only path to
+        // the executor. Cancel while pending executes nothing.
         do {
             let m = FakeModel()
             let e = FakeExec()
+            let proposeSem = DispatchSemaphore(value: 0)
             let doneSem = DispatchSemaphore(value: 0)
-            var proposed = false
             var last: AITask?
+            var proposalTexts: [String] = []
             let coord = AITaskCoordinator(model: m, executorFor: { _ in e })
             coord.onUpdate = { t in
                 last = t
-                if t.phase == .awaitingConfirmation { proposed = true }
+                if t.phase == .awaitingConfirmation,
+                   let p = t.pendingProposal {
+                    proposalTexts.append(p.explanation)
+                    proposeSem.signal()
+                }
                 if case .completed = t.phase { doneSem.signal() }
                 if case .failed = t.phase { doneSem.signal() }
             }
@@ -507,11 +516,18 @@ import Foundation
                 [ToolCall(id: "2", name: "edit",
                           argumentsJSON: "{\"path\":\"/tmp/w\",\"oldText\":\"x\",\"newText\":\"y\"}")],
             ]
-            _ = coord.start(context: AIContext(request: "save", target: target,
-                                                visibleOutput: "", hostFacts: ""))
+            let tid = coord.start(context: AIContext(request: "save", target: target,
+                                                     visibleOutput: "", hostFacts: ""))
+            // Round 1: write proposes and waits — nothing ran yet.
+            check(waitSem(proposeSem), "write proposes before executing")
+            check(e.wrote.isEmpty, "unconfirmed write never executes")
+            coord.confirm(taskId: tid)
+            // Round 2: edit proposes the same way.
+            check(waitSem(proposeSem), "edit proposes before executing")
+            check(e.wrote == ["/tmp/w"], "confirmed write executed")
+            coord.confirm(taskId: tid)
             check(waitSem(doneSem), "write/edit task completes")
-            check(!proposed, "write and edit auto-execute (no confirmation)")
-            check(e.wrote == ["/tmp/w"], "write executed")
+            check(proposalTexts.count == 2, "each mutation proposed once")
             check(last?.rounds.count == 2, "both rounds recorded")
         }
 
@@ -553,11 +569,13 @@ import Foundation
                 }
                 func stream(messages: [ChatMessage], tools: [ToolSpec],
                             onDelta: @escaping (StreamDelta) -> Void,
-                            completion: @escaping (Result<ModelReply, ModelError>) -> Void) {
+                            completion: @escaping (Result<ModelReply, ModelError>) -> Void)
+                        -> Task<Void, Never>? {
                     onDelta(StreamDelta(text: "Hel", reasoning: nil))
                     onDelta(StreamDelta(text: nil, reasoning: "let me check"))
                     onDelta(StreamDelta(text: "lo", reasoning: nil))
                     completion(.success(ModelReply(text: "Hello", reasoning: nil, toolCalls: [])))
+                    return nil
                 }
             }
             let e = FakeExec()

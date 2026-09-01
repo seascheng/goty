@@ -223,10 +223,35 @@ final class WorkspaceCoordinator {
             return (ws, daemonFor?(ws) ?? .shared)
         }
         guard !targets.isEmpty else { return }
+        // Host-less agent panes whose session title is still unknown:
+        // one store listing per dialect resolves them without spawning
+        // anything (capability 7). Panes are remembered once attempted
+        // so a title-less session costs one call per GUI run, not one
+        // per poll. The store snapshot (agentSessionId) is read here on
+        // the main thread; the daemon round trips run below.
+        var storeTitleCalls: [(UUID, SessionDaemon,
+                               [(paneId: String, storeKey: String, sessionId: String)])] = []
+        for (ws, daemon) in targets {
+            var gaps: [(paneId: String, storeKey: String, sessionId: String)] = []
+            for pane in ws.tabs.flatMap(\.panes) {
+                guard case .agent(let agentKey) = pane.kind,
+                      let storeKey = AgentRegistry.descriptor(for: agentKey)?.storeListKey,
+                      let sessionId = pane.agentSessionId, !sessionId.isEmpty,
+                      !titlePrefetched[ws.id, default: []].contains(pane.id),
+                      hasLiveHost?(HostKey(workspace: ws.id, pane: pane.id)) != true
+                else { continue }
+                gaps.append((paneId: pane.id, storeKey: storeKey, sessionId: sessionId))
+            }
+            if !gaps.isEmpty {
+                storeTitleCalls.append((ws.id, daemon, gaps))
+            }
+        }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var cwdResult: (UUID, [String: String])?
             var fgResults: [(UUID, [String: String], [String: String])] = []
             var jobResults: [(UUID, [String: [AgentJobSnapshot]])] = []
+            var titleResults: [(UUID, [String: String])] = []
+            var storeTitles: [(UUID, String, String)] = []  // (wsId, paneId, title)
             for (ws, daemon) in targets {
                 let panes = daemon.listPanes()
                 if ws.id == focusedId {
@@ -239,6 +264,7 @@ final class WorkspaceCoordinator {
                 var fg: [String: String] = [:]
                 var agents: [String: String] = [:]
                 var jobs: [String: [AgentJobSnapshot]] = [:]
+                var titles: [String: String] = [:]
                 for info in panes {
                     // Daemon ids are "<workspace>_<pane>"; keep the pane half.
                     if let pane = info.id.split(separator: "_", maxSplits: 1).last {
@@ -248,11 +274,35 @@ final class WorkspaceCoordinator {
                         if let agent = info.agent {
                             agents[String(pane)] = agent
                         }
+                        if let title = info.title, !title.isEmpty {
+                            titles[String(pane)] = title
+                        }
                         jobs[String(pane)] = info.agentJobs
                     }
                 }
+                if !titles.isEmpty {
+                    titleResults.append((ws.id, titles))
+                }
                 fgResults.append((ws.id, fg, agents))
                 jobResults.append((ws.id, jobs))
+            }
+            // Agent-store titles: one SESSION_LIST per (workspace,
+            // dialect), matched by each gap pane's persisted session id.
+            for (wsId, daemon, gaps) in storeTitleCalls {
+                let byStore = Dictionary(grouping: gaps, by: \.storeKey)
+                for (storeKey, panes) in byStore {
+                    guard let (rows, _) = daemon.agentStoreSummaries(cwd: nil, store: storeKey)
+                    else { continue }
+                    let titlesById = Dictionary(rows.map { ($0.summary.sessionId,
+                                                            $0.summary.title) },
+                                                uniquingKeysWith: { a, _ in a })
+                    for pane in panes {
+                        if let title = titlesById[pane.sessionId],
+                           let title, !title.isEmpty {
+                            storeTitles.append((wsId, pane.paneId, title))
+                        }
+                    }
+                }
             }
             DispatchQueue.main.async { [weak self] in
                 if let (wsId, byRuntimeId) = cwdResult {
@@ -260,12 +310,59 @@ final class WorkspaceCoordinator {
                 }
                 self?.applyForegrounds(fgResults)
                 self?.applyJobs(jobResults)
+                self?.applyPaneTitles(titleResults)
+                for (wsId, _, gaps) in storeTitleCalls {
+                    for pane in gaps {
+                        self?.titlePrefetched[wsId, default: []].insert(pane.paneId)
+                    }
+                }
+                for (_, paneId, title) in storeTitles {
+                    self?.setAgentTabTitle(paneId: paneId, name: title)
+                }
             }
         }
     }
+
+    /// Pane titles mined from the daemon's LIST reply (OSC scan of the
+    /// ring tail): fills the volatile title table for panes THIS GUI
+    /// run has never attached a host to — after a restart every
+    /// terminal tab's title is otherwise lost until reopened. A live
+    /// host's own OSC parse stays the authority: daemon values never
+    /// overwrite panes that have one.
+    func applyPaneTitles(_ results: [(UUID, [String: String])]) {
+        var changed = false
+        for (wsId, titles) in results {
+            guard runtime[wsId] != nil else { continue }
+            for (paneId, title) in titles where !title.isEmpty {
+                guard runtime[wsId]!.titles[paneId] == nil,
+                      hasLiveHost?(HostKey(workspace: wsId, pane: paneId)) != true
+                else { continue }
+                runtime[wsId]!.titles[paneId] = title
+                changed = true
+            }
+        }
+        if changed, wsIdFocused(resultWorkspaces: results.map(\.0)) {
+            delegate?.coordinatorDidChange(.title)
+        }
+    }
+
+    private func wsIdFocused(resultWorkspaces: [UUID]) -> Bool {
+        guard let focused = store?.focused?.id else { return false }
+        return resultWorkspaces.contains(focused)
+    }
+
     /// Jobs dock data (capability 6): per-pane background async-job
     /// rows from the same LIST reply. Separate from applyForegrounds
     /// so the headless layout tests' seeded fg calls stay valid.
+
+    /// Whether a pane currently has a live host (the app layer owns the
+    /// pool). Daemon-side fills (titles, store titles) never overwrite
+    /// a pane a host is actively serving.
+    var hasLiveHost: ((HostKey) -> Bool)?
+    /// Agent panes whose store title was already looked up this GUI run
+    /// (hit or miss — a miss costs nothing on later polls).
+    private var titlePrefetched: [UUID: Set<String>] = [:]
+
     func applyJobs(_ results: [(UUID, [String: [AgentJobSnapshot]])]) {
         guard let store else { return }
         var changed = false
@@ -332,13 +429,21 @@ final class WorkspaceCoordinator {
                 if let reported = agents[paneId],
                    let activity = AgentActivity(reported),
                    entry.reported != activity {
-                    // The process's own report is the authority — it
-                    // lands in `reported` (the composer follows it via
-                    // pushReportedAgentStates) and never overwrites the
-                    // client derivation, so the two consumers cannot
-                    // fight over one field again.
+                    // Live work is always seen (the host path's rule).
+                    // A finish while nobody was looking keeps the "done"
+                    // dot until the tab opens — the extension path used
+                    // to mark everything seen, so background panes never
+                    // surfaced their completions.
+                    if activity != .idle {
+                        entry.seen = true
+                    } else if entry.reported == .working || entry.reported == .blocked {
+                        let focused = isPaneFocused(wsId: wsId, paneId: paneId)
+                        if !focused, entry.seen {
+                            turnCompletedUnseen?(wsId, paneId)
+                        }
+                        entry.seen = focused
+                    }
                     entry.reported = activity
-                    entry.seen = true
                     entryChanged = true
                 }
                 guard entryChanged else { continue }

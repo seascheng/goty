@@ -76,10 +76,24 @@ struct AITask {
         pendingProposal = proposal
     }
 
+    /// In-place append (String.append is amortized O(1); the old
+    /// `(x ?? "") + t` re-formed the string on every token) and a
+    /// runaway ceiling: a stream that never ends must not grow the
+    /// card's memory without bound.
     mutating func appendLive(_ delta: StreamDelta) {
-        if let t = delta.text { streamingText = (streamingText ?? "") + t }
-        if let r = delta.reasoning { streamingReasoning = (streamingReasoning ?? "") + r }
+        if let t = delta.text {
+            if streamingText == nil { streamingText = "" }
+            let room = max(0, Self.maxLiveText - (streamingText?.count ?? 0))
+            streamingText?.append(contentsOf: t.prefix(room))
+        }
+        if let r = delta.reasoning {
+            if streamingReasoning == nil { streamingReasoning = "" }
+            let room = max(0, Self.maxLiveText - (streamingReasoning?.count ?? 0))
+            streamingReasoning?.append(contentsOf: r.prefix(room))
+        }
     }
+
+    private static let maxLiveText = 512 * 1024
 
     mutating func clearLive() {
         streamingText = nil

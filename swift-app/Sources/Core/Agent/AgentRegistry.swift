@@ -27,11 +27,12 @@ struct AgentPaneParams {
 struct AgentDescriptor {
     let key: String
     let label: String
-    /// Binary availability probing looks for (never spawned).
     let binary: String
+    /// The session-store listing key the daemon serves for this family
+    /// ("omp"/"claude"/"pi"; nil = no daemon-side listing — codex).
+    let storeListKey: String?
     let spawn: AgentSpawn
     let make: (AgentPaneParams) -> AgentSessioning
-
     /// PATH search for an executable — no subprocess. The interactive
     /// env capture is the whole reason this works from a Finder launch.
     func isAvailable(path: String) -> Bool {
@@ -55,6 +56,7 @@ enum AgentRegistry {
             key: "omp",
             label: "OMP",
             binary: "omp",
+            storeListKey: "omp",
             spawn: AgentSpawn(command: "omp", args: ["--mode", "rpc"],
                               ringBytes: 67_108_864),
             make: { params in OmpSession(params: params) }),
@@ -62,6 +64,7 @@ enum AgentRegistry {
             key: "claude",
             label: "Claude Code",
             binary: "claude",
+            storeListKey: "claude",
             spawn: AgentSpawn(command: "claude",
                               args: ["--print", "--input-format", "stream-json",
                                      "--output-format", "stream-json", "--verbose"],
@@ -71,6 +74,7 @@ enum AgentRegistry {
             key: "codex",
             label: "Codex",
             binary: "codex",
+            storeListKey: nil,
             spawn: AgentSpawn(command: "codex", args: ["app-server"],
                               ringBytes: 16_777_216),
             make: { params in CodexSession(params: params) }),
@@ -78,6 +82,7 @@ enum AgentRegistry {
             key: "pi",
             label: "pi",
             binary: "pi",
+            storeListKey: "pi",
             spawn: AgentSpawn(command: "pi", args: ["--mode", "rpc"],
                               ringBytes: 16_777_216),
             make: { params in PiLegacySession(params: params) }),
@@ -90,7 +95,6 @@ enum AgentRegistry {
     static func descriptor(for key: String) -> AgentDescriptor? {
         descriptors.first { $0.key == key }
     }
-
     /// Menu/picker entries in display order; the caller injects the
     /// FOCUSED workspace's availability (local user PATH vs a remote
     /// link's connect-time probe). Unavailable agents are DROPPED
