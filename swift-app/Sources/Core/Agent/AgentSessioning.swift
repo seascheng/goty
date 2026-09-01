@@ -74,14 +74,23 @@ protocol AgentSessioning: AnyObject {
     /// reveal/open), or on a remote host (its paths live on that
     /// machine; GUI-side file actions must say so instead of probing
     /// the local filesystem)? Transport-level fact — adapters answer
-    /// from their daemon.
     var runsOnThisMac: Bool { get }
+    /// Older history for the tail-first prepend pipeline; nil = the
+    /// adapter loaded (or holds no) older entries. Called when the
+    /// page's history sentinel reaches the top of what it has.
+    func loadOlderHistory(completion: @escaping ([AgentSessionEvent]?) -> Void)
+
 }
+
 
 extension AgentSessioning {
     /// Local by default: adapters without a daemon relationship run on
     /// the GUI's own machine.
     var runsOnThisMac: Bool { true }
+    /// No older history by default: only tail-first dialects page in.
+    func loadOlderHistory(completion: @escaping ([AgentSessionEvent]?) -> Void) {
+        completion(nil)
+    }
     var lastSessionId: String? { sessionId }
     /// true = the adapter consumes `restoredSessionId` itself inside
     /// connect (claude: store replay + --resume respawn) and the caller

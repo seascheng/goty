@@ -328,6 +328,15 @@ body {
 }
 .jump-bottom:hover { color: var(--accent-bright); border-color: var(--accent); }
 
+/* Off-screen virtualization, platform-native (paseo uses a row
+   virtualizer; content-visibility is the DOM equivalent with zero
+   bookkeeping): the browser skips layout/paint for transcript blocks
+   outside the viewport while keeping their scroll geometry. */
+.agent, .thought, .tool-card, .turn-stats {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}
+
 /* — dual-state action button (paseo style) — */
 .action-btn {
   flex: none; width: 26px; height: 26px; border-radius: 50%;

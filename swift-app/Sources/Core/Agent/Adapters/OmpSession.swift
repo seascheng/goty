@@ -189,11 +189,20 @@ final class OmpSession: PiSession {
         return true
     }
 
+    /// Tail-first reads only apply once the session is BIG: below the
+    /// window a full parse is just as fast and keeps the page complete.
+    private static let tailLoadThresholdBytes = 512 * 1024
+    private var historyAnchorEntryId: String?
+    private var olderLoadInFlight = false
+
     /// Replay-gate history: the daemon fetches the store file from ITS
     /// machine (remote panes), parsed by the same local parser. Local
     /// reads only as fallback — the daemon-listed path happens to be a
     /// valid local path when GUI and daemon share a filesystem, and the
     /// suffix walk covers a never-listed local session.
+    /// TAIL-FIRST (happier coldOpenAtBottom): sessions past the byte
+    /// window parse only their recent turn-aligned tail — the open is
+    /// O(window), not O(file); the anchor rides back for loadOlder.
     override func readStoredHistory(
             _ sid: String,
             completion: @escaping (StoredSessionHistory?) -> Void) {
@@ -208,10 +217,57 @@ final class OmpSession: PiSession {
                 raw = try? String(contentsOf: url, encoding: .utf8)
             }
             guard let raw else { return completion(nil) }
-            let loaded = OmpSessionStore.parse(raw)
+            var loaded: OmpSessionStore.Loaded
+            if raw.utf8.count > Self.tailLoadThresholdBytes {
+                let tail = OmpSessionStore.tailSlice(raw)
+                loaded = OmpSessionStore.parse(tail.slice)
+                loaded.firstEntryId = tail.firstEntryId
+            } else {
+                loaded = OmpSessionStore.parse(raw)
+            }
+            let anchor = loaded.firstEntryId
+            DispatchQueue.main.async {
+                self.historyAnchorEntryId = anchor
+            }
             completion(StoredSessionHistory(events: loaded.events,
                                             openTools: loaded.openTools,
-                                            aborted: loaded.aborted))
+                                            aborted: loaded.aborted,
+                                            firstEntryId: anchor))
+        }
+    }
+
+    /// Prepend pipeline: re-read the full file ONCE and convert the
+    /// entries before the anchor. The anchor clears — the next call
+    /// (if a new anchor exists after compaction/reload) pages again.
+    override func loadOlderHistory(
+            completion: @escaping ([AgentSessionEvent]?) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.olderLoadInFlight,
+                  let sid = self.sessionId, !sid.isEmpty,
+                  let anchor = self.historyAnchorEntryId else {
+                completion(nil)
+                return
+            }
+            self.olderLoadInFlight = true
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                var raw = self.daemon.agentStoreFile(sessionId: sid)
+                    .flatMap { String(data: $0, encoding: .utf8) }
+                if raw == nil, let path = self.daemonSessionPaths[sid] {
+                    raw = try? String(contentsOfFile: path, encoding: .utf8)
+                }
+                if raw == nil, let url = OmpSessionStore.fileURL(sessionId: sid) {
+                    raw = try? String(contentsOf: url, encoding: .utf8)
+                }
+                let events = raw.map {
+                    OmpSessionStore.parseOlder($0, beforeEntryId: anchor).events
+                }
+                DispatchQueue.main.async {
+                    self.olderLoadInFlight = false
+                    self.historyAnchorEntryId = nil
+                    completion(events)
+                }
+            }
         }
     }
 

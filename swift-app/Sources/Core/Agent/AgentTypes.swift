@@ -311,6 +311,13 @@ enum AgentSessionEvent {
     /// contract (2026-09-01): the transcript mirrors the model's
     /// actual output structure, not a UI-side fusion of it.
     case chunkBoundary
+    /// The authoritative history landed TRUNCATED (tail-first load):
+    /// true = older entries exist and loadOlderHistory can fetch them.
+    case historyTruncated(Bool)
+    /// Older history, to be PREPENDED before the current blocks (the
+    /// seam is a turn boundary — assembly invariants hold on both
+    /// sides). Empty array = no more history.
+    case transcriptPrepend(events: [AgentSessionEvent])
     case toolCallUpdate(id: String, title: String?, kind: String?,
                         status: String?, content: [AgentContent],
                         /// Tool result: `rawOutput.content` leaves (omp
@@ -375,6 +382,11 @@ extension AgentSessionEvent {
             return ["type": "thoughtChunk", "text": text]
         case .chunkBoundary:
             return ["type": "chunkBoundary"]
+        case .historyTruncated(let truncated):
+            return ["type": "historyTruncated", "truncated": truncated]
+        case .transcriptPrepend(let events):
+            return ["type": "transcriptPrepend",
+                    "events": events.map { $0.jsRepresentation }]
         case .toolCallUpdate(let id, let title, let kind, let status,
                              let content, let output, let rawInput, let oldText):
             return ["type": "toolCall",

@@ -13,6 +13,9 @@ final class AgentWebBridge: WebBridge {
     var onSetConfig: ((String, String) -> Void)?
     var onSetFast: ((Bool) -> Void)?
     var onListSessions: (() -> Void)?
+    /// History sentinel reached the top of what the page holds: the
+    /// session prepends older entries (tail-first loads).
+    var onLoadOlder: (() -> Void)?
     var onLoadSession: ((String) -> Void)?
     var onListFiles: ((@escaping ([String]) -> Void) -> Void)?
     var onPermissionOption: ((String) -> Void)?
@@ -44,6 +47,8 @@ final class AgentWebBridge: WebBridge {
             if let enabled = message["enabled"] as? Bool {
                 onSetFast?(enabled)
             }
+        case "loadOlder":
+            onLoadOlder?()
         case "listSessions":
             onListSessions?()
         case "loadSession":

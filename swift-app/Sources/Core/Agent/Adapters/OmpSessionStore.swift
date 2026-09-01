@@ -23,6 +23,10 @@ enum OmpSessionStore {
         /// raced the settle (store write lagged) — the transcript tail
         /// would freeze those cards at 运行中 forever. Caller re-reads.
         var openTools: Int = 0
+        /// Tail-first reads anchor the truncation here: the entry id of
+        /// the FIRST included line. loadOlderHistory re-parses the file
+        /// up to (exclusive) this entry. nil = the load was complete.
+        var firstEntryId: String? = nil
     }
 
     /// Test seam: when set, everything resolves here instead of the
@@ -346,5 +350,61 @@ enum OmpSessionStore {
             return nil
         }
         return newId
+    }
+
+    // MARK: - tail-first load (happier coldOpenAtBottom, distilled)
+
+    /// Take the tail of a FULL file's raw text (already read via daemon
+    /// or local disk) and cut it at a TURN boundary: from the byte cut,
+    /// advance to the first USER message entry so the seam can never
+    /// split a turn. Returns the slice + its anchor entry id (nil when
+    /// the file fits whole — then callers parse the full raw).
+    static func tailSlice(_ raw: String, maxBytes: Int = 512 * 1024)
+            -> (slice: String, firstEntryId: String?) {
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count > 2 else { return (raw, nil) }
+        var bytes = 0
+        var cut = lines.count
+        for i in stride(from: lines.count - 1, through: 2, by: -1) {
+            bytes += lines[i].utf8.count + 1
+            if bytes > maxBytes { cut = i + 1; break }
+        }
+        if cut <= 2 { return (raw, nil) }   // window covers (almost) all
+        // Advance to a turn seam: the first user-message entry at/after
+        // the cut. If none lands within the window, keep everything.
+        var seam = cut
+        for i in cut..<lines.count {
+            guard let data = lines[i].data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data)
+                      as? [String: Any],
+                  obj["type"] as? String == "message",
+                  (obj["message"] as? [String: Any])?["role"] as? String == "user"
+            else { continue }
+            seam = i
+            break
+        }
+        guard seam > 2, seam < lines.count else { return (raw, nil) }
+        let anchor = lines[seam].data(using: .utf8)
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            .flatMap { $0["id"] as? String }
+        let slice = lines[seam...].joined(separator: "\n")
+        return (slice, anchor)
+    }
+
+    /// Older portion of a file, EXCLUSIVE of the anchor entry: the
+    /// events lines[2..<anchorIndex) produce. Feeds transcriptPrepend.
+    static func parseOlder(_ raw: String, beforeEntryId anchor: String) -> Loaded {
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let cut = lines.firstIndex(where: { line in
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data)
+                      as? [String: Any] else { return false }
+            return obj["id"] as? String == anchor
+        }) else {
+            return Loaded(events: [], aborted: false, title: nil)
+        }
+        guard cut > 2 else { return Loaded(events: [], aborted: false, title: nil) }
+        let older = lines[2..<cut].joined(separator: "\n")
+        return parse(older)
     }
 }

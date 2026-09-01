@@ -1059,16 +1059,45 @@ export function App() {
 
   const sentinelRef = useRef<HTMLDivElement>(null);
   const growAnchor = useRef<{ height: number; top: number } | null>(null);
+  const olderInFlight = useRef(false);
+
+  // Prepend consumption: blocks arrived in FRONT (ids shifted by
+  // delta). Measure the anchor BEFORE commit (the render body runs
+  // against the old DOM), shift the window by the same delta so the
+  // mounted slice is unchanged, and let the layout effect restore the
+  // viewport over the newly inserted height above.
+  if (store.prependDelta > 0) {
+    const sc = scroller.current;
+    if (sc) growAnchor.current = { height: sc.scrollHeight, top: sc.scrollTop };
+    growing.current = true;
+    const delta = store.prependDelta;
+    store.prependDelta = 0;
+    setStart((s) => s + delta);
+  }
+  // Every prepend arrival (empty or not) releases the sentinel's
+  // single-flight guard.
+  const prependEpoch = store.prependEpoch;
+  useEffect(() => { olderInFlight.current = false; }, [prependEpoch]);
+
   useEffect(() => {
     const el = sentinelRef.current;
     const sc = scroller.current;
     if (!el || !sc) return;
     const obs = new IntersectionObserver((entries) => {
       if (!entries.some((e) => e.isIntersecting)) return;
-      if (begin <= 0 || growing.current) return;
-      growing.current = true;
-      growAnchor.current = { height: sc.scrollHeight, top: sc.scrollTop };
-      setStart((s) => Math.max(0, s - WINDOW_PAGE));
+      if (growing.current) return;
+      if (begin > 0) {
+        // Window growth (blocks already held): mount one page more.
+        growing.current = true;
+        growAnchor.current = { height: sc.scrollHeight, top: sc.scrollTop };
+        setStart((s) => Math.max(0, s - WINDOW_PAGE));
+      } else if (store.hasOlder && !olderInFlight.current) {
+        // Top of the HELD history but older exists server-side
+        // (tail-first load): page it in — single flight, happier's
+        // loadOlder discipline.
+        olderInFlight.current = true;
+        window.webkit?.messageHandlers.goty.postMessage({ type: "loadOlder" });
+      }
     }, { root: sc, rootMargin: "0px" });
     obs.observe(el);
     return () => obs.disconnect();
@@ -1092,9 +1121,6 @@ export function App() {
       growing.current = false;
     });
   });
-
-  // THE one auto-follow writer (invariant 1): follow only when not
-  // parked and no live gesture — never during the reader's input.
   useEffect(() => {
     const el = scroller.current;
     if (!el || parked.current) return;
@@ -1146,7 +1172,7 @@ export function App() {
   return (
     <div className="pane">
       <div className="transcript" ref={scroller} onScroll={onScroll}>
-        {begin > 0 && (
+        {(begin > 0 || store.hasOlder) && (
           <div className="history-more" ref={sentinelRef}>加载更早消息…</div>
         )}
         {visible.map((block, i) => (

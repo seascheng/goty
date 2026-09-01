@@ -428,6 +428,20 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                 }
             }
         }
+
+        // History pagination (tail-first loads): the page's sentinel at
+        // the top of what it holds asks for older entries; they arrive
+        // as ONE transcriptPrepend event the store inserts in front.
+        bridge.onLoadOlder = { [weak self] in
+            guard let self else { return }
+            self.session.loadOlderHistory { [weak self] events in
+                DispatchQueue.main.async {
+                    self?.bridge.push(AgentSessionEvent
+                        .transcriptPrepend(events: events ?? [])
+                        .jsRepresentation)
+                }
+            }
+        }
         bridge.onLogin = { [weak self] in
             guard let self else { return }
             self.session.loginProviders { [weak self] providers in
@@ -799,7 +813,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                 case .turnEnded, .plan, .commandsChanged, .usageUpdate,
                      .permissionRequested, .thoughtChunk, .starting,
                      .runtimeStatus, .notice, .backgroundJobs, .subagentUpdate,
-                     .entryMark, .openURL, .sessionStats:
+                     .entryMark, .openURL, .sessionStats,
+                     .historyTruncated, .transcriptPrepend:
                     break
                 case .transcriptReset:
                     // Adapter rebuild incoming (death healing): drop the

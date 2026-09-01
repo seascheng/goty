@@ -100,6 +100,9 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("agentChunk"), text: z.string() }),
   z.object({ type: z.literal("thoughtChunk"), text: z.string() }),
   z.object({ type: z.literal("chunkBoundary") }),
+  z.object({ type: z.literal("historyTruncated"), truncated: z.boolean() }),
+  z.object({ type: z.literal("transcriptPrepend"),
+             events: z.array(z.record(z.string(), z.unknown())) }),
   z.object({
     type: z.literal("toolCall"),
     id: z.string(),
@@ -260,6 +263,14 @@ class Store {
   /// chunkBoundary sealed the current content-block run: the next
   /// chunk opens a fresh block (faithful stream order).
   private chunkSealed = false;
+  /// Older history exists BEYOND what blocks hold (tail-first load).
+  hasOlder = false;
+  /// Blocks the LAST transcriptPrepend added in front (consumed by the
+  /// App to shift its render window + restore the viewport), and an
+  /// epoch that ticks on EVERY prepend arrival (empty or not — the
+  /// sentinel's in-flight guard releases on it).
+  prependDelta = 0;
+  prependEpoch = 0;
   loginProviders: Record<string, unknown>[] = [];
   /// Agent handshake phase: set on "starting", cleared by the first
   /// handshake-complete signal or a terminal error. The composer renders
@@ -398,6 +409,42 @@ class Store {
         // the NEXT chunk opens a fresh block below, in true stream
         // order. No same-kind merging across the boundary.
         this.chunkSealed = true; break;
+      case "historyTruncated":
+        this.hasOlder = event.truncated; break;
+      case "transcriptPrepend": {
+        // Older history lands in FRONT. Assembly stays correct by
+        // construction: the events rebuild through the SAME pipeline
+        // into a fresh prefix (their tail ends on a turn boundary, so
+        // no fusion across the seam), then the current blocks append
+        // unchanged — ids keep their identity and the DOM keeps the
+        // existing nodes.
+        const savedBlocks = this.blocks;
+        const savedTools = new Map(this.tools);
+        const savedOrder = this.toolOrder;
+        this.blocks = [];
+        this.toolOrder = [];
+        this.tools.clear();
+        this.tailSealed = false;
+        this.chunkSealed = false;
+        for (const raw of event.events) {
+          const parsed = IncomingEventSchema.safeParse(raw);
+          if (parsed.success) this.applyParsed(parsed.data);
+        }
+        if (this.blocks.length > 0) {
+          // The prefix's own tail stays sealed: nothing may merge into
+          // it from the head side either.
+          this.tailSealed = true;
+          this.blocks = [...this.blocks, ...savedBlocks];
+        } else {
+          this.blocks = savedBlocks;
+        }
+        for (const [id, call] of savedTools) this.tools.set(id, call);
+        this.toolOrder = [...this.toolOrder, ...savedOrder];
+        this.prependDelta = this.blocks.length - savedBlocks.length;
+        this.prependEpoch += 1;
+        this.hasOlder = false;
+        break;
+      }
       case "thoughtChunk":
         if (event.text) this.tail("thought").text += event.text; break;
       case "toolCall": {
@@ -521,7 +568,8 @@ class Store {
         this.permission = null; this.working = false;
         this.phase = null; this.error = null; this.reconnecting = false;
         this.turnStartedAt = null;
-        this.pendingQueue = []; this.tailSealed = false;
+        this.pendingQueue = []; this.tailSealed = false; this.chunkSealed = false;
+        this.hasOlder = false;
         this.plan = null; this.jobs = []; this.subagents = [];
         this.generation += 1;
         break;

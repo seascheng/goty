@@ -187,6 +187,16 @@ class PiSession: AgentSessioning {
         var events: [AgentSessionEvent]
         var openTools: Int
         var aborted: Bool
+        /// Tail-first truncation anchor (omp): entry id of the first
+        /// included line. nil = complete history.
+        var firstEntryId: String? = nil
+    }
+
+    /// Older history for the prepend pipeline (tail-first loads): the
+    /// events BEFORE the truncation anchor. nil/empty = no more.
+    /// Default: the dialect loaded everything.
+    func loadOlderHistory(completion: @escaping ([AgentSessionEvent]?) -> Void) {
+        completion(nil)
     }
 
     // MARK: - AgentSessioning
@@ -363,6 +373,12 @@ class PiSession: AgentSessioning {
             replayGateActive = false
         } else {
             events = [.transcriptReset] + stored.events
+        }
+        // Tail-first truncation is part of the SAME batch: the page
+        // must know (a) older history exists and (b) where the
+        // load-older affordance points, before it can render the top.
+        if stored.firstEntryId != nil {
+            events.append(.historyTruncated(true))
         }
         delegate?.session(self, didEmit: events)
         // Stale-tail heal: the read can race the turn settle (restart
