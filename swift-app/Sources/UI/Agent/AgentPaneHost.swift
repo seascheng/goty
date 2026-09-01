@@ -68,12 +68,19 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     private var forkInFlight = false
     /// Last title pushed to the page / sidebar; dedups list refreshes.
     private var lastSessionTitle: String?
+    /// True once a LIVE sessionTitle frame (omp session_info_update)
+    /// set this session's title. A store re-list racing the rename's
+    /// ~9ms flush window reads the OLD head and used to clear the title
+    /// the frame had just set (/rename flicker-back, 2026-09-01). While
+    /// locked, list reads may not touch the title; reset on handshake.
+    private var liveTitleLocked = false
 
     /// Look up the live session's title via the adapter's session
     /// directory and push it to the page + host owner. omp names a
     /// session itself seconds AFTER the first turn ends, so callers
     /// re-run this once more past that delay.
     private func refreshSessionTitle() {
+        guard !liveTitleLocked else { return }
         guard let sid = session.sessionId else { return }
         session.listSessions { [weak self] summaries in
             DispatchQueue.main.async {
@@ -773,9 +780,6 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         // view left behind kept painting (the ghost agent pane).
         removeFromSuperview()
     }
-
-    // MARK: AgentSessionDelegate（Core 回调，切主线程再碰 UI）
-
     /// GOTY_FOCUS_DEBUG: dump every link of the focus chain for this
     /// pane — window responder, webview responder, page activeElement.
     func dumpFocusState(_ tag: String) {
@@ -812,10 +816,10 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     self.handshakeDone = true
                 case .turnEnded, .plan, .commandsChanged, .usageUpdate,
                      .permissionRequested, .thoughtChunk, .starting,
-                     .runtimeStatus, .notice, .backgroundJobs, .subagentUpdate,
-                     .entryMark, .openURL, .sessionStats,
-                     .historyTruncated, .transcriptPrepend, .error,
-                     .retryScheduled:
+                     .runtimeStatus, .notice, .statusFlash, .sessionTitle,
+                     .backgroundJobs, .subagentUpdate, .entryMark,
+                     .openURL, .sessionStats, .historyTruncated,
+                     .transcriptPrepend, .error, .retryScheduled:
                     break
                 case .transcriptReset:
                     // Adapter rebuild incoming (death healing): drop the
@@ -875,6 +879,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     // Handshake settled the session id — new sessions have
                     // no title yet, adopted ones (reattach) may.
                     self.onSessionId?(self.session.sessionId)
+                    self.lastSessionTitle = nil
+                    self.liveTitleLocked = false
                     self.refreshSessionTitle()
                 case .runtimeStatus(let status):
                     // Queue-count reconciliation: omp delivers FIFO, so a
@@ -918,6 +924,13 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                         self?.refreshSessionTitle()
                     }
+                case .sessionTitle(let title):
+                    // /rename and omp's post-turn auto-naming push the
+                    // title live; keep the dedup var in sync so a later
+                    // refreshSessionTitle doesn't re-push a stale one.
+                    self.lastSessionTitle = title
+                    self.liveTitleLocked = true
+                    self.onSessionTitle?(title)
                 case .permissionRequested(let prompt):
                     self.pendingPrompt = prompt
                     // NO isWorking gate: a reattach replays the pending

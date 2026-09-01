@@ -38,6 +38,13 @@ final class OmpSession: PiSession {
     private var commandProbe: OmpSession?
     private var commandProbeSink: OmpCommandProbeSink?
 
+    /// A model switch parked while a turn runs — omp 18.0.11 kills
+    /// the running turn if set_model lands mid-run (probed 2026-09-01:
+    /// switches answer ok, streaming stops, no agent_settled). Applied
+    /// in turnSettled(); last pick wins.
+    private var pendingModelSelector: String?
+
+
     init(params: AgentPaneParams) {
         super.init(params: params, mapperTerminalOnAgentEnd: true)
         // The catalog rides the FIRST configChanged: without it the
@@ -490,24 +497,16 @@ final class OmpSession: PiSession {
     override func setConfigOption(id: String, value: String) {
         switch id {
         case "model":
-            // value is the provider/id selector applyState built; set_model
-            // takes it split (verified live). Bare ids pass through.
-            let parts = value.split(separator: "/", maxSplits: 1).map(String.init)
-            var extra: [String: Any] = [:]
-            if parts.count == 2 {
-                extra["provider"] = parts[0]
-                extra["modelId"] = parts[1]
-            } else {
-                extra["modelId"] = value
+            // omp 18.0.11 KILLS the running turn if set_model lands
+            // mid-run (probed 2026-09-01: every switch answers ok,
+            // streaming stops, no agent_settled, isWorking sticks).
+            // Park the pick and apply it when the turn settles.
+            guard !isWorking else {
+                pendingModelSelector = value
+                emit([.notice("⟳ 模型将在本轮结束后切换")])
+                return
             }
-            request("set_model", extra) { [weak self] response in
-                guard let self, response["success"] as? Bool == true else { return }
-                if let data = response["data"] as? [String: Any] {
-                    self.currentModelDescriptor = (data["model"] as? [String: Any])
-                        ?? self.currentModelDescriptor
-                }
-                self.rebuildConfigOptions()
-            }
+            applyModelSelector(value)
         case "thinking":
             request("set_thinking_level", ["level": value]) { [weak self] response in
                 guard let self, response["success"] as? Bool == true else { return }
@@ -518,6 +517,45 @@ final class OmpSession: PiSession {
             break
         }
     }
+
+    /// value is the provider/id selector applyState built; set_model
+    /// takes it split (verified live). Bare ids pass through.
+    private func applyModelSelector(_ value: String) {
+        let parts = value.split(separator: "/", maxSplits: 1).map(String.init)
+        var extra: [String: Any] = [:]
+        if parts.count == 2 {
+            extra["provider"] = parts[0]
+            extra["modelId"] = parts[1]
+        } else {
+            extra["modelId"] = value
+        }
+        request("set_model", extra) { [weak self] response in
+            guard let self else { return }
+            guard response["success"] as? Bool == true else {
+                // A silent swallow left the optimistic chip lying about
+                // the active model — surface the refusal instead.
+                let reason = (response["error"] as? String) ?? "未知原因"
+                self.emit([.notice("⚠︎ 模型切换失败：\(reason)")])
+                return
+            }
+            if let data = response["data"] as? [String: Any] {
+                self.currentModelDescriptor = (data["model"] as? [String: Any])
+                    ?? self.currentModelDescriptor
+            }
+            self.rebuildConfigOptions()
+        }
+    }
+
+    override func turnSettled() {
+        // Base flushes a deferred builtin command FIRST (a /rename may
+        // change the context the model switch lands on).
+        super.turnSettled()
+        if let pending = pendingModelSelector {
+            pendingModelSelector = nil
+            applyModelSelector(pending)
+        }
+    }
+
 
     // MARK: - omp capabilities
 

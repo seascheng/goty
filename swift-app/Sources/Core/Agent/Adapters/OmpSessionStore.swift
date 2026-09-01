@@ -110,6 +110,28 @@ enum OmpSessionStore {
                     }
                 }
                 if let cwd, let sessionCwd, !sessionCwd.hasPrefix(cwd) { continue }
+                // omp titles a session only after a turn completes
+                // normally — probe/test/aborted sessions stay untitled
+                // and the history read 未命名会话 soup. The first user
+                // message is the title users recognize (same rule as
+                // PiSessionStore.firstUserTitle).
+                if (title ?? "").isEmpty {
+                    outer: for line in raw.split(separator: "\n") {
+                        guard let d = line.data(using: .utf8),
+                              let j = try? JSONSerialization.jsonObject(with: d),
+                              let rec = j as? [String: Any],
+                              rec["type"] as? String == "message",
+                              let message = rec["message"] as? [String: Any],
+                              message["role"] as? String == "user" else { continue }
+                        let text = ((message["content"] as? [[String: Any]]) ?? [])
+                            .compactMap { $0["text"] as? String }.joined()
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !text.isEmpty {
+                            title = String(text.prefix(60))
+                            break outer
+                        }
+                    }
+                }
                 let date = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
                     .contentModificationDate
                 let updated = date?.timeIntervalSince1970 ?? 0

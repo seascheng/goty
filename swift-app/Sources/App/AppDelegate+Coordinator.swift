@@ -232,16 +232,18 @@ extension AppDelegate {
     /// OSC 0/2 — omp carries one while working) has one.
     private func spaceStatus(_ tab: TabState) -> SpaceStatus? {
         guard let pane = tab.panes.first,
-              let status = coordinator.agentStatus(paneId: pane.id) else { return nil }
+              let status = coordinator.agentStatus(paneId: pane.id),
+              let activity = coordinator.effectiveBadgeActivity(paneId: pane.id)
+        else { return nil }
         let spinner = coordinator.surfaceTitle(for: tab)?.first { ch in
             guard let s = ch.unicodeScalars.first else { return false }
             return (0x2800...0x28FF).contains(s.value)
         }
-        // The badge follows the COMPOSER's state machine (host.onTurnState
-        // → agentStateUpdated) — one source for tab and input. The daemon
-        // extension report is NOT consulted here: omp's extension kept
-        // reporting "working" after its own turn was aborted (2026-08-31
-        // storm), which is exactly the tab/composer split this reverted.
-        return SpaceStatus(activity: status.state, seen: status.seen, spinner: spinner)
+        // Activity: with a live host the composer's state machine is the
+        // authority (omp's extension kept reporting "working" after its
+        // own abort — the 2026-08-31 storm); host-less panes (restart,
+        // never-opened tabs) show the daemon-relayed extension report —
+        // see effectiveBadgeActivity.
+        return SpaceStatus(activity: activity, seen: status.seen, spinner: spinner)
     }
 }

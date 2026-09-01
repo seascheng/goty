@@ -362,6 +362,15 @@ enum AgentSessionEvent {
     case runtimeStatus(AgentRuntimeStatus)
     /// Transient status line (extension notify, notice/irc events).
     case notice(String)
+    /// Transient system chatter (info-level notices: xd:// device
+    /// mount/unmount on model switches). The page flashes it briefly
+    /// instead of parking it in the transcript — the transcript stays
+    /// conversation-shaped.
+    case statusFlash(String)
+    /// Live session title (omp session_info_update — /rename, omp's
+    /// post-turn auto-naming): the composer's session name and the
+    /// hosting tab follow it immediately, without a store re-list.
+    case sessionTitle(String)
     /// Background async-job rows (daemon LIST poll → pane host).
     case backgroundJobs([AgentJobSnapshot])
     /// Subagent roster delta (subagent_lifecycle/progress frames).
@@ -435,7 +444,6 @@ extension AgentSessionEvent {
     }
 
     /// The exact JS event shape the web store consumes (store.ts
-    /// IncomingEventSchema) — one mapping for the app, the probes and
     /// the tests; the hand copies here used to drift and lose fields.
     var jsRepresentation: [String: Any] {
         switch self {
@@ -443,6 +451,8 @@ extension AgentSessionEvent {
             return ["type": "starting", "agent": agent]
         case .ready:
             return ["type": "status", "text": "就绪"]
+        case .statusFlash(let text):
+            return ["type": "statusFlash", "text": text]
         case .userMessage(let text):
             return ["type": "userMessage", "text": text]
         case .userChunk(let text):
@@ -535,6 +545,8 @@ extension AgentSessionEvent {
                     "streaming": s.isStreaming ?? NSNull()] as [String: Any]
         case .notice(let text):
             return ["type": "status", "text": text]
+        case .sessionTitle(let title):
+            return ["type": "sessionTitle", "title": title]
         case .backgroundJobs(let jobs):
             return ["type": "jobs", "jobs": jobs.map { job in
                 ["id": job.id, "kind": job.kind, "status": job.status,
@@ -550,7 +562,6 @@ extension AgentSessionEvent {
             return ["type": "openURL", "url": url]
         case .sessionStats(let stats):
             return ["type": "stats", "stats": stats]
+        }
     }
 }
-}
-

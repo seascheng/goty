@@ -437,8 +437,14 @@ function ConfigChip({ option, icon, open, onToggle, onPick }: {
 /// Untitled sessions: omp names them asynchronously, so fresh ones have
 /// no title yet — show the activity timestamp instead of a raw hex id.
 function histFallback(s: { updatedAt?: string | null }): string {
-  if (!s.updatedAt) return "未命名会话";
-  const d = new Date(s.updatedAt);
+  // Adapters send epoch SECONDS as a numeric string (ISO also legal).
+  // new Date("1788270706") is Invalid Date — normalize before parsing
+  // or every untitled session shows 未命名会话.
+  const raw = s.updatedAt;
+  const num = raw ? Number(raw) : NaN;
+  const d = Number.isFinite(num)
+    ? new Date(num < 1e12 ? num * 1000 : num)
+    : new Date(raw ?? "");
   if (isNaN(d.getTime())) return "未命名会话";
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -622,6 +628,7 @@ function Composer({ working, phase }: { working: boolean;
 
 
   const pickConfig = (configId: string, value: string) => {
+    store.pickConfigValue(configId, value);
     postToHost({ type: "setConfig", configId, value });
     setOpenPop(null);
   };
@@ -702,8 +709,12 @@ function Composer({ working, phase }: { working: boolean;
   return (
     <div className="composer">
       <div className="composer-box" ref={boxRef}>
-        {(store.reconnecting || store.starting || store.error != null || store.retry != null) && (
+        {(store.reconnecting || store.starting || store.error != null || store.retry != null
+          || store.flash != null) && (
         <div className="composer-status">
+          {store.flash != null && (
+            <span className="cstat" title={store.flash}>{store.flash}</span>
+          )}
           {store.reconnecting && (
             <span className="cstat warn" title="连接断开，正在自动重连；远端进程仍在运行">
               <span className="spin" />重连中…

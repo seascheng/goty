@@ -154,24 +154,18 @@ final class ClaudeSession: AgentSessioning {
         // the durable state. Attach-to-stale-ring proved fragile (new
         // claude writes no init into the project file, dead processes
         // hold stale env) — so drop any leftover pane and re-load the
-        // pane's last session (or the newest for this cwd) from the
-        // store, which respawns with --resume and re-reads settings.
+        // pane's OWN last session (PaneState.agentSessionId), which
+        // respawns with --resume and re-reads settings. A fresh pane
+        // starts a fresh conversation: grabbing the newest session for
+        // the cwd hijacked unrelated conversations (terminal claude,
+        // other panes) into every new pane — pi semantics (0360fcb)
+        // apply here too.
         daemon.killPane(id: paneId)
-        let restore = restoredSessionId ?? newestStoreSession()
-        if let restore {
-            load(sessionId: restore, completion: completion)
+        if let restoredSessionId {
+            load(sessionId: restoredSessionId, completion: completion)
         } else {
             openPane(resume: nil, completion: completion)
         }
-    }
-
-    /// Newest persisted session for this cwd, daemon-side first
-    /// (remote panes must consult THEIR host's store).
-    private func newestStoreSession() -> String? {
-        if let (rows, _) = daemon.agentStoreSummaries(cwd: cwd, store: "claude") {
-            return rows.first?.id
-        }
-        return ClaudeSessionStore.summaries(cwd: cwd).first?.sessionId
     }
 
 
@@ -401,6 +395,28 @@ final class ClaudeSession: AgentSessioning {
         }
     }
 
+    /// Mid-turn input queue. claude's stream-json has no steer/followUp
+    /// path — the protocol defaults no-op, so a mid-turn Enter was
+    /// DROPPED silently. Park every mid-turn text and send it when the
+    /// turn settles (flushMidTurnQueue at the turnEnded branch).
+    private var pendingMidTurn: [String] = []
+
+    func steer(_ text: String) { enqueueMidTurn(text) }
+
+    func followUp(_ text: String) { enqueueMidTurn(text) }
+
+    private func enqueueMidTurn(_ text: String) {
+        guard isWorking else { return send(text) }
+        pendingMidTurn.append(text)
+        emit([.notice("⟳ 消息已排队，本轮结束后发送")])
+    }
+
+    private func flushMidTurnQueue() {
+        guard !pendingMidTurn.isEmpty else { return }
+        let queued = pendingMidTurn
+        pendingMidTurn = []
+        for text in queued { send(text) }
+    }
     private func handleFrame(_ frame: [String: Any], replay: Bool) {
         let events = mapper.map(frame)
         if let sid = mapper.sessionId { sessionId = sid }
@@ -449,11 +465,13 @@ final class ClaudeSession: AgentSessioning {
             emit([.permissionRequested(prompt)])
             return
         }
+
         // Working state follows the turn: any assistant output means
         // work, result ends it (store.ts already derives it, but the
         // adapter's isWorking gates send()).
         if case .turnEnded = events.last {
             isWorking = false
+            flushMidTurnQueue()
         } else if events.contains(where: {
             if case .messageChunk = $0 { return true }
             if case .thoughtChunk = $0 { return true }

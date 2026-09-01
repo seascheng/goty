@@ -123,8 +123,30 @@ final class PiFrameMapper {
         case "tool_execution_end":
             return mapToolExecutionEnd(frame)
         case "notice":
-            return [.notice((frame["message"] as? String)
-                ?? (frame["text"] as? String) ?? "")]
+            let text = (frame["message"] as? String)
+                ?? (frame["text"] as? String) ?? ""
+            guard !text.isEmpty else { return [] }
+            // Info-level DEVICE chatter (source-tagged by omp: xdev
+            // mount lists, the vision auto-mount explanation) rides the
+            // transient flash chip — every model switch emits a pair,
+            // and the transcript must stay conversation-shaped.
+            // warning/error notices stay transcript lines.
+            let level = (frame["level"] as? String) ?? "info"
+            let source = frame["source"] as? String
+                ?? frame["category"] as? String
+            if level == "info", let source,
+               source == "xdev" || source == "vision" {
+                return [.statusFlash(text)]
+            }
+            return [.notice(text)]
+        case "session_info_update":
+            // /rename and omp's own retitle: the live title event. The
+            // store head carries it too, but the frame lands the tab +
+            // composer updates in the same tick as the rename.
+            guard let title = frame["title"] as? String, !title.isEmpty else {
+                return []
+            }
+            return [.sessionTitle(title)]
         case "command_output":
             // Builtin slash-command stdout (/compact, /stats, /models…):
             // omp answers the prompt with agentInvoked:false and reports

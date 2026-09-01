@@ -309,10 +309,34 @@ final class CodexSession: AgentSessioning {
         }
     }
 
+    /// Mid-turn input queue — same contract as ClaudeSession: codex
+    /// has no steer/followUp RPC and the protocol defaults no-op'd, so
+    /// a mid-turn Enter was dropped silently. Parked, then sent when
+    /// the turn settles (send() re-runs its /compact translation then).
+    private var pendingMidTurn: [String] = []
+
+    func steer(_ text: String) { enqueueMidTurn(text) }
+
+    func followUp(_ text: String) { enqueueMidTurn(text) }
+
+    private func enqueueMidTurn(_ text: String) {
+        guard isWorking else { return send(text) }
+        pendingMidTurn.append(text)
+        emit([.notice("⟳ 消息已排队，本轮结束后发送")])
+    }
+
+    private func flushMidTurnQueue() {
+        guard !pendingMidTurn.isEmpty else { return }
+        let queued = pendingMidTurn
+        pendingMidTurn = []
+        for text in queued { send(text) }
+    }
+
     private func handleNotification(method: String, params: [String: Any]) {
         let events = mapper.map(method: method, params: params)
         if case .turnEnded = events.last {
             isWorking = false
+            flushMidTurnQueue()
         }
         emit(events)
     }

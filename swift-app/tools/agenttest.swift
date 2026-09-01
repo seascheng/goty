@@ -543,6 +543,31 @@ enum AgentTest {
                                          secondsSinceSend: 30) == false,
               "already-idle session needs no heal")
 
+        // Compacting debounce + strong-veto streak (the poisoned-turn
+        // regression: mid-turn set_model kills the turn, omp flaps
+        // isCompacting true/false on alternating reads, the status
+        // line flickered 思考中/压缩中 and the heal never landed).
+        check(PiSession.effectiveCompacting(current: true, previous: true) == true,
+              "steady compaction counts (two consecutive true reads)")
+        check(PiSession.effectiveCompacting(current: true, previous: false) == false
+              && PiSession.effectiveCompacting(current: false, previous: true) == false
+              && PiSession.effectiveCompacting(current: false, previous: false) == false,
+              "lone or flapping compacting reads are noise")
+        check(PiSession.strongLifeSign(streaming: true, queued: 0, activeToolCount: 0)
+              && PiSession.strongLifeSign(streaming: false, queued: 1, activeToolCount: 0)
+              && PiSession.strongLifeSign(streaming: false, queued: 0, activeToolCount: 2),
+              "streaming/queued/open tools are strong life signs")
+        check(PiSession.strongLifeSign(streaming: false, queued: 0, activeToolCount: 0) == false,
+              "an idle read (or lone compacting blip) must not reset the heal streak")
+        // A real compaction still vetoes the heal through the debounced
+        // flag (steady true) — the streak fix must not break /compact.
+        check(PiSession.missedSettleHeal(isWorking: true, streaming: false,
+                                         queued: 0,
+                                         compacting: PiSession.effectiveCompacting(current: true, previous: true),
+                                         activeToolCount: 0,
+                                         secondsSinceSend: 30) == false,
+              "steady compaction still vetoes heal after debounce")
+
         print("— omp store provider errors —")
         let rateLimitRecord: [String: Any] = [
             "type": "message", "id": "error-entry", "message": rateLimitAssistant
@@ -591,6 +616,69 @@ enum AgentTest {
             check(false, "open-tail fixture threw: \(error)")
             OmpSessionStore.rootOverride = nil
         }
+
+        print("— /rename + history title fallback —")
+        // omp's session_info_update frame (/rename, auto-naming) is the
+        // live title event; it must reach the page as sessionTitle.
+        let renameMapper = PiFrameMapper(terminalOnAgentEnd: true)
+        let renameEvents = renameMapper.map([
+            "type": "session_info_update", "title": "bug fix",
+            "sessionId": "s1"])
+        check(renameEvents.contains {
+            if case .sessionTitle(let t) = $0 { return t == "bug fix" }
+            return false
+        }, "/rename frame maps to live sessionTitle")
+        check(renameMapper.map(["type": "session_info_update", "title": ""])
+            .isEmpty, "empty retitle emits nothing")
+        // Untitled sessions (probes, aborted turns) fall back to the
+        // first user message — not 未命名会话 soup.
+        do {
+            let dir = NSTemporaryDirectory() + "goty-title-\(UUID().uuidString)"
+            let bucket = dir + "/goty-test-cwd"
+            try FileManager.default.createDirectory(atPath: bucket, withIntermediateDirectories: true)
+            let sid = UUID().uuidString
+            let path = bucket + "/2026-09-01T00-00-00-000Z_\(sid).jsonl"
+            let sessionLine = #"{"type":"session","cwd":"/x"}"#
+            let userLine = #"{"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"修复弹框错位"}]}}"#
+            let untitledContent = [
+                sessionLine,
+                #"{"type":"title","v":1,"title":"","pad":""}"#,
+                userLine,
+            ].joined(separator: "\n") + "\n"
+            try untitledContent.write(toFile: path, atomically: true, encoding: .utf8)
+            OmpSessionStore.rootOverride = URL(fileURLWithPath: dir)
+            let untitled = OmpSessionStore.summaries(cwd: nil)
+            check(untitled.first?.title == "修复弹框错位",
+                  "untitled session derives history title from first user message")
+            // A real rename outranks the derived fallback.
+            let renamedContent = [
+                sessionLine,
+                #"{"type":"title","v":1,"title":"bug fix","pad":""}"#,
+                userLine,
+            ].joined(separator: "\n") + "\n"
+            try renamedContent.write(toFile: path, atomically: true, encoding: .utf8)
+            let renamed = OmpSessionStore.summaries(cwd: nil)
+            check(renamed.first?.title == "bug fix",
+                  "explicit /rename title outranks the derived fallback")
+            check((Int(renamed.first?.updatedAt ?? "") ?? 0) > 0,
+                  "summaries carry updatedAt (epoch seconds) for the web fallback")
+            OmpSessionStore.rootOverride = nil
+            try? FileManager.default.removeItem(atPath: dir)
+        } catch {
+            check(false, "title fixture threw: \(error)")
+            OmpSessionStore.rootOverride = nil
+        }
+
+        // Mid-turn builtin deferral (pi-mono, omp AND pi): only the
+        // session's own command directory entries are parked; unknown
+        // /text and plain text steer as typed.
+        check(PiSession.isBuiltinCommand("/rename", commandNames: ["rename", "compact"])
+              && PiSession.isBuiltinCommand("/rename my name", commandNames: ["rename"]),
+              "known builtin with or without args is deferred")
+        check(PiSession.isBuiltinCommand("/unknown", commandNames: ["rename"]) == false
+              && PiSession.isBuiltinCommand("plain steering", commandNames: ["rename"]) == false
+              && PiSession.isBuiltinCommand("/x", commandNames: []) == false,
+              "unknown or empty-directory /text steers instead of deferring")
 
         print("— pi adapter —")
         check(AgentRegistry.descriptor(for: "pi")?.binary == "pi", "pi descriptor present")

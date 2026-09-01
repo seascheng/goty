@@ -29,6 +29,16 @@ class PiSession: AgentSessioning {
     /// runs no ordinary turn). Two in a row confirm it is not a
     /// slow-to-start model or a one-off glitch.
     private var idlePollStreak = 0
+    /// Previous poll's RAW isCompacting read — debounce input for
+    /// effectiveCompacting (see applyLiveState).
+    private var lastPollCompacting = false
+    /// A builtin slash command parked while a turn runs: pi-mono parses
+    /// builtins ONLY on the prompt path — steer frames inject the text
+    /// into the model's turn where it is never parsed — and (omp
+    /// 18.0.11, probed 2026-09-01) a prompt mid-stream kills the
+    /// running turn. Flushed by turnSettled(); last command wins.
+    private var pendingCommandText: String?
+
     /// True when the handshake attached onto a turn already in flight
     /// (omp attach). The store replay freezes that turn's tool cards at
     /// their in-flight statuses; when the turn settles we rebuild the
@@ -425,8 +435,25 @@ class PiSession: AgentSessioning {
         isWorking = true
         lastSendAt = Date()
         idlePollStreak = 0
-        channel.send(["id": "u\(nextRequestID)", "type": "prompt", "message": text])
+        let id = "u\(nextRequestID)"
         nextRequestID += 1
+        // Builtin commands (/rename, /stats…) answer agentInvoked:false —
+        // no model turn runs, so agent_settled will NEVER come. Close the
+        // turn on the response itself; otherwise the composer shows 思考中
+        // for the missed-settle heal's full ~8s conservative window (the
+        // 7.8s fake "thinking" after /rename, 2026-09-01).
+        responseLock.lock()
+        pendingResponses[id] = { [weak self] response in
+            let data = response["data"] as? [String: Any]
+            let invoked = (data?["agentInvoked"] as? Bool) ?? true
+            guard !invoked else { return }
+            DispatchQueue.main.async {
+                guard let self, self.isWorking else { return }
+                self.emit([.turnEnded(stopReason: nil)])
+            }
+        }
+        responseLock.unlock()
+        channel.send(["id": id, "type": "prompt", "message": text])
     }
 
     func cancel() {
@@ -501,17 +528,29 @@ class PiSession: AgentSessioning {
     /// plan event carries the WHOLE todoPhases list (empty = clear the
     /// panel); the web store dedups unchanged snapshots.
     private func applyLiveState(_ state: [String: Any]) {
-        var events: [AgentSessionEvent] = [.plan(Self.planEntries(state)),
-                                           .runtimeStatus(Self.runtimeStatus(state))]
+        let streaming = state["isStreaming"] as? Bool ?? false
+        let queued = state["queuedMessageCount"] as? Int ?? 0
+        let compactingRaw = state["isCompacting"] as? Bool ?? false
         // Missed-settle heal: some turns (notably /compact) never emit
         // agent_settled, leaving isWorking stuck. get_state is the
         // authority here — two consecutive fully-idle reads (not
         // streaming, nothing queued, not compacting), no live tool
         // call, and >4s past the optimistic send window, force the
         // turn closed. emit() clears isWorking on turnEnded itself.
-        let streaming = state["isStreaming"] as? Bool ?? false
-        let queued = state["queuedMessageCount"] as? Int ?? 0
-        let compacting = state["isCompacting"] as? Bool ?? false
+        //
+        // COMPACTING DEBOUNCE: a real compaction holds isCompacting
+        // across polls; a turn poisoned by mid-turn set_model (omp
+        // 18.0.11, probed 2026-09-01) flaps it true/false on
+        // alternating reads — flickering the status line 思考中/压缩中
+        // every 2s and resetting the streak so the heal never landed.
+        // Count compaction only on two consecutive true reads.
+        let compacting = Self.effectiveCompacting(current: compactingRaw,
+                                                  previous: lastPollCompacting)
+        lastPollCompacting = compactingRaw
+        var status = Self.runtimeStatus(state)
+        status.isCompacting = compacting
+        var events: [AgentSessionEvent] = [.plan(Self.planEntries(state)),
+                                           .runtimeStatus(status)]
         if Self.missedSettleHeal(isWorking: isWorking, streaming: streaming,
                                  queued: queued, compacting: compacting,
                                  activeToolCount: activeToolIds.count,
@@ -522,10 +561,28 @@ class PiSession: AgentSessioning {
                 idlePollStreak = 0
                 events.append(.turnEnded(stopReason: nil))
             }
-        } else {
+        } else if Self.strongLifeSign(streaming: streaming, queued: queued,
+                                      activeToolCount: activeToolIds.count) {
+            // Only strong signs of life reset the streak — a lone
+            // flapping compacting=true read must not, or the heal can
+            // never accumulate its two idle reads.
             idlePollStreak = 0
         }
         emit(events)
+    }
+
+    /// Compaction counts only on consecutive true reads (a real
+    /// compaction holds the flag; a poisoned turn flaps it).
+    static func effectiveCompacting(current: Bool, previous: Bool) -> Bool {
+        current && previous
+    }
+
+    /// Unambiguous proof the turn is alive — the only reads allowed to
+    /// restart the missed-settle streak. A lone compacting=true read
+    /// is deliberately NOT among them.
+    static func strongLifeSign(streaming: Bool, queued: Int,
+                               activeToolCount: Int) -> Bool {
+        streaming || queued > 0 || activeToolCount > 0
     }
 
     /// Pure verdict for ONE idle get_state read (streak counting stays
@@ -690,17 +747,35 @@ class PiSession: AgentSessioning {
                       "result": tool.run(arguments)])
     }
 
-    // MARK: - protocol capabilities
-
     func steer(_ text: String) {
         guard isWorking else { return send(text) }
+        // A mid-turn builtin (/rename …) must NOT ride a steer frame —
+        // pi-mono never parses commands on the steer path, and sending
+        // a prompt mid-stream kills the turn on omp 18.0.11. Park it.
+        if Self.isBuiltinCommand(text, commandNames: commands.map(\.name)) {
+            pendingCommandText = text
+            emit([.notice("⟳ 命令将在本轮结束后执行")])
+            return
+        }
         channel.send(["type": "steer", "message": text])
+    }
+
+    /// Matches "/name" or "/name args" against the session's command
+    /// directory (available_commands_update — omp and pi both carry it).
+    /// Unknown /text steers the model as typed — only real builtins park.
+    static func isBuiltinCommand(_ text: String, commandNames: [String]) -> Bool {
+        guard text.hasPrefix("/"), !commandNames.isEmpty else { return false }
+        let head = text.split(separator: " ", maxSplits: 1)[0]
+        return commandNames.contains(String(head.dropFirst()))
     }
 
     func followUp(_ text: String) {
         guard isWorking else { return send(text) }
         channel.send(["type": "follow_up", "message": text])
     }
+
+    // MARK: - protocol capabilities
+
 
     // omp-only capabilities: default implementations mirror the
     // AgentSessioning extension defaults so unsupported dialects
@@ -934,7 +1009,6 @@ class PiSession: AgentSessioning {
         }
         configOptions = options
     }
-
     /// pi-mono command with id-matched response completion. The pending
     /// entry registers BEFORE the frame hits the wire (same invariant
     /// as JSONRPCChannel).
@@ -960,6 +1034,7 @@ class PiSession: AgentSessioning {
             for event in events {
                 guard case .turnEnded = event else { continue }
                 self.isWorking = false
+                self.turnSettled()
                 // Mid-turn reattach: the replayed transcript froze this
                 // turn's tool cards at their in-flight statuses — their
                 // completion frames fired during the attach gap and
@@ -988,6 +1063,20 @@ class PiSession: AgentSessioning {
                 return
             }
             self.gatedEvents.append(contentsOf: events)
+        }
+    }
+
+    /// Fired on the main queue whenever a turn settles (agent_settled,
+    /// missed-settle heal, stop). Subclasses apply deferred work here —
+    /// OmpSession parks model switches because omp 18.0.11 kills the
+    /// running turn if set_model lands mid-run (probed 2026-09-01).
+    func turnSettled() {
+        // Runs on the main queue from emit()'s turnEnded branch. A
+        // builtin parked by steer() goes out now — omp 18.0.11's kill
+        // window is closed once the turn has settled.
+        if let command = pendingCommandText {
+            pendingCommandText = nil
+            send(command)
         }
     }
 

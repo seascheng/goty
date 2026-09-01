@@ -169,6 +169,21 @@ final class WorkspaceCoordinator {
         return runtime[wsId]?.agents[paneId]
     }
 
+    /// The activity a TAB BADGE should show. With a live host the
+    /// client-derived `state` stays the authority (the 2026-08-31 storm
+    /// fix — omp's extension once kept reporting "working" after its
+    /// own abort). Host-less panes have no client derivation at all:
+    /// there the daemon relayed `reported` is the only source, and it
+    /// is seq-deduped daemon-side.
+    func effectiveBadgeActivity(paneId: String) -> AgentActivity? {
+        guard let wsId = store?.focused?.id,
+              let entry = runtime[wsId]?.agents[paneId] else { return nil }
+        if hasLiveHost?(HostKey(workspace: wsId, pane: paneId)) == true {
+            return entry.state
+        }
+        return entry.reported ?? entry.state
+    }
+
     /// The agent process's own report (extension → daemon), the
     /// authoritative working switch for the pane's composer. nil = the
     /// process never reported (older daemon, non-instrumented agent).
@@ -230,7 +245,8 @@ final class WorkspaceCoordinator {
         // per poll. The store snapshot (agentSessionId) is read here on
         // the main thread; the daemon round trips run below.
         var storeTitleCalls: [(UUID, SessionDaemon,
-                               [(paneId: String, storeKey: String, sessionId: String)])] = []
+                               [(paneId: String, storeKey: String, sessionId: String)],
+                               Bool)] = []   // last: workspace is local
         for (ws, daemon) in targets {
             var gaps: [(paneId: String, storeKey: String, sessionId: String)] = []
             for pane in ws.tabs.flatMap(\.panes) {
@@ -243,7 +259,7 @@ final class WorkspaceCoordinator {
                 gaps.append((paneId: pane.id, storeKey: storeKey, sessionId: sessionId))
             }
             if !gaps.isEmpty {
-                storeTitleCalls.append((ws.id, daemon, gaps))
+                storeTitleCalls.append((ws.id, daemon, gaps, ws.sshHost == nil))
             }
         }
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -288,13 +304,22 @@ final class WorkspaceCoordinator {
             }
             // Agent-store titles: one SESSION_LIST per (workspace,
             // dialect), matched by each gap pane's persisted session id.
-            for (wsId, daemon, gaps) in storeTitleCalls {
+            // A nil reply downgrades to the LOCAL store on local
+            // workspaces — same filesystem as the daemon, and it works
+            // on daemons older than capability 7. Remote panes have no
+            // local fallback (their store lives on the other host).
+            for (wsId, daemon, gaps, isLocal) in storeTitleCalls {
                 let byStore = Dictionary(grouping: gaps, by: \.storeKey)
                 for (storeKey, panes) in byStore {
-                    guard let (rows, _) = daemon.agentStoreSummaries(cwd: nil, store: storeKey)
-                    else { continue }
-                    let titlesById = Dictionary(rows.map { ($0.summary.sessionId,
-                                                            $0.summary.title) },
+                    let summaries: [AgentSessionSummary]
+                    if let rows = daemon.agentStoreSummaries(cwd: nil, store: storeKey)?.rows {
+                        summaries = rows.map(\.summary)
+                    } else if isLocal {
+                        summaries = self?.localStoreSummaries(storeKey: storeKey) ?? []
+                    } else {
+                        continue
+                    }
+                    let titlesById = Dictionary(summaries.map { ($0.sessionId, $0.title) },
                                                 uniquingKeysWith: { a, _ in a })
                     for pane in panes {
                         if let title = titlesById[pane.sessionId],
@@ -311,7 +336,7 @@ final class WorkspaceCoordinator {
                 self?.applyForegrounds(fgResults)
                 self?.applyJobs(jobResults)
                 self?.applyPaneTitles(titleResults)
-                for (wsId, _, gaps) in storeTitleCalls {
+                for (wsId, _, gaps, _) in storeTitleCalls {
                     for pane in gaps {
                         self?.titlePrefetched[wsId, default: []].insert(pane.paneId)
                     }
@@ -320,6 +345,18 @@ final class WorkspaceCoordinator {
                     self?.setAgentTabTitle(paneId: paneId, name: title)
                 }
             }
+        }
+    }
+
+    /// Local-store listing for the title prefetch fallback: local
+    /// workspaces share the daemon's filesystem, so even a pre-capability-7
+    /// daemon still resolves agent session titles through the same
+    /// readers the adapters use.
+    private func localStoreSummaries(storeKey: String) -> [AgentSessionSummary] {
+        switch storeKey {
+        case "claude": return ClaudeSessionStore.summaries(cwd: nil)
+        case "pi": return PiSessionStore.summaries(cwd: nil)
+        default: return OmpSessionStore.summaries(cwd: nil)
         }
     }
 

@@ -127,6 +127,7 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("permissionResolved") }),
   z.object({ type: z.literal("phase"), value: z.string().nullish() }),
+  z.object({ type: z.literal("statusFlash"), text: z.string() }),
   z.object({ type: z.literal("error"), text: z.string() }),
   z.object({
     type: z.literal("retryScheduled"),
@@ -280,13 +281,16 @@ class Store {
   prependDelta = 0;
   prependEpoch = 0;
   loginProviders: Record<string, unknown>[] = [];
+  configOptions: ConfigOption[] = [];
+  commands: AgentCommand[] = [];
   /// Agent handshake phase: set on "starting", cleared by the first
   /// handshake-complete signal or a terminal error. The composer renders
   /// an explicit chip while this is non-null.
   starting: string | null = null;
-  configOptions: ConfigOption[] = [];
-  commands: AgentCommand[] = [];
-  /// Turn phase from the Swift state machine: thinking / executing /
+  /// Transient system chatter (info notices: xd:// device mount lists).
+  /// Auto-clears; a newer flash supersedes an older one's timer.
+  flash: string | null = null;
+  private flashSeq = 0;
   /// awaitingPermission — null when idle. `working` mirrors phase != null
   /// (kept as its own field: the composer's send/stop flip predates it).
   phase: "thinking" | "executing" | "awaitingPermission" | null = null;
@@ -328,6 +332,19 @@ class Store {
 
   subscribe(fn: Listener) { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
   private emit() { this.listeners.forEach((l) => l()); }
+
+  /// Optimistic config pick (model / thinking …): the host confirms via
+  /// a configOptions push, but that confirmation can land after the
+  /// user's next interaction — without this the chip lags one pick
+  /// behind. Truth resyncs on every configOptions push; a deferred or
+  /// failed switch surfaces a notice from the host.
+  pickConfigValue(configId: string, value: string): void {
+    const opt = this.configOptions.find((o) => o.id === configId);
+    if (!opt || opt.currentValue === value) return;
+    opt.currentValue = value;
+    this.revision += 1;
+    this.emit();
+  }
 
   private push(block: BlockInput): Block {
     const stamped = { ...block, id: this.nextBlockId++ } as Block;
@@ -600,6 +617,10 @@ class Store {
         };
         break;
       case "sessionTitle": this.sessionTitle = event.title ?? null; break;
+      case "reconnecting":
+        this.reconnecting = event.value;
+        if (event.value) this.error = null;
+        break;
       case "theme": {
         const root = document.documentElement;
         for (const [k, v] of Object.entries(event.vars)) {
@@ -608,10 +629,6 @@ class Store {
         }
         break;
       }
-      case "reconnecting":
-        this.reconnecting = event.value;
-        if (event.value) this.error = null;
-        break;
       case "starting": this.starting = event.agent; break;
       case "status":
         // Agent notices (extension setStatus, command_output…): transcript
@@ -619,6 +636,20 @@ class Store {
         // used to vanish here with no reader.
         if (event.text) this.push({ kind: "notice", text: event.text });
         break;
+      case "statusFlash": {
+        // Transient system chatter (xd:// device mount lists on model
+        // switches): flash briefly, never park in the transcript. A
+        // newer flash supersedes the older one's clear timer.
+        this.flash = event.text;
+        const seq = ++this.flashSeq;
+        setTimeout(() => {
+          if (this.flashSeq !== seq) return;
+          this.flash = null;
+          this.revision += 1;
+          this.emit();
+        }, 6000);
+        break;
+      }
       case "configOptions": this.configOptions = coerceList(event.options, ConfigOptionSchema); break;
       case "commands": this.commands = coerceList(event.commands, AgentCommandSchema); break;
       case "usage": this.usage = event; break;
