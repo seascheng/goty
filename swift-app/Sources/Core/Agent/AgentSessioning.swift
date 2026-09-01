@@ -17,6 +17,13 @@ protocol AgentSessioning: AnyObject {
     /// The session a reconnect would restore via `load` after a fresh
     /// spawn (the pane died with the daemon). Defaults to `sessionId`.
     var lastSessionId: String? { get }
+    /// true = the adapter consumes `restoredSessionId` itself inside
+    /// connect (claude: store replay + --resume respawn) and the caller
+    /// must NOT also load() after connect.
+    var selfManagesRestore: Bool { get }
+    /// Ring-replay diagnostics; zero where no ring exists.
+    var debugReplayBytes: Int { get }
+    var debugReplayFrames: Int { get }
 
     func connect(completion: ((Bool) -> Void)?)
     func send(_ text: String)
@@ -34,14 +41,77 @@ protocol AgentSessioning: AnyObject {
     /// caller restores context via `load(lastSessionId)`.
     func reconnect(completion: ((Bool) -> Void)?)
     func shutdown()
+
+    // MARK: capabilities (P1–P3). REQUIREMENTS, not extension methods:
+    // calling an extension-only method through `any AgentSessioning`
+    // statically binds to the extension default and silently bypasses
+    // the adapter's implementation (the 2026-08-31 vanishing-steer bug).
+    /// Mid-turn steering: `steer` interrupts the current run with the
+    /// message, `followUp` queues it for after the run settles.
+    func steer(_ text: String)
+    func followUp(_ text: String)
+    /// Fast-mode toggle (omp set_fast_mode).
+    func setFastMode(enabled: Bool)
+    /// OAuth login surface; empty completion = unsupported.
+    func loginProviders(completion: @escaping ([[String: Any]]) -> Void)
+    func startLogin(providerId: String)
+    /// Export the conversation; the string is the written file path.
+    func exportHTML(completion: @escaping (String?) -> Void)
+    /// Session stats payload for the stats dialog.
+    func sessionStats(completion: @escaping ([String: Any]?) -> Void)
+    /// Branch from a session entry into a new session file.
+    func branch(entryId: String, completion: @escaping (Bool) -> Void)
+    /// Worktree fork WITHOUT disturbing this session's live process:
+    /// a throwaway adapter resumes the source file, forks at the entry
+    /// and reports the NEW session id (nil = failed/unsupported). Safe
+    /// to call while this session's turn is running.
+    func forkToNewSession(entryId: String, completion: @escaping (String?) -> Void)
+    /// Host-owned tools the agent may call back into; registered on
+    /// the next handshake.
+    func setHostTools(_ tools: AgentHostTools)
+    /// Host identity for GUI-side actions: does this agent's process
+    /// run on THIS Mac (paths it reports are local files the GUI can
+    /// reveal/open), or on a remote host (its paths live on that
+    /// machine; GUI-side file actions must say so instead of probing
+    /// the local filesystem)? Transport-level fact — adapters answer
+    /// from their daemon.
+    var runsOnThisMac: Bool { get }
 }
 
 extension AgentSessioning {
+    /// Local by default: adapters without a daemon relationship run on
+    /// the GUI's own machine.
+    var runsOnThisMac: Bool { true }
     var lastSessionId: String? { sessionId }
     /// true = the adapter consumes `restoredSessionId` itself inside
     /// connect (claude: store replay + --resume respawn) and the caller
     /// must NOT also load() after connect.
     var selfManagesRestore: Bool { false }
+    /// Mid-turn steering (RPC steer/follow_up): `steer` interrupts the
+    /// current run with the message, `followUp` queues it for after the
+    /// run settles. Unsupported adapters no-op.
+    func steer(_ text: String) {}
+    func followUp(_ text: String) {}
+    /// Fast-mode toggle (omp set_fast_mode). Unsupported adapters no-op.
+    func setFastMode(enabled: Bool) {}
+    /// OAuth login surface (omp get_login_providers/login); empty = none.
+    func loginProviders(completion: @escaping ([[String: Any]]) -> Void) {
+        completion([])
+    }
+    func startLogin(providerId: String) {}
+    /// Export the conversation (omp export_html); the returned string is
+    /// the written file path, nil = unsupported/failed.
+    func exportHTML(completion: @escaping (String?) -> Void) { completion(nil) }
+    /// Session stats (omp get_session_stats) for the stats dialog.
+    func sessionStats(completion: @escaping ([String: Any]?) -> Void) { completion(nil) }
+    /// Worktree fork: unsupported outside omp (nil).
+    func forkToNewSession(entryId: String, completion: @escaping (String?) -> Void) {
+        completion(nil)
+    }
+    func branch(entryId: String, completion: @escaping (Bool) -> Void) { completion(false) }
+    /// Host-owned tools the agent may call back into (omp set_host_tools).
+    /// Registered on the next handshake after this call.
+    func setHostTools(_ tools: AgentHostTools) {}
     /// Ring-replay diagnostics — omp is the only adapter with a ring to
     /// measure; others report zeros.
     var debugReplayBytes: Int { 0 }
@@ -87,4 +157,25 @@ extension AgentSessionDelegate {
 /// daemon sizes every PTY. Fixed sane defaults; resize is never sent.
 enum AgentPaneDefaults {
     static let grid = SessionGrid(columns: 120, rows: 40, cellWidth: 8, cellHeight: 16)
+}
+
+/// Host-owned tools the agent may call back into over RPC
+/// (`set_host_tools` / `host_tool_call`). The UI layer supplies the
+/// closures — Core stays AppKit-free. `run` returns the
+/// host_tool_result payload: {"content":[{type:text,text:…}]}.
+final class AgentHostTools {
+    struct Tool {
+        let name: String
+        let label: String
+        let description: String
+        /// JSON-Schema object for the tool parameters.
+        let parameters: [String: Any]
+        let run: ([String: Any]) -> [String: Any]
+    }
+
+    let tools: [Tool]
+
+    init(tools: [Tool]) {
+        self.tools = tools
+    }
 }

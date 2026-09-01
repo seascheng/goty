@@ -20,7 +20,9 @@ import Foundation
 final class PiFrameMapper {
     private var pendingTools: [String: (name: String, arguments: [String: Any]?)] = [:]
     private var completedTools: Set<String> = []
-
+    /// Content block the current delta run extends (wire contentIndex);
+    /// nil until the first delta of a message.
+    private var lastContentIndex: Int?
     /// omp: agent_end terminates the run (isTerminal false = a mid-run
     /// boundary that must not close streaming rows). pi: agent_settled is
     /// the terminal frame instead.
@@ -79,6 +81,19 @@ final class PiFrameMapper {
             return mapToolExecutionUpdate(frame)
         case "tool_execution_end":
             return mapToolExecutionEnd(frame)
+        case "notice":
+            return [.notice((frame["message"] as? String)
+                ?? (frame["text"] as? String) ?? "")]
+        case "goal_updated":
+            let goal = (frame["goal"] as? String)
+                ?? (frame["message"] as? String) ?? ""
+            return goal.isEmpty ? [] : [.notice("🎯 " + goal)]
+        case "irc_message":
+            let from = (frame["from"] as? String) ?? (frame["sender"] as? String) ?? "?"
+            let text = (frame["message"] as? String) ?? (frame["text"] as? String) ?? ""
+            return text.isEmpty ? [] : [.notice("⟵ hub \(from): \(text)")]
+        case "subagent_lifecycle", "subagent_progress":
+            return mapSubagent(frame, lifecycle: type == "subagent_lifecycle")
         default:
             framesIgnored += 1
             return []
@@ -128,14 +143,23 @@ final class PiFrameMapper {
         guard let event = frame["assistantMessageEvent"] as? [String: Any],
               let kind = event["type"] as? String else { return [] }
         switch kind {
-        case "text_delta":
-            if let delta = event["delta"] as? String, !delta.isEmpty {
-                return [.messageChunk(delta)]
+        case "text_delta", "thinking_delta":
+            guard let delta = event["delta"] as? String, !delta.isEmpty else {
+                return []
             }
-        case "thinking_delta":
-            if let delta = event["delta"] as? String, !delta.isEmpty {
-                return [.thoughtChunk(delta)]
+            // Faithful routing: the wire's contentIndex says which
+            // content block this delta extends. A change = new block —
+            // the UI renders stream order verbatim instead of merging
+            // same-kind runs across intervening blocks.
+            let index = event["contentIndex"] as? Int
+            var events: [AgentSessionEvent] = []
+            if index != lastContentIndex {
+                lastContentIndex = index
+                events.append(.chunkBoundary)
             }
+            events.append(kind == "text_delta" ? .messageChunk(delta)
+                                               : .thoughtChunk(delta))
+            return events
         default:
             break // start/end markers — boundaries, not content
         }
@@ -143,6 +167,7 @@ final class PiFrameMapper {
     }
 
     private func mapMessageEnd(_ frame: [String: Any]) -> [AgentSessionEvent] {
+        lastContentIndex = nil
         guard let message = frame["message"] as? [String: Any] else { return [] }
         let role = message["role"] as? String ?? ""
         switch role {
@@ -152,7 +177,12 @@ final class PiFrameMapper {
             if replaying {
                 let text = (message["content"] as? [[String: Any]] ?? [])
                     .compactMap { $0["text"] as? String }.joined()
-                return text.isEmpty ? [] : [.userMessage(text)]
+                var events: [AgentSessionEvent] = []
+                if !text.isEmpty { events.append(.userMessage(text)) }
+                if let entryId = message["id"] as? String {
+                    events.append(.entryMark(role: "user", entryId: entryId))
+                }
+                return events
             }
             return []
         case "toolResult":
@@ -163,6 +193,9 @@ final class PiFrameMapper {
             for block in message["content"] as? [[String: Any]] ?? []
                 where block["type"] as? String == "toolCall" {
                 events += toolCallStarted(block)
+            }
+            if let entryId = message["id"] as? String {
+                events.append(.entryMark(role: "agent", entryId: entryId))
             }
             return events
         default:
@@ -225,6 +258,28 @@ final class PiFrameMapper {
 
     // MARK: - tool shaping
 
+
+    /// subagent_lifecycle/progress — shapes not pinned by fixtures, so
+    /// every field is defensively extracted; a frame that names no
+    /// agent id drops.
+    private func mapSubagent(_ frame: [String: Any], lifecycle: Bool) -> [AgentSessionEvent] {
+        guard let id = (frame["subagentId"] as? String)
+            ?? (frame["agentId"] as? String)
+            ?? (frame["id"] as? String) else { return [] }
+        if lifecycle {
+            let state = (frame["state"] as? String)
+                ?? (frame["status"] as? String)
+                ?? (frame["phase"] as? String)
+            let detail = (frame["label"] as? String)
+                ?? (frame["name"] as? String)
+                ?? (frame["event"] as? String)
+            return [.subagentUpdate(AgentSubagentUpdate(id: id, state: state, detail: detail))]
+        }
+        let detail = (frame["progress"] as? String)
+            ?? (frame["message"] as? String)
+            ?? (frame["detail"] as? String)
+        return [.subagentUpdate(AgentSubagentUpdate(id: id, state: nil, detail: detail))]
+    }
     private func toolCallStarted(_ block: [String: Any]) -> [AgentSessionEvent] {
         guard let id = block["id"] as? String,
               let name = block["name"] as? String else { return [] }

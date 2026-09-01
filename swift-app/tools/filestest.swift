@@ -205,6 +205,24 @@ enum FilesTest {
                                               from: "/r/d", to: "/r/e")
         check(rekeyed == ["/r/e", "/r/e/x", "/r/other"], "expanded keys move with the dir")
 
+        // Transfer-bar scoping: a drop whose engine never answers (the
+        // never-wired onUpload regression — bar stuck at 0 forever)
+        // must not outlive a machine switch; one FilesView serves
+        // every workspace.
+        check(LocalFileSource().machineID == "local", "local machineID")
+        check(RemoteFileSource(host: "h").machineID == "ssh:h", "remote machineID")
+        var lateCompletion: ((Result<Void, Error>) -> Void)?
+        files.onUpload = { _, _, _, completion in lateCompletion = completion }
+        files.setDirectory("/tmp/x", source: RemoteFileSource(host: "nowhere.test"))
+        files.uploadDropped(urls: [URL(fileURLWithPath: sourcePath)], into: "/tmp/x")
+        check(files.transferBarVisibleForTest, "drop shows the transfer bar")
+        files.setDirectory("/home/y", source: RemoteFileSource(host: "elsewhere.test"))
+        check(!files.transferBarVisibleForTest,
+              "machine switch clears the stale transfer bar")
+        lateCompletion?(.success(()))   // engine answers after the switch
+        check(!files.transferBarVisibleForTest,
+              "late completion cannot resurrect the bar")
+        files.onUpload = nil
 print(failures == 0 ? "ALL PASS" : "\(failures) FAILURES")
         exit(failures == 0 ? 0 : 1)
     }

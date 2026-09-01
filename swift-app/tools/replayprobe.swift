@@ -83,13 +83,12 @@ enum ReplayProbe {
         app.setActivationPolicy(.regular)
 
         let delegate = ProbeDelegate()
-        let session = PiSession(
+        let session = OmpSession(
             params: AgentPaneParams(
                 paneId: "replayprobe-\(Int(Date().timeIntervalSince1970))",
                 cwd: "/Users/seascheng/Downloads/ai_project/goty/swift-app",
                 environment: ProcessInfo.processInfo.environment.filter { $0.key != "GOTY_AUTOLOAD_SESSION" },
-                daemon: .shared),
-            harness: .omp)
+                daemon: .shared))
         session.delegate = delegate
 
         // Web layer first so the bridge can push live during the replay.

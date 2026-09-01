@@ -22,6 +22,8 @@ final class CodexSession: AgentSessioning {
     private let daemon: SessionDaemon
     private let grid: SessionGrid
     private let client = JSONRPCChannel()
+    /// The pane (and its store) live on the daemon's machine.
+    var runsOnThisMac: Bool { !daemon.isRemote }
     private let mapper = CodexFrameMapper()
     private var pane: PaneSession?
     private var connected = false

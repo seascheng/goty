@@ -18,10 +18,19 @@ enum OmpSessionStore {
         var events: [AgentSessionEvent]
         var aborted: Bool
         var title: String?
+        /// Tool calls the file shows as started but never completed.
+        /// An idle, non-aborted session with open tools means the read
+        /// raced the settle (store write lagged) — the transcript tail
+        /// would freeze those cards at 运行中 forever. Caller re-reads.
+        var openTools: Int = 0
     }
 
+    /// Test seam: when set, everything resolves here instead of the
+    /// real store (agenttest fixture isolation).
+    static var rootOverride: URL?
+
     static var root: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        rootOverride ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".omp/agent/sessions", isDirectory: true)
     }
 
@@ -118,11 +127,17 @@ enum OmpSessionStore {
             NSLog("GOTY omp store: no file for %@", sessionId)
             return Loaded(events: [], aborted: false, title: nil)
         }
+        return parse(raw)
+    }
+
+    /// Raw JSONL → events. Split from load(): remote panes fetch the
+    /// same bytes through their daemon and parse identically.
+    static func parse(_ raw: String) -> Loaded {
         var events: [AgentSessionEvent] = []
+        var openToolIds: Set<String> = []
         var aborted = false
         var title: String?
         var lastAssistantStop: String?
-
         for line in raw.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data),
@@ -141,24 +156,39 @@ enum OmpSessionStore {
                             events.append(.userMessage(text))
                         }
                     }
+                    // Session-tree anchor: entries carry their tree id —
+                    // the 分支 button on a user bubble targets exactly
+                    // this entry (omp /branch semantics).
+                    if let entryId = entry["id"] as? String {
+                        events.append(.entryMark(role: "user", entryId: entryId))
+                    }
                 case "assistant":
                     if let stop = message["stopReason"] as? String { lastAssistantStop = stop }
+                    var firstBlock = true
                     for block in blocks {
                         switch block["type"] as? String {
                         case "thinking":
                             if let text = block["thinking"] as? String, !text.isEmpty {
+                                if !firstBlock { events.append(.chunkBoundary) }
                                 events.append(.thoughtChunk(text))
+                                firstBlock = false
                             }
                         case "text":
                             if let text = block["text"] as? String, !text.isEmpty {
+                                if !firstBlock { events.append(.chunkBoundary) }
                                 events.append(.messageChunk(text))
+                                firstBlock = false
                             }
                         default:
                             break
                         }
                     }
+                    if let entryId = entry["id"] as? String {
+                        events.append(.entryMark(role: "agent", entryId: entryId))
+                    }
                 case "toolResult":
                     if let toolCallId = message["toolCallId"] as? String {
+                        openToolIds.remove(toolCallId)
                         let content = ACPContentNormalizer.flatten(
                             message["content"] as? [[String: Any]])
                         events.append(.toolCallUpdate(
@@ -179,22 +209,31 @@ enum OmpSessionStore {
                 guard entry["customType"] as? String == "tool_execution_start",
                       let data = entry["data"] as? [String: Any],
                       let toolCallId = data["toolCallId"] as? String else { break }
-                let intent = (data["intent"] as? String) ?? (data["toolName"] as? String) ?? "tool"
+                let toolName = (data["toolName"] as? String) ?? "tool"
+                let intent = (data["intent"] as? String) ?? toolName
+                // Parity with the LIVE frame path (PiFrameMapper
+                // mapToolExecutionStart): replayed tool cards keep the
+                // same title derivation — kind + raw args — so "Read
+                // path:1-3" survives a restart instead of degrading to
+                // icon + intent.
+                let arguments = data["args"] as? [String: Any]
                 events.append(.toolCallUpdate(
                     id: toolCallId,
                     title: intent,
-                    kind: nil,
+                    kind: PiFrameMapper.toolKind(toolName),
                     status: "in_progress",
                     content: [],
                     output: [],
-                    rawInput: nil,
+                    rawInput: arguments,
                     oldText: nil))
+                openToolIds.insert(toolCallId)
             default:
                 break
             }
         }
         aborted = lastAssistantStop == "aborted"
-        return Loaded(events: events, aborted: aborted, title: title)
+        return Loaded(events: events, aborted: aborted, title: title,
+                      openTools: openToolIds.count)
     }
 
     /// omp names a session only after a turn completes normally — an
@@ -208,5 +247,104 @@ enum OmpSessionStore {
               obj["type"] as? String == "title" else { return nil }
         let title = obj["title"] as? String ?? ""
         return title.isEmpty ? nil : title
+    }
+
+    // MARK: - offline fork (probed 2026-09-01: omp accepts a hand-made
+    // prefix fork — 256-byte title slot {type:"title",v:1,title,
+    // updatedAt,pad} + session header {version:3, new id} + verbatim
+    // source entries; boots in <1s vs 13.6s for the process round-trip)
+
+    /// UUIDv7, omp's session-id shape (timestamp-prefixed).
+    static func uuidv7() -> String {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        let ms = UInt64(Date().timeIntervalSince1970 * 1000)
+        for i in 0..<6 {
+            bytes[i] = UInt8((ms >> (8 * UInt64(5 - i))) & 0xFF)
+        }
+        var random = SystemRandomNumberGenerator()
+        for i in 6..<16 {
+            bytes[i] = UInt8(random.next() % 256)
+        }
+        bytes[6] = (bytes[6] & 0x0F) | 0x70   // version 7
+        bytes[8] = (bytes[8] & 0x3F) | 0x80   // RFC variant
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                           bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
+                           bytes[12], bytes[13], bytes[14], bytes[15]))
+            .uuidString.lowercased()
+    }
+
+    /// Fork the source session file at an entry, OFFLINE: write a new
+    /// store file = slot + fresh header + verbatim prefix through the
+    /// entry's turn. ~10ms of file I/O; no omp process involved.
+    /// Returns the new session id, nil when the source/entry is gone.
+    static func forkFile(sourceId: String, entryId: String) -> String? {
+        guard let srcURL = fileURL(sessionId: sourceId),
+              let raw = try? String(contentsOf: srcURL, encoding: .utf8)
+        else { return nil }
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: true)
+        guard lines.count > 2 else { return nil }
+
+        func field(_ line: Substring, _ key: String) -> String? {
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data)
+                      as? [String: Any] else { return nil }
+            if key == "role" {
+                return ((obj["message"] as? [String: Any])?["role"]) as? String
+            }
+            return obj[key] as? String
+        }
+
+        // Locate the entry; extend a USER cut through its turn (until
+        // the next user message entry) so the fork keeps the reply.
+        guard let target = lines.firstIndex(where: { field($0, "id") == entryId })
+        else { return nil }
+        var cut = target
+        if field(lines[target], "role") == "user" {
+            if let next = lines[(target + 1)...].firstIndex(where: {
+                field($0, "role") == "user"
+            }) {
+                cut = next - 1
+            } else {
+                cut = lines.count - 1
+            }
+        }
+
+        let newId = uuidv7()
+        let ms = Int(Date().timeIntervalSince1970 * 1000)
+        let seconds = ms / 1000
+        var time = time_t(seconds)
+        var tmv = tm()
+        gmtime_r(&time, &tmv)
+        let h = { String(format: "%02d", $0) }
+        let stampMs = String(format: "%03d", ms % 1000)
+        // header: colons; filename: dashes (omp's own convention)
+        let headerTime = "\(tmv.tm_year + 1900)-\(h(tmv.tm_mon + 1))-\(h(tmv.tm_mday))"
+            + "T\(h(tmv.tm_hour)):\(h(tmv.tm_min)):\(h(tmv.tm_sec)).\(stampMs)Z"
+        let fileTime = "\(tmv.tm_year + 1900)-\(h(tmv.tm_mon + 1))-\(h(tmv.tm_mday))"
+            + "T\(h(tmv.tm_hour))-\(h(tmv.tm_min))-\(h(tmv.tm_sec))-\(stampMs)Z"
+
+        var slot = "{\"type\":\"title\",\"v\":1,\"title\":\"\",\"updatedAt\":"
+            + "\"\(headerTime)\",\"pad\":\"\"}"
+        if slot.utf8.count < 255 {
+            let pad = String(repeating: " ", count: 255 - slot.utf8.count)
+            slot = String(slot.dropLast(2)) + pad + "\"}"
+        }
+
+        // cwd rides the source's session header (line 2, after the slot).
+        let sourceCwd = field(lines[1], "cwd") ?? ""
+        let header = "{\"type\":\"session\",\"version\":3,\"id\":\"\(newId)\","
+            + "\"timestamp\":\"\(headerTime)\",\"cwd\":\"\(sourceCwd)\"}"
+
+        var out = [slot, header]
+        out += lines[2...cut].map(String.init)
+        let dest = srcURL.deletingLastPathComponent()
+            .appendingPathComponent("\(fileTime)_\(newId).jsonl")
+        do {
+            try out.joined(separator: "\n").appending("\n")
+                .write(to: dest, atomically: true, encoding: .utf8)
+        } catch {
+            return nil
+        }
+        return newId
     }
 }

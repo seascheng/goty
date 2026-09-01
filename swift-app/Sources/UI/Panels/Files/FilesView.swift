@@ -47,6 +47,11 @@ final class FilesView: NSView {
         didSet { renderTransferUI() }
     }
     private var statusTail = ""
+    /// Machine the current transfers belong to (source?.machineID at
+    /// drop time). One FilesView serves every workspace: rebinding to
+    /// another machine drops the old machine's transfer UI instead of
+    /// carrying a dead bar across servers.
+    private var transferMachine: String?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -141,7 +146,11 @@ final class FilesView: NSView {
         self.source = source
         creating = nil
         // Drag-to-upload is a remote-workspace feature; locally a Finder
-        // drop onto the tree means nothing, so the destination is not
+        if source?.machineID != transferMachine {
+            transferMachine = source?.machineID
+            activeTransfers = [:]   // another machine's bar is stale here
+            statusTail = ""
+        }
         // even registered (no fake-allowed cursor).
         if source?.isRemote == true {
             registerForDraggedTypes([.fileURL])
@@ -329,7 +338,11 @@ final class FilesView: NSView {
         refreshDir: { [weak self] in self?.refreshDir((from as NSString).deletingLastPathComponent) }
     }
 
-
+    /// Transfer-bar visibility for the headless suite (the stuck-bar
+    /// regression: a machine switch must clear it).
+    var transferBarVisibleForTest: Bool {
+        !progressBar.isHidden || !statusLabel.isHidden
+    }
     /// Status badges from the Git tab's latest fetch (nil = repo gone /
     /// not a repo — badges clear).
     func setGitDecorations(_ index: ScmDecoIndex?) {
@@ -644,6 +657,7 @@ final class FilesView: NSView {
         let id = beginTransfer()
         activeTransfers[id] = (0, bytes)   // upload total is known locally
         let started = Date()
+        let machine = transferMachine
         let count = urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) items"
         onUpload?(urls, dir,
                   { [weak self] done in
@@ -651,15 +665,20 @@ final class FilesView: NSView {
                   }) { [weak self] result in
             guard let self else { return }
             self.endTransfer(id: id)
+            // A completion landing after a machine switch must not
+            // refresh this dir on the new machine's connection.
+            let sameMachine = self.transferMachine == machine
             switch result {
             case .success:
                 let seconds = Date().timeIntervalSince(started)
-                self.statusTail = "\(count) \(Self.sizeLabel(bytes)) in "
-                    + String(format: "%.1f", seconds) + "s"
-                self.refreshDir(dir)
+                if sameMachine {
+                    self.statusTail = "\(count) \(Self.sizeLabel(bytes)) in "
+                        + String(format: "%.1f", seconds) + "s"
+                    self.refreshDir(dir)
+                }
             case .failure(let err):
                 Dialog.error(title: "Upload failed", detail: err.localizedDescription)
-                self.refreshDir(dir)
+                if sameMachine { self.refreshDir(dir) }
             }
         }
     }

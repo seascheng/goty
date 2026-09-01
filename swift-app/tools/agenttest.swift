@@ -338,6 +338,18 @@ enum AgentTest {
         check(streamThoughtChunks == ["The user wants a count."],
               "thinking delta streams once, interleaved frame deduped (got \(streamThoughtChunks))")
         check(streamTextChunks.joined() == "1\n2\n3", "streamed text reassembles")
+        // TodoWrite tool_use feeds the plan dock (omp todoPhases parity).
+        let todoFrame = #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"TodoWrite","input":{"todos":[{"content":"调研","status":"completed"},{"content":"实现","status":"in_progress"}]}}]}}"#
+        if let data = todoFrame.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data),
+           let frame = json as? [String: Any] {
+            let planEvents = claudeMapper.map(frame)
+            check(planEvents.contains {
+                if case .plan(let entries) = $0 { return entries.count == 2
+                    && entries[1].status == "in_progress" }
+                return false
+            }, "claude TodoWrite maps to plan dock")
+        }
         // History replay: the store file carries the asking side.
         let claudeHistory = ClaudeSessionStore.history(sessionId: "2123c193-59d5-4165-a29c-80372472a3f0")
         check(!claudeHistory.isEmpty, "claude store finds the probe session")
@@ -392,6 +404,74 @@ enum AgentTest {
         check(codexMapper.notificationsIgnored >= 5, "reconnect chatter ignored (\(codexMapper.notificationsIgnored))")
         check(CodexFrameMapper.textOf([["type": "text", "text": "a"], ["type": "text", "text": "b"]]) == "ab",
               "codex content text join")
+        print("— missed-settle heal (/compact stuck-working regression) —")
+        // /compact finishes without agent_settled: two consecutive idle
+        // get_state reads must be allowed to force the turn closed…
+        check(PiSession.missedSettleHeal(isWorking: true, streaming: false,
+                                         queued: 0, compacting: false,
+                                         activeToolCount: 0,
+                                         secondsSinceSend: 30) == true,
+              "post-compact idle read forces heal")
+        // …but every sign of life vetoes it.
+        check(PiSession.missedSettleHeal(isWorking: true, streaming: true,
+                                         queued: 0, compacting: false,
+                                         activeToolCount: 0,
+                                         secondsSinceSend: 30) == false,
+              "streaming vetoes heal")
+        check(PiSession.missedSettleHeal(isWorking: true, streaming: false,
+                                         queued: 1, compacting: false,
+                                         activeToolCount: 0,
+                                         secondsSinceSend: 30) == false,
+              "queued follow-up vetoes heal")
+        check(PiSession.missedSettleHeal(isWorking: true, streaming: false,
+                                         queued: 0, compacting: true,
+                                         activeToolCount: 0,
+                                         secondsSinceSend: 30) == false,
+              "compaction in flight vetoes heal")
+        check(PiSession.missedSettleHeal(isWorking: true, streaming: false,
+                                         queued: 0, compacting: false,
+                                         activeToolCount: 2,
+                                         secondsSinceSend: 30) == false,
+              "open tool call vetoes heal")
+        check(PiSession.missedSettleHeal(isWorking: true, streaming: false,
+                                         queued: 0, compacting: false,
+                                         activeToolCount: 0,
+                                         secondsSinceSend: 2) == false,
+              "optimistic send window (<4s) vetoes heal")
+        check(PiSession.missedSettleHeal(isWorking: false, streaming: false,
+                                         queued: 0, compacting: false,
+                                         activeToolCount: 0,
+                                         secondsSinceSend: 30) == false,
+              "already-idle session needs no heal")
+
+        print("— omp store open-tail detection —")
+        // A toolCall started but never completed (read raced the settle)
+        // must report openTools > 0; the completing toolResult closes it.
+        do {
+            let dir = NSTemporaryDirectory() + "goty-openTail-\(UUID().uuidString)"
+            // The store nests one cwd-bucket directory deep; fileURL
+            // only searches subdirectories of root.
+            let bucket = dir + "/goty-test-cwd"
+            try FileManager.default.createDirectory(atPath: bucket, withIntermediateDirectories: true)
+            let sid = UUID().uuidString
+            let path = bucket + "/2026-09-01T00-00-00-000Z_\(sid).jsonl"
+            let start = #"{"type":"custom","customType":"tool_execution_start","id":"e1","data":{"toolCallId":"call_x","intent":"bash"}}"#
+            try "{\"type\":\"session\",\"id\":\"\(sid)\"}\n\(start)\n"
+                .write(toFile: path, atomically: true, encoding: .utf8)
+            OmpSessionStore.rootOverride = URL(fileURLWithPath: dir)
+            let loaded1 = OmpSessionStore.load(sessionId: sid)
+            check(loaded1.openTools == 1, "unsettled tool tail reports openTools=1")
+            let result = #"{"type":"message","id":"e2","message":{"role":"toolResult","toolCallId":"call_x","toolName":"bash","content":[]}}"#
+            try "\(start)\n\(result)\n"
+                .write(toFile: path, atomically: true, encoding: .utf8)
+            let loaded2 = OmpSessionStore.load(sessionId: sid)
+            check(loaded2.openTools == 0, "toolResult closes the open tail")
+            OmpSessionStore.rootOverride = nil
+            try? FileManager.default.removeItem(atPath: dir)
+        } catch {
+            check(false, "open-tail fixture threw: \(error)")
+            OmpSessionStore.rootOverride = nil
+        }
 
         print("— pi adapter —")
         check(AgentRegistry.descriptor(for: "pi")?.binary == "pi", "pi descriptor present")

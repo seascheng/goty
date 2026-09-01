@@ -24,6 +24,8 @@ final class ClaudeSession: AgentSessioning {
     private let environment: [String: String]
     private let daemon: SessionDaemon
     private let grid: SessionGrid
+    /// The pane (and its store) live on the daemon's machine.
+    var runsOnThisMac: Bool { !daemon.isRemote }
     private let channel = LineChannel()
     private let mapper = ClaudeFrameMapper()
     private var pane: PaneSession?
@@ -31,6 +33,17 @@ final class ClaudeSession: AgentSessioning {
     private var processAlive = false
     /// Resume target for the (re)spawn in connect().
     private var resumeSessionId: String?
+    /// can_use_tool requests awaiting an answer, keyed by request_id —
+    /// the response must echo the input back as updatedInput, so the raw
+    /// request is kept verbatim.
+    private struct PendingPermission {
+        let toolName: String
+        let input: [String: Any]
+        /// claude's own always-allow rules for this call; echoing them
+        /// back is the protocol's way to persist a permission.
+        let suggestions: [[String: Any]]
+    }
+    private var pendingPermissions: [String: PendingPermission] = [:]
     /// Session the pane had open when it was last closed (state.json
     /// via AgentPaneParams). Re-loaded on connect — claude's `--print`
     /// processes are ephemeral; the project store is the durable state.
@@ -123,7 +136,9 @@ final class ClaudeSession: AgentSessioning {
         // Seed the model chip before the first turn: the SDK init frame
         // only arrives at turn start, so without this the chip is blank
         // for the whole boot. Ground truth (init) overwrites it later.
-        if configOptions.isEmpty, let model = Self.settingsModel() {
+        // settings.json is a MAC-side file — remote claude panes wait
+        // for the init frame instead of reading the wrong machine's.
+        if runsOnThisMac, configOptions.isEmpty, let model = Self.settingsModel() {
             configOptions = [AgentConfigOption(id: "model", name: "模型",
                                                category: nil, currentValue: model,
                                                options: [])]
@@ -136,11 +151,21 @@ final class ClaudeSession: AgentSessioning {
         // pane's last session (or the newest for this cwd) from the
         // store, which respawns with --resume and re-reads settings.
         daemon.killPane(id: paneId)
-        if let restore = restoredSessionId ?? ClaudeSessionStore.summaries(cwd: cwd).first?.sessionId {
+        let restore = restoredSessionId ?? newestStoreSession()
+        if let restore {
             load(sessionId: restore, completion: completion)
         } else {
             openPane(resume: nil, completion: completion)
         }
+    }
+
+    /// Newest persisted session for this cwd, daemon-side first
+    /// (remote panes must consult THEIR host's store).
+    private func newestStoreSession() -> String? {
+        if let (rows, _) = daemon.agentStoreSummaries(cwd: cwd, store: "claude") {
+            return rows.first?.id
+        }
+        return ClaudeSessionStore.summaries(cwd: cwd).first?.sessionId
     }
 
 
@@ -202,6 +227,10 @@ final class ClaudeSession: AgentSessioning {
             daemon.killPane(id: paneId)
             openPane(resume: sessionId, completion: nil)
         }
+        // claude's live --print stream never echoes the prompt (only the
+        // project jsonl does) — emit the asking side locally so the live
+        // transcript matches the replayed one.
+        emit([.userMessage(text)])
         channel.send(["type": "user",
                       "message": ["role": "user",
                                   "content": [["type": "text", "text": text]]]])
@@ -214,15 +243,48 @@ final class ClaudeSession: AgentSessioning {
         let requestID = UUID().uuidString
         channel.send(["type": "control_request",
                       "request_id": requestID,
-                      "payload": ["type": "interrupt"]])
+                      "request": ["subtype": "interrupt"]])
     }
 
     func respondPermission(requestID: String, optionId: String) {
-        let behavior = optionId.hasPrefix("allow") ? "allow" : "deny"
+        // Wire shape (raw stream-json, matches the SDK): {type:
+        // "control_response", response:{subtype:"success", request_id,
+        // response:<PermissionResult>}}. allow MUST echo the input back
+        // as updatedInput; deny carries the reason; always-allow persists
+        // claude's own suggestion rules as updatedPermissions.
+        let pending = pendingPermissions.removeValue(forKey: requestID)
+        var result: [String: Any]
+        switch optionId {
+        case "allow_always":
+            // ponytail: fallback rule shape is SDK-typical — if a build
+            // ignores it, always-allow degrades to allow-once.
+            var updates: [[String: Any]]
+            if let permission = pending, !permission.suggestions.isEmpty {
+                updates = permission.suggestions
+            } else {
+                updates = [["behavior": "allow",
+                            "permission": ["type": "tool",
+                                           "tool": pending?.toolName ?? ""]]]
+            }
+            result = ["behavior": "allow",
+                      "updatedInput": pending?.input ?? [:],
+                      "updatedPermissions": updates]
+        case "reject_once":
+            result = ["behavior": "deny",
+                      "message": "用户拒绝了该工具调用",
+                      "interrupt": false]
+        default:
+            result = ["behavior": "allow",
+                      "updatedInput": pending?.input ?? [:]]
+        }
         channel.send(["type": "control_response",
-                      "response_id": requestID,
-                      "payload": ["behavior": behavior]])
-        emit([.turnEnded(stopReason: nil)])
+                      "response": ["subtype": "success",
+                                   "request_id": requestID,
+                                   "response": result]])
+        // No turnEnded here: after allow the tool RUNS (the turn continues
+        // to its result frame); after deny claude reacts and ends the turn
+        // itself. The host already moved the phase on the answer — a
+        // forced turnEnded stranded live turns at idle.
     }
 
     func setConfigOption(id: String, value: String) {
@@ -231,10 +293,19 @@ final class ClaudeSession: AgentSessioning {
     }
 
     func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let summaries = ClaudeSessionStore.summaries(cwd: self.cwd)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return completion([]) }
+            // Daemon-side store (capability 8) — remote panes list
+            // THEIR host's ~/.claude; local read only as fallback.
+            var summaries: [AgentSessionSummary]
+            if let (rows, _) = self.daemon.agentStoreSummaries(cwd: self.cwd, store: "claude") {
+                summaries = rows.map { $0.summary }
+            } else {
+                summaries = ClaudeSessionStore.summaries(cwd: self.cwd)
+            }
+            let filtered = summaries.filter { ($0.messageCount ?? 1) > 0 }
             DispatchQueue.main.async {
-                completion(summaries.filter { ($0.messageCount ?? 1) > 0 })
+                completion(filtered)
             }
         }
     }
@@ -246,8 +317,26 @@ final class ClaudeSession: AgentSessioning {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             var skipped = 0
-            let frames = ClaudeSessionStore.history(sessionId: sessionId,
+            // Daemon bytes first (remote panes read THEIR host's store);
+            // the local reader only as fallback.
+            let frames: [[String: Any]]
+            if let data = self.daemon.agentStoreFile(sessionId: sessionId, store: "claude"),
+               let text = String(data: data, encoding: .utf8) {
+                var parsed: [[String: Any]] = []
+                for line in text.split(separator: "\n") {
+                    guard let d = line.data(using: .utf8),
+                          let json = try? JSONSerialization.jsonObject(with: d)
+                              as? [String: Any] else {
+                        skipped += 1
+                        continue
+                    }
+                    parsed.append(json)
+                }
+                frames = parsed
+            } else {
+                frames = ClaudeSessionStore.history(sessionId: sessionId,
                                                     skippedLines: &skipped)
+            }
             var events: [AgentSessionEvent] = []
             let replayMapper = ClaudeFrameMapper()
             for frame in frames {
@@ -326,15 +415,31 @@ final class ClaudeSession: AgentSessioning {
             let sub = (frame["subtype"] as? String) ?? ""
             print("CLAUDE_FRAME \(kind)/\(sub) keys=\(frame.keys.sorted().joined(separator: ","))")
         }
-        // Permission requests ride control_request frames.
+        // Permission requests ride control_request frames. claude → client
+        // shape: {type:"control_request", request_id, request:{subtype:
+        // "can_use_tool", tool_name, input, suggestions?}} — the SDK's
+        // canUseTool callback wraps this same frame over raw stream-json.
         if frame["type"] as? String == "control_request",
-           let payload = frame["payload"] as? [String: Any],
-           let requestID = frame["request_id"] as? String {
-            let title = (payload["tool_name"] as? String)
-                ?? (payload["title"] as? String)
-                ?? "claude 请求授权"
-            let prompt = AgentPermissionPrompt.allowOrReject(
-                requestID: requestID, title: title)
+           let request = frame["request"] as? [String: Any],
+           let requestID = frame["request_id"] as? String,
+           request["subtype"] as? String == "can_use_tool" {
+            let toolName = request["tool_name"] as? String ?? "工具"
+            let input = request["input"] as? [String: Any] ?? [:]
+            pendingPermissions[requestID] = PendingPermission(
+                toolName: toolName, input: input,
+                suggestions: request["suggestions"] as? [[String: Any]] ?? [])
+            // Headline argument next to the tool name — the card must
+            // show WHAT asks to run, not just that something asks.
+            let headline = ClaudeFrameMapper.toolSummary(name: toolName, input: input)
+                .first?.text
+            let prompt = AgentPermissionPrompt(
+                requestID: requestID,
+                toolCallTitle: headline.map { "\(toolName)：\($0)" } ?? toolName,
+                options: [
+                    AgentPermissionOption(optionId: "allow_once", name: "允许", kind: "allow_once"),
+                    AgentPermissionOption(optionId: "allow_always", name: "总是允许", kind: "allow_always"),
+                    AgentPermissionOption(optionId: "reject_once", name: "拒绝", kind: "reject_once"),
+                ])
             emit([.permissionRequested(prompt)])
             return
         }

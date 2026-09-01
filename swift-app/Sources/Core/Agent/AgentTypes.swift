@@ -33,15 +33,76 @@ extension AgentContent {
 
 struct AgentPlanEntry {
     let content: String
+    /// Phase/group name (omp todoPhases carry tasks grouped per phase;
+    /// flat ACP plans leave it nil).
     let priority: String?
     let status: String?
 
-    init?(_ raw: [String: Any]) {
+    init?(raw: [String: Any]) {
         guard let content = raw["content"] as? String else { return nil }
         self.content = content
         self.priority = raw["priority"] as? String
         self.status = raw["status"] as? String
     }
+
+    /// Explicit memberwise: the failable wire init above suppresses the
+    /// synthesized one, and native adapters (todoPhases → entries)
+    /// build entries directly.
+    init(content: String, priority: String? = nil, status: String? = nil) {
+        self.content = content
+        self.priority = priority
+        self.status = status
+    }
+}
+
+/// Live runtime telemetry from RPC `get_state`: the composer status
+/// strip (context usage, throughput, queue depth) and the fast-mode
+/// toggle read this. Everything optional — a harness that cannot
+/// supply a piece hides that segment.
+struct AgentRuntimeStatus: Equatable {
+    var fastModeEnabled: Bool?
+    var fastModeActive: Bool?
+    var contextTokens: Int?
+    var contextWindow: Int?
+    var tokensPerSecond: Double?
+    var queuedMessages: Int?
+    var isCompacting: Bool?
+    var isStreaming: Bool?
+}
+
+/// One background async-job row (agent extension report → daemon LIST).
+/// `startTime` is epoch ms; elapsed time is the GUI's to tick.
+struct AgentJobSnapshot: Equatable {
+    let id: String
+    let kind: String
+    let status: String
+    let label: String
+    let startTime: Double?
+
+    init(id: String, kind: String, status: String,
+         label: String, startTime: Double?) {
+        self.id = id
+        self.kind = kind
+        self.status = status
+        self.label = label
+        self.startTime = startTime
+    }
+
+    init?(raw: [String: Any]) {
+        guard let id = raw["id"] as? String else { return nil }
+        self.id = id
+        self.kind = (raw["type"] as? String) ?? (raw["kind"] as? String) ?? "bash"
+        self.status = (raw["status"] as? String) ?? "running"
+        self.label = (raw["label"] as? String) ?? ""
+        self.startTime = raw["startTime"] as? Double
+    }
+}
+
+/// One subagent roster update (RPC subagent_lifecycle/progress frames).
+struct AgentSubagentUpdate: Equatable {
+    let id: String
+    let state: String?
+    let detail: String?
 }
 
 struct AgentPermissionOption {
@@ -72,6 +133,24 @@ struct AgentPermissionPrompt {
     let requestID: String
     let toolCallTitle: String?
     let options: [AgentPermissionOption]
+    /// RPC extension dialog method behind this prompt
+    /// ("select"/"confirm"/"input"/"editor"); nil = an ordinary
+    /// option-list permission card.
+    var dialog: String? = nil
+    var placeholder: String? = nil
+    var defaultValue: String? = nil
+
+    init(requestID: String, toolCallTitle: String?,
+         options: [AgentPermissionOption],
+         dialog: String? = nil, placeholder: String? = nil,
+         defaultValue: String? = nil) {
+        self.requestID = requestID
+        self.toolCallTitle = toolCallTitle
+        self.options = options
+        self.dialog = dialog
+        self.placeholder = placeholder
+        self.defaultValue = defaultValue
+    }
 
     /// The binary gate adapters synthesize when the wire protocol has no
     /// option list of its own (claude control_request, codex approval).
@@ -226,6 +305,12 @@ enum AgentSessionEvent {
     case userChunk(String)
     case messageChunk(String)
     case thoughtChunk(String)
+    /// The model switched content blocks (wire contentIndex changed):
+    /// render everything after this as a NEW block, in true stream
+    /// order — no inference, no merging across it. Faithful-display
+    /// contract (2026-09-01): the transcript mirrors the model's
+    /// actual output structure, not a UI-side fusion of it.
+    case chunkBoundary
     case toolCallUpdate(id: String, title: String?, kind: String?,
                         status: String?, content: [AgentContent],
                         /// Tool result: `rawOutput.content` leaves (omp
@@ -250,6 +335,24 @@ enum AgentSessionEvent {
     /// future agents — nil segments hide in the composer statusbar.
     case usageUpdate(used: Int?, size: Int?, input: Int?, output: Int?,
                      costAmount: Double?, costCurrency: String?)
+    /// Live runtime telemetry (get_state): context window usage,
+    /// throughput, queue depth, fast-mode flags, compaction.
+    case runtimeStatus(AgentRuntimeStatus)
+    /// Transient status line (extension notify, notice/irc events).
+    case notice(String)
+    /// Background async-job rows (daemon LIST poll → pane host).
+    case backgroundJobs([AgentJobSnapshot])
+    /// Subagent roster delta (subagent_lifecycle/progress frames).
+    case subagentUpdate(AgentSubagentUpdate)
+    /// A transcript block's session-entry id landed (branch anchor):
+    /// `role` is "user" or "agent"; the store stamps the newest block
+    /// of that role so 分支 buttons have something to target.
+    case entryMark(role: String, entryId: String)
+    /// The agent asked the host to open a URL (RPC login flows) — the
+    /// HOST consumes it (NSWorkspace), never the page.
+    case openURL(String)
+    /// Session stats payload (get_session_stats) for the stats dialog.
+    case sessionStats([String: Any])
 }
 
 extension AgentSessionEvent {
@@ -270,6 +373,8 @@ extension AgentSessionEvent {
             return ["type": "agentChunk", "text": text]
         case .thoughtChunk(let text):
             return ["type": "thoughtChunk", "text": text]
+        case .chunkBoundary:
+            return ["type": "chunkBoundary"]
         case .toolCallUpdate(let id, let title, let kind, let status,
                              let content, let output, let rawInput, let oldText):
             return ["type": "toolCall",
@@ -291,6 +396,9 @@ extension AgentSessionEvent {
             return ["type": "permission",
                     "requestID": prompt.requestID,
                     "toolCallTitle": prompt.toolCallTitle ?? NSNull(),
+                    "dialog": prompt.dialog ?? NSNull(),
+                    "placeholder": prompt.placeholder ?? NSNull(),
+                    "defaultValue": prompt.defaultValue ?? NSNull(),
                     "options": prompt.options.map { option in
                         ["optionId": option.optionId,
                          "name": option.name,
@@ -322,6 +430,34 @@ extension AgentSessionEvent {
                     "input": input ?? NSNull(), "output": output ?? NSNull(),
                     "costAmount": costAmount ?? NSNull(),
                     "costCurrency": costCurrency ?? NSNull()]
-        }
+        case .runtimeStatus(let s):
+            return ["type": "runtimeStatus",
+                    "fastEnabled": s.fastModeEnabled ?? NSNull(),
+                    "fastActive": s.fastModeActive ?? NSNull(),
+                    "contextTokens": s.contextTokens ?? NSNull(),
+                    "contextWindow": s.contextWindow ?? NSNull(),
+                    "tokensPerSecond": s.tokensPerSecond ?? NSNull(),
+                    "queued": s.queuedMessages ?? NSNull(),
+                    "compacting": s.isCompacting ?? NSNull(),
+                    "streaming": s.isStreaming ?? NSNull()] as [String: Any]
+        case .notice(let text):
+            return ["type": "status", "text": text]
+        case .backgroundJobs(let jobs):
+            return ["type": "jobs", "jobs": jobs.map { job in
+                ["id": job.id, "kind": job.kind, "status": job.status,
+                 "label": job.label, "startTime": job.startTime ?? NSNull()] as [String: Any]
+            }]
+        case .subagentUpdate(let update):
+            return ["type": "subagent", "id": update.id,
+                    "state": update.state ?? NSNull(),
+                    "detail": update.detail ?? NSNull()]
+        case .entryMark(let role, let entryId):
+            return ["type": "entryMark", "role": role, "entryId": entryId]
+        case .openURL(let url):
+            return ["type": "openURL", "url": url]
+        case .sessionStats(let stats):
+            return ["type": "stats", "stats": stats]
     }
 }
+}
+

@@ -30,6 +30,7 @@ extension AppDelegate {
             refreshSidebarSpaces()   // status dots only — no pane-grid churn
             updateRightPanel()
             pushReportedAgentStates()   // the composer follows the process
+            pushReportedAgentJobs()      // jobs dock rows follow the same tick
         case .title:
             refreshSidebarSpaces()   // display name only — cheapest path
         }
@@ -204,6 +205,23 @@ extension AppDelegate {
                               as? AgentPaneHost else { continue }
                     host.applyReportedState(
                         coordinator.reportedActivity(wsId: ws.id, paneId: pane.id))
+                }
+            }
+        }
+    }
+
+    /// Background-job rows for every agent pane's dock (capability 6):
+    /// the coordinator already diffed them; push straight to the hosts.
+    private func pushReportedAgentJobs() {
+        guard let store = coordinator.store else { return }
+        for ws in store.workspaces {
+            for tab in ws.tabs {
+                for pane in tab.panes {
+                    guard case .agent = pane.kind,
+                          let host = hostPool[HostKey(workspace: ws.id, pane: pane.id)]
+                              as? AgentPaneHost else { continue }
+                    host.applyJobs(
+                        coordinator.agentJobs(wsId: ws.id, paneId: pane.id))
                 }
             }
         }

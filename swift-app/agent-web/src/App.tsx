@@ -227,19 +227,96 @@ function ToolCard({ id }: { id: string }) {
   );
 }
 
-function PlanCard({ entries }: { entries: PlanEntry[] }) {
+/// Dock plan panel: pinned above the composer (TUI model), phase-
+/// grouped, collapsible. Replaces the old inline transcript card —
+/// which the 60-block render window could scroll out of view.
+function PlanPanel({ entries }: { entries: PlanEntry[] }) {
+  const [open, setOpen] = useState(true);
   const done = entries.filter((e) => e.status === "completed").length;
+  const phases: { name: string | null; items: PlanEntry[] }[] = [];
+  for (const e of entries) {
+    const last = phases[phases.length - 1];
+    if (last && last.name === (e.priority ?? null)) last.items.push(e);
+    else phases.push({ name: e.priority ?? null, items: [e] });
+  }
   return (
-    <div className="plan">
-      <div className="plan-head">
+    <div className={"dock-plan" + (open ? "" : " folded")}>
+      <button className="dock-head" onClick={() => setOpen(!open)}
+        title={open ? "收起计划面板" : "展开计划面板"}>
+        <span className={"chevron" + (open ? " up" : "")}>▸</span>
         <span className="plan-title">计划</span>
         <span className="plan-progress">{done}/{entries.length}</span>
-      </div>
-      {entries.map((e, j) => (
-        <div key={j} className={"plan-row " + (e.status ?? "")}>
-          <span className="plan-mark">{e.status === "completed" ? "✓" : e.status === "in_progress" ? "◐" : "○"}</span>
-          <span>{e.content}</span>
+      </button>
+      {open && (
+        <div className="plan-body">
+          {phases.map((phase, i) => (
+            <div key={i} className="plan-phase">
+              {phase.name && <div className="plan-phase-name">{phase.name}</div>}
+              {phase.items.map((e, j) => (
+                <div key={j} className={"plan-row " + (e.status ?? "")}>
+                  <span className="plan-mark">{e.status === "completed" ? "✓"
+                    : e.status === "in_progress" ? "◐" : "○"}</span>
+                  <span>{e.content}</span>
+                </div>
+              ))}
+            </div>
+          ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function fmtElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return h > 0
+    ? `${h}h${String(m).padStart(2, "0")}m`
+    : `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+/// Background async-job rows — the omp TUI's `bg_2 ⟨bash⟩ … 18m53s`
+/// line, elapsed ticking client-side from startTime.
+function JobsLine({ jobs }: { jobs: { id: string; kind: string;
+  status: string; label: string; startTime?: number | null }[] }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <div className="dock-jobs">
+      {jobs.map((job) => (
+        <div key={job.id} className="job-row" title={job.label}>
+          <span className="job-glyph">⏳</span>
+          <span className="job-id">{job.id}</span>
+          <span className="job-kind">⟨{job.kind}⟩</span>
+          <span className="job-label">{job.label}</span>
+          <span className="job-elapsed">
+            {job.startTime ? fmtElapsed(now - job.startTime) : ""}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/// Subagent roster chips (subagent_lifecycle/progress frames).
+function SubagentLine({ rows }: { rows: { id: string; state?: string | null;
+  detail?: string | null }[] }) {
+  const live = rows.filter((r) =>
+    !(r.state ?? "").match(/exit|done|fail|released/i));
+  if (live.length === 0) return null;
+  return (
+    <div className="dock-agents">
+      {live.map((r) => (
+        <span key={r.id} className="agent-chip"
+          title={r.detail ?? r.id}>
+          <span className="status-dot working" aria-hidden />
+          {r.id}{r.state ? ` · ${r.state}` : ""}
+        </span>
       ))}
     </div>
   );
@@ -270,17 +347,51 @@ function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking" | "sto
   }
 }
 
+/// omp-TUI parity for the tool row: label + PRIMARY ARGUMENT —
+/// `Read ~/…/PiSession.swift:145-172`, `Bash cargo test -- …`,
+/// `Grep toolDisplayTitle …`. Falls back to kind-only when no args.
+function toolArgSummary(raw: Record<string, unknown> | null | undefined): string | null {
+  if (!raw) return null;
+  const s = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const path = s(raw.path) ?? s(raw.file_path) ?? s(raw.notebook_path) ?? s(raw.url);
+  if (path) {
+    // Read ranges render like omp: `:offset-(offset+limit-1)`.
+    if (typeof raw.offset === "number") {
+      const off = raw.offset;
+      const end = typeof raw.limit === "number" ? off + (raw.limit as number) - 1 : off;
+      return `${path}:${off}-${end}`;
+    }
+    return path;
+  }
+  const cmd = s(raw.command);
+  if (cmd) return cmd.split("\n")[0];
+  const pat = s(raw.pattern) ?? s(raw.query) ?? s(raw.name)
+    ?? s(raw.prompt) ?? s(raw.description);
+  if (pat) return pat;
+  for (const v of Object.values(raw)) {
+    const str = s(v);
+    if (str) return str;
+  }
+  return null;
+}
+
 /// What the tool row shows as its title. Agent titles win (omp's "占位"
-/// placeholder does not); otherwise derive from kind + rawInput path.
+/// placeholder does not); otherwise derive from kind + rawInput.
 function toolDisplayTitle(call: ToolCall): string {
-  if (call.title && call.title !== "占位") return call.title;
-  const path = typeof call.rawInput?.path === "string" ? call.rawInput.path : null;
-  const base = path ? path.split("/").pop() : null;
   const kindLabel = call.kind === "read" ? "Read"
     : call.kind === "search" ? "Search"
     : call.kind === "edit" || call.kind === "write" ? "Edit"
-    : call.kind === "execute" || call.kind === "bash" ? "Run"
+    : call.kind === "execute" || call.kind === "bash" ? "Bash"
     : call.kind;
+  const arg = toolArgSummary(call.rawInput);
+  if (arg) {
+    const label = kindLabel ?? call.title ?? "Tool";
+    const full = `${label} ${arg}`;
+    return full.length > 96 ? full.slice(0, 95) + "…" : full;
+  }
+  if (call.title && call.title !== "占位") return call.title;
+  const path = typeof call.rawInput?.path === "string" ? call.rawInput.path : null;
+  const base = path ? path.split("/").pop() : null;
   if (kindLabel) return base ? `${kindLabel} ${base}` : kindLabel;
   if (base) return base;
   return call.id;
@@ -348,6 +459,32 @@ function HistoryChip({ open, onToggle, onSelect }: {
               <span className="hist-meta">{s.messageCount != null ? `${s.messageCount} 条` : ""}</span>
             </button>
           ))}
+          <div className="hist-footer">
+            <button className="chip-opt hist-act"
+              onClick={() => window.webkit?.messageHandlers.goty.postMessage({ type: "export" })}>
+              ⇪ 导出 HTML
+            </button>
+            <button className="chip-opt hist-act"
+              onClick={() => window.webkit?.messageHandlers.goty.postMessage({ type: "stats" })}>
+              Σ 统计
+            </button>
+            <button className="chip-opt hist-act"
+              onClick={() => window.webkit?.messageHandlers.goty.postMessage({ type: "login" })}>
+              ⚿ 登录
+            </button>
+          </div>
+          {store.loginProviders.length > 0 && (
+            <div className="hist-providers">
+              {store.loginProviders.map((p) => (
+                <button key={String(p.id ?? p.providerId ?? p.name)}
+                  className="chip-opt hist-act"
+                  onClick={() => window.webkit?.messageHandlers.goty.postMessage(
+                    { type: "startLogin", providerId: String(p.id ?? p.providerId ?? p.name) })}>
+                  ⚿ 登录 {String(p.name ?? p.id ?? p.providerId)}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -418,6 +555,30 @@ function Composer({ working, phase }: { working: boolean;
     return () => document.removeEventListener("mousedown", onDown);
   }, []);
 
+  /// mode: normal (idle) · followUp (queue behind the running turn —
+  /// the working-Enter default) · steer (interrupt the turn).
+  const submit = (mode: "normal" | "steer" | "followUp" = "normal") => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (working && mode === "normal") mode = "followUp";
+    window.webkit?.messageHandlers.goty.postMessage({ type: "send", text: trimmed, mode });
+    if (mode === "followUp") {
+      // QUEUED, not sent yet: omp holds it until the turn settles (probe
+      // 2026-09-01: no user echo at enqueue, only at delivery). Echoing
+      // it now would park it mid-stream above text that keeps appending —
+      // park it instead; the store flushes it as a user block at
+      // turnEnded, so it lands in true processing order at the bottom.
+      store.apply({ type: "queueMessage", text: trimmed });
+    } else {
+      // steer interrupts NOW (echoing immediately is the true order);
+      // idle sends render optimistically until omp's suppressed echo.
+      store.apply({ type: "userMessage", text: trimmed });
+    }
+    setHist((h) => (h[h.length - 1] === trimmed ? h : [...h, trimmed]));
+    histIdx.current = null;
+    setText("");
+  };
+
   // Auto-fit height on EVERY text change — programmatic ones included
   // (submit, Escape, ↑/↓ history recall, @-file insert). The old
   // onChange-only sizing left a stale grown height on the cleared box:
@@ -439,24 +600,19 @@ function Composer({ working, phase }: { working: boolean;
     ref.current?.focus();
   };
 
+
   const pickConfig = (configId: string, value: string) => {
     window.webkit?.messageHandlers.goty.postMessage({ type: "setConfig", configId, value });
     setOpenPop(null);
   };
 
 
-  const submit = () => {
-    const trimmed = text.trim();
-    if (!trimmed || working) return;
-    window.webkit?.messageHandlers.goty.postMessage({ type: "send", text: trimmed });
-    store.apply({ type: "userMessage", text: trimmed });
-    setHist((h) => (h[h.length - 1] === trimmed ? h : [...h, trimmed]));
-    histIdx.current = null;
-    setText("");
-  };
-
-
   const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // IME composition (中文输入法候选框): the Enter that CONFIRMS the
+    // composition must not send. WKWebView reports isComposing on those
+    // keydowns (and keyCode 229 on some IMEs) — bail before any
+    // Enter/arrow handling.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     // TUI-style input recall: empty composer + ↑/↓ walks the history
     // of sent inputs (↑ = older; ↓ past the newest clears back to empty).
     if ((e.key === "ArrowUp" || e.key === "ArrowDown") && hist.length > 0
@@ -508,8 +664,16 @@ function Composer({ working, phase }: { working: boolean;
       }
       if (e.key === "Escape") { e.preventDefault(); setText(""); return; }
     }
+    if (e.key === "Enter" && e.metaKey && !e.shiftKey) {
+      // ⌘⏎ interrupts the running turn (steer); idle it just sends.
+      e.preventDefault();
+      submit("steer");
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      // While working, plain Enter QUEUES (follow_up) — never a silent
+      // no-op like before.
       submit();
     }
   };
@@ -610,6 +774,17 @@ function Composer({ working, phase }: { working: boolean;
               store.apply({ type: "clearTranscript" });
               setOpenPop(null);
             }} />
+          {store.runtime?.fastEnabled != null && (
+            <button
+              className={"icon-chip fast" + (store.runtime.fastActive ? " on" : "")}
+              title={store.runtime.fastActive
+                ? "fast 模式激活中 — 点击关闭"
+                : "开启 fast 模式（优先吞吐档位）"}
+              onClick={() => window.webkit?.messageHandlers.goty.postMessage(
+                { type: "setFast", enabled: !store.runtime?.fastEnabled })}>
+              ⚡
+            </button>
+          )}
           {[...store.configOptions]
             .sort((a, b) => (KNOB_ORDER[a.id] ?? 9) - (KNOB_ORDER[b.id] ?? 9))
             .map((option) => (
@@ -625,35 +800,59 @@ function Composer({ working, phase }: { working: boolean;
             <span className="pane-meta" title={[store.meta.workspace, store.meta.directory]
               .filter(Boolean).join("/") + (store.meta.branch ? ` · ${store.meta.branch}` : "")}>
               {[store.meta.workspace, store.meta.directory].filter(Boolean).join("/")}
-              {store.meta.branch ? ` · ${store.meta.branch}` : ""}
             </span>
           )}
           {(() => {
             const u = store.usage;
-            if (!u) return null;
-            // Full-set statusbar segments; an agent that can't supply a
-            // piece simply hides that segment.
+            const rt = store.runtime;
             const parts: string[] = [];
-            if (u.input != null) parts.push(`↑${fmtTokens(u.input)}`);
-            if (u.output != null) parts.push(`↓${fmtTokens(u.output)}`);
-            if (u.used != null && u.size != null && u.size > 0) {
-              parts.push(`${((u.used / u.size) * 100).toFixed(1)}%/${fmtTokens(u.size)}`);
-            } else if (u.used != null) {
-              parts.push(`↑${fmtTokens(u.used)}`);
+            if (u?.input != null) parts.push(`↑${fmtTokens(u.input)}`);
+            if (u?.output != null) parts.push(`↓${fmtTokens(u.output)}`);
+            if (u?.used != null && u?.size != null && u.size > 0) {
+                parts.push(`${((u.used / u.size) * 100).toFixed(1)}%/${fmtTokens(u.size)}`);
+            } else if (u?.used != null) {
+                parts.push(`↑${fmtTokens(u.used)}`);
             }
-            if (u.costAmount != null) {
-              parts.push(`$${u.costAmount < 1 ? u.costAmount.toFixed(4) : u.costAmount.toFixed(2)}`);
+            const ctxPct = (rt?.contextTokens != null && rt?.contextWindow != null
+                && rt.contextWindow > 0)
+                ? (rt.contextTokens / rt.contextWindow) * 100 : null;
+            if (ctxPct != null) {
+                parts.push(`◧ ctx ${ctxPct.toFixed(1)}%`);
+            } else if (rt?.contextTokens != null) {
+                parts.push(`◧ ${fmtTokens(rt.contextTokens)}`);
             }
             if (parts.length === 0) return null;
-            return <span className="usage">{parts.join(" · ")}</span>;
+            // omp's own gauge thresholds (context-thresholds.ts): warning
+            // ≥50% or 150k tokens, purple ≥70%/270k, error ≥90%/500k —
+            // whichever bound (percent vs tokens-per-window) hits first.
+            const level = ctxPct == null ? "normal"
+                : ctxPct >= Math.min(90, (500_000 / (rt!.contextWindow || 1)) * 100) ? "error"
+                : ctxPct >= Math.min(70, (270_000 / (rt!.contextWindow || 1)) * 100) ? "purple"
+                : ctxPct >= Math.min(50, (150_000 / (rt!.contextWindow || 1)) * 100) ? "warning"
+                : "normal";
+            return <span className={`usage ctx-${level}`}>{parts.join(" · ")}</span>;
           })()}
+
+          {(Math.max(store.runtime?.queued ?? 0, store.pendingQueue.length) > 0) && (
+            <span className="queue-badge" title="排队中的消息（turn 结束后依次处理）">
+              ⇥ 排队 {Math.max(store.runtime?.queued ?? 0, store.pendingQueue.length)}
+            </span>
+          )}
+          {working && (
+            <button className="action-btn steer" disabled={!text.trim()}
+              title="打断并发送 (⌘⏎) — 中断当前 turn，立即插话"
+              onClick={() => submit("steer")}>
+              ⇤
+            </button>
+          )}
           <button
             className={"action-btn " + (working ? "stop" : "send")
               + (phase === "awaitingPermission" ? " awaiting" : "")}
-            disabled={!working && !text.trim()}
-            title={working ? "停止 (Esc)" : "发送 (Enter)"}
+            disabled={working ? false : !text.trim()}
+            title={working ? "排队发送 (Enter) / 停止 (Esc)" : "发送 (Enter)"}
             onClick={() => working
-              ? window.webkit?.messageHandlers.goty.postMessage({ type: "stop" })
+              ? (text.trim() ? submit("followUp")
+                : window.webkit?.messageHandlers.goty.postMessage({ type: "stop" }))
               : submit()}>
             <Icon kind={working ? "stop" : "send"} />
           </button>
@@ -666,27 +865,76 @@ function Composer({ working, phase }: { working: boolean;
 
 const INITIAL_WINDOW = 60;
 const WINDOW_PAGE = 150;
+/// Upper bound on mounted blocks. The window GROWS while the user reads
+/// above a live stream (start is top-anchored, appends never unmount);
+/// returning to the bottom trims back to this.
+const MAX_WINDOW = INITIAL_WINDOW + WINDOW_PAGE;
+
+/// Branch affordance. The fork runs in a throwaway process server-side
+/// (worktree semantics) — it is safe while a turn streams, so the only
+/// gate is the entry id itself (stamped by store replay).
+const BranchButton = React.memo(
+  function BranchButton({ entryId, label, className }: {
+    entryId: string | null; label: string; className?: string }) {
+    // Shared pane-level busy flag: the fork is a pure file operation
+    // (~10ms) with a process fallback; EVERY branch button shows
+    // 分支中… and refuses clicks until it lands, so rapid clicks
+    // cannot spawn N tabs.
+    const busy = useSyncExternalStore(
+      (onChange) => store.subscribe(onChange),
+      () => store.branchBusy,
+      () => false,
+    );
+    const disabled = !entryId || busy;
+    const title = !entryId
+      ? "该消息还没有会话条目 id（重开窗格或加载历史后可从此处分支）"
+      : busy ? "分支创建中……"
+      : "从此处分叉到新标签页继续（原会话与原窗口保留不动；turn 进行中同样可用）";
+    return (
+      <button
+        className={(className ?? "branch-btn") + (disabled ? " dim" : "")}
+        disabled={disabled} title={title}
+        onClick={() => {
+          if (!entryId || busy) return;
+          window.webkit?.messageHandlers.goty.postMessage(
+            { type: "branchNewPane", entryId });
+        }}>{busy ? "⎿ 分支中…" : label}</button>
+    );
+  });
 
 /// One transcript row. Memoized: during replay only the newest blocks
 /// change identity, so scroll-up pagination re-renders just the newly
 /// revealed rows and streaming re-renders only the tail block.
 const BlockView = React.memo(
-  function BlockView({ block }: { block: Block }) {
+  function BlockView({ block, showBranch = false }:
+      { block: Block; showBranch?: boolean }) {
     switch (block.kind) {
-      case "user": return <div className="user-row"><div className="user">{block.text}</div></div>;
+      case "user": return (
+        <div className="user-row">
+          <div className="user">{block.text}</div>
+        </div>
+      );
       case "agent": return block.text ? (
-        <div className="agent"><Markdown remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown></div>) : null;
+        <div className="agent">
+          <Markdown remarkPlugins={[remarkGfm]}
+            rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown>
+          {showBranch && block.entryId ? (
+            <BranchButton entryId={block.entryId} label="⎿ 分支到新标签页"
+              className="branch-btn agent-branch" />
+          ) : null}
+        </div>) : null;
       case "thought": return <div className="thought"><Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown></div>;
       case "tool": return <ToolCard id={block.call.id} />;
       case "turnStats": return <div className="turn-stats">{block.text}</div>;
-      case "plan": return <PlanCard entries={block.entries} />;
     }
   },
   // Same block object usually means nothing changed; tool updates keep
-  // the block but swap `call`, so compare that too.
+  // the block but swap `call`, so compare that too. showBranch is
+  // positional (last content block of a turn) and flips as blocks
+  // append — compare it too or the button sticks to the wrong block.
   (a, b) => {
     if (a.block !== b.block) return false;
+    if (a.showBranch !== b.showBranch) return false;
     if (a.block.kind === "tool" && b.block.kind === "tool") return a.block.call === b.block.call;
     return true;
   },
@@ -697,8 +945,11 @@ const BlockView = React.memo(
 /// duration (+token usage when the agent reports it) once it settles.
 function StatusLine() {
   const s = store;
+  const rt = store.runtime;
   const chips: React.ReactNode[] = [];
-  if (s.phase === "thinking") {
+  // /compact runs as a normal model turn, so phase=thinking holds —
+  // the compacting chip is the sharper truth; don't spin both.
+  if (s.phase === "thinking" && !rt?.compacting) {
     chips.push(<span key="th" className="cstat" title="模型思考中"><span className="spin" />思考中…</span>);
   } else if (s.phase === "executing") {
     // Live tool telemetry: name the tool actually running (claude TUI
@@ -718,6 +969,12 @@ function StatusLine() {
   // (Settled-turn duration lives INSIDE the transcript now — a
   // turnStats block glued to the turn it closes, so the next user
   // message appends below it instead of above the composer.)
+  if (rt?.tokensPerSecond != null && rt.tokensPerSecond > 0) {
+    chips.push(<span key="tps" className="cstat" title="输出吞吐">{rt.tokensPerSecond.toFixed(1)} tok/s</span>);
+  }
+  if (rt?.compacting) {
+    chips.push(<span key="compact" className="cstat warn" title="上下文压缩中"><span className="spin" />压缩中…</span>);
+  }
   if (chips.length === 0) return null;
   return <div className="composer-status">{chips}</div>;
 }
@@ -728,7 +985,47 @@ export function App() {
     () => store.revision,
   );
   const scroller = useRef<HTMLDivElement>(null);
-  const pinned = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
+
+  // ——— scroll controller: happier's userScrollIntentOwner, distilled ———
+  // THREE invariants (their viewport subsystem, battle-tested):
+  //  1. ONE writer: the only automatic scroll is follow-to-bottom, and
+  //     only when (not parked) AND (no live user gesture). Multiple
+  //     writers chasing the bottom is exactly the captured "oscillating
+  //     bottom" jitter (their 2026-07-22 note — and our 2026-09-01 one).
+  //  2. Intent window: raw input (wheel/touch/scroll-keys) OR momentum
+  //     frames within 320ms = the reader's hand is on the scroller —
+  //     hands off. Momentum continuation emits scroll events, so
+  //     user-caused scroll events also refresh the timestamp.
+  //  3. Parking is MEASURED, not directional: >24px from the bottom
+  //     under the user's hand parks; reaching the tail (or the ↓
+  //     button) releases. Programmatic writes self-identify (100ms
+  //     echo window) so their own scroll events can't masquerade as
+  //     user intent.
+  const PIN_THRESHOLD_PX = 24;
+  const INTENT_WINDOW_MS = 320;
+  const parked = useRef(false);
+  const lastRawInputAt = useRef(-Infinity);
+  const lastWriteAt = useRef(0);
+  const growing = useRef(false);
+
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const record = () => { lastRawInputAt.current = performance.now(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (["PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown", " "].includes(e.key)) record();
+    };
+    el.addEventListener("wheel", record, { passive: true });
+    el.addEventListener("touchmove", record, { passive: true });
+    el.addEventListener("keydown", onKey);
+    return () => {
+      el.removeEventListener("wheel", record);
+      el.removeEventListener("touchmove", record);
+      el.removeEventListener("keydown", onKey);
+    };
+  }, []);
+
 
   // Esc ANYWHERE in the pane stops a working agent — not only while
   // the composer is focused (its own handler covers that case).
@@ -745,13 +1042,20 @@ export function App() {
   }, []);
 
   // Render window: the store holds the whole transcript, but only the
-  // newest INITIAL_WINDOW blocks mount. Scrolling near the top pages
+  // blocks from `start` on mount. `start` is TOP-anchored: streaming
+  // appends mount BELOW it and never unmount what the user is reading
+  // (a tail-anchored window slid on every new block — each slide
+  // unmounted the top block and the viewport jumped with it once the
+  // transcript passed the window). Scrolling near the top pages
   // WINDOW_PAGE older blocks in, anchored so the viewport stays put.
   const total = store.blocks.length;
-  const [windowCount, setWindowCount] = useState(INITIAL_WINDOW);
+  const [start, setStart] = useState(() => Math.max(0, total - INITIAL_WINDOW));
   const generation = store.generation;
-  useEffect(() => { setWindowCount(INITIAL_WINDOW); }, [generation]);
-  const visible = total > windowCount ? store.blocks.slice(-windowCount) : store.blocks;
+  useEffect(() => { setStart(Math.max(0, store.blocks.length - INITIAL_WINDOW)); }, [generation]);
+  // A shrunk transcript (transcriptReset) can leave start past the tail:
+  // fall back to the tail window instead of rendering nothing.
+  const begin = Math.min(start, Math.max(0, total - INITIAL_WINDOW));
+  const visible = store.blocks.slice(begin);
 
   const sentinelRef = useRef<HTMLDivElement>(null);
   const growAnchor = useRef<{ height: number; top: number } | null>(null);
@@ -761,56 +1065,192 @@ export function App() {
     if (!el || !sc) return;
     const obs = new IntersectionObserver((entries) => {
       if (!entries.some((e) => e.isIntersecting)) return;
-      if (windowCount >= total) return;
+      if (begin <= 0 || growing.current) return;
+      growing.current = true;
       growAnchor.current = { height: sc.scrollHeight, top: sc.scrollTop };
-      setWindowCount((c) => Math.min(c + WINDOW_PAGE, total));
-    }, { root: sc, rootMargin: "300px" });
+      setStart((s) => Math.max(0, s - WINDOW_PAGE));
+    }, { root: sc, rootMargin: "0px" });
     obs.observe(el);
     return () => obs.disconnect();
-  }, [windowCount, total]);
+  }, [begin, total]);
 
   useLayoutEffect(() => {
     const a = growAnchor.current;
+    if (!a) return;
     growAnchor.current = null;
     const sc = scroller.current;
-    if (!a || !sc) return;
+    if (!sc) return;
+    // Prepend compensation, then ONE rAF correction pass: async layout
+    // (syntax highlighting, fonts) keeps shifting scrollHeight after
+    // paint, and an uncompensated drift re-trips the sentinel during
+    // momentum — the "flew to the top" report (2026-09-01).
     sc.scrollTop = a.top + (sc.scrollHeight - a.height);
+    const settledHeight = sc.scrollHeight;
+    requestAnimationFrame(() => {
+      const drift = sc.scrollHeight - settledHeight;
+      if (drift !== 0) sc.scrollTop += drift;
+      growing.current = false;
+    });
   });
 
+  // THE one auto-follow writer (invariant 1): follow only when not
+  // parked and no live gesture — never during the reader's input.
   useEffect(() => {
-    if (pinned.current) scroller.current?.scrollTo(0, scroller.current.scrollHeight);
+    const el = scroller.current;
+    if (!el || parked.current) return;
+    if (performance.now() - lastRawInputAt.current < INTENT_WINDOW_MS) return;
+    const target = el.scrollHeight;
+    if (Math.abs(target - el.clientHeight - el.scrollTop) < 0.5) return;
+    lastWriteAt.current = performance.now();
+    el.scrollTop = target;
   });
 
   const onScroll = () => {
     const el = scroller.current!;
-    pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    const now = performance.now();
+    const distance = Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop);
+    const byUser = now - lastWriteAt.current > 100;
+    if (byUser) {
+      // User-caused movement (raw input or its momentum frames):
+      // refresh intent (invariant 2) and settle parking by MEASUREMENT
+      // (invariant 3).
+      lastRawInputAt.current = now;
+      parked.current = distance > PIN_THRESHOLD_PX;
+    } else if (distance <= PIN_THRESHOLD_PX) {
+      // Our own write's echo landing on the tail.
+      parked.current = false;
+    }
+    setAtBottom(distance <= PIN_THRESHOLD_PX);
+    // Bound the window: it grows while the user reads above a live
+    // stream. Trim once they're back at the tail — unmounting ABOVE
+    // the viewport cannot move what the user sees.
+    if (!parked.current && total - begin > MAX_WINDOW) {
+      setStart(Math.max(0, total - MAX_WINDOW));
+    }
+  };
+
+  const jumpToBottom = () => {
+    // Explicit command: release parking AND revoke input evidence (the
+    // user just told us they want the tail — stale intent must not
+    // block the landing).
+    parked.current = false;
+    lastRawInputAt.current = -Infinity;
+    const sc = scroller.current;
+    if (sc) {
+      lastWriteAt.current = performance.now();
+      sc.scrollTop = sc.scrollHeight;
+    }
+    setAtBottom(true);
   };
 
   return (
     <div className="pane">
       <div className="transcript" ref={scroller} onScroll={onScroll}>
-        {visible.length < total && (
+        {begin > 0 && (
           <div className="history-more" ref={sentinelRef}>加载更早消息…</div>
         )}
-        {visible.map((block) => <BlockView key={block.id} block={block} />)}
+        {visible.map((block, i) => (
+          <BlockView key={block.id} block={block}
+            // The branch affordance belongs at the END of a turn's LLM
+            // output, not on every entryId-stamped fragment before it
+            // (thought/tool interleaving splits one message into many
+            // agent blocks). Last content block of the turn only.
+            showBranch={block.kind === "agent" && block.entryId != null
+              && (i + 1 >= visible.length
+                  || (visible[i + 1].kind !== "agent"
+                      && visible[i + 1].kind !== "thought"
+                      && visible[i + 1].kind !== "tool"))} />
+        ))}
         <StatusLine />
       </div>
-      {store.permission && (
-        <div className="permission">
-          <div className="perm-title">{store.permission.toolCallTitle ?? "需要授权"}</div>
-          <div className="perm-options">
-            {store.permission.options.map((o) => (
-              <button key={o.optionId}
-                className={"btn " + (o.kind?.startsWith("allow") ? "send" : "")}
-                onClick={() => window.webkit?.messageHandlers.goty.postMessage(
-                  { type: "permission", optionId: o.optionId })}>
-                {o.name}
-              </button>
-            ))}
-          </div>
+      {!atBottom && (
+        <button className="jump-bottom" title="回到底部（跟随最新输出）"
+          onClick={jumpToBottom}>↓</button>
+      )}
+      {(store.plan || store.jobs.length > 0 || store.subagents.length > 0
+        || store.pendingQueue.length > 0) && (
+        <div className="dock">
+          {store.plan && <PlanPanel entries={store.plan.entries} />}
+          {store.jobs.length > 0 && <JobsLine jobs={store.jobs} />}
+          <SubagentLine rows={store.subagents} />
+          {store.pendingQueue.length > 0 && (
+            <div className="dock-outbox" title="排队中的消息：turn 结束后按序送达">
+              {store.pendingQueue.map((text, i) => (
+                <div className="outbox-row" key={i}>
+                  <span className="outbox-mark">⇥</span>
+                  <span className="outbox-text">{text}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
+      {store.permission && <PermissionCard permission={store.permission} />}
       <Composer working={store.working} phase={store.phase} />
+      {store.stats && <StatsDialog stats={store.stats} />}
+    </div>
+  );
+}
+
+/// The agent asked a question / needs approval — RPC extension dialogs
+/// ride the same card: option lists (select/approvals), 确认/取消
+/// (confirm), or a text entry (input/editor).
+function PermissionCard({ permission }: {
+  permission: NonNullable<typeof store.permission>;
+}) {
+  const [value, setValue] = useState(permission.defaultValue ?? "");
+  const isInput = permission.dialog === "input" || permission.dialog === "editor";
+  return (
+    <div className="permission">
+      <div className="perm-title">{permission.toolCallTitle ?? "需要授权"}</div>
+      {isInput ? (
+        <div className="perm-input">
+          <input autoFocus value={value}
+            placeholder={permission.placeholder ?? ""}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && value.trim()) {
+                window.webkit?.messageHandlers.goty.postMessage(
+                  { type: "permission", optionId: value });
+              }
+            }} />
+          <button className="btn send" disabled={!value.trim()}
+            onClick={() => window.webkit?.messageHandlers.goty.postMessage(
+              { type: "permission", optionId: value })}>提交</button>
+        </div>
+      ) : (
+        <div className="perm-options">
+          {permission.options.map((o) => (
+            <button key={o.optionId}
+              className={"btn " + (o.kind?.startsWith("allow") ? "send" : "")}
+              onClick={() => window.webkit?.messageHandlers.goty.postMessage(
+                { type: "permission", optionId: o.optionId })}>
+              {o.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/// get_session_stats overlay: raw key/value table, click-outside closes.
+function StatsDialog({ stats }: { stats: Record<string, unknown> }) {
+  return (
+    <div className="stats-overlay" onClick={() => store.closeStats()}>
+      <div className="stats-card" onClick={(e) => e.stopPropagation()}>
+        <div className="stats-head">
+          <span>会话统计</span>
+          <button className="chip-retry" onClick={() => store.closeStats()}>关闭</button>
+        </div>
+        <table className="stats-table">
+          <tbody>
+            {Object.entries(stats).map(([k, v]) => (
+              <tr key={k}><td>{k}</td><td>{typeof v === "object" ? JSON.stringify(v) : String(v)}</td></tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

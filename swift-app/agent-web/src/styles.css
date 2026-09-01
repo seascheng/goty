@@ -119,7 +119,12 @@ body {
 .agent table { border-collapse: collapse; margin: 10px 0; }
 .agent th, .agent td { border: 1px solid var(--border); padding: 5px 10px; }
 .thought {
-  color: var(--fg-muted); font-size: 12px; margin: 8px 0 12px;
+  /* Deliberately FAR dimmer than fg-muted (which tool paths, usage,
+     chips share): thinking must read as a distinct layer under the
+     real answer. Derived from theme tokens so light/dark both adapt. */
+  color: color-mix(in srgb, var(--fg-muted) 58%, var(--surface0));
+  font-style: italic; /* omp TUI parity — thinking renders italic */
+  font-size: 12px; margin: 8px 0 12px;
   border-left: 2px solid var(--surface3); padding-left: 12px;
   overflow-wrap: anywhere;
 }
@@ -305,6 +310,23 @@ body {
   max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .usage { color: var(--fg-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+/* omp context-gauge levels: warning amber / purple / error red —
+   normal stays muted (context-thresholds.ts parity, 2026-09-01) */
+.usage.ctx-warning { color: var(--working); }
+.usage.ctx-purple { color: #b197fc; }
+.usage.ctx-error { color: var(--destructive); font-weight: 600; }
+
+/* jump-to-bottom: floats over the transcript's bottom-right corner
+   whenever follow-mode is detached */
+.pane { position: relative; }
+.jump-bottom {
+  position: absolute; right: 18px; bottom: 120px; z-index: 5;
+  width: 30px; height: 30px; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--surface1);
+  color: var(--fg-muted); font-size: 14px; cursor: pointer;
+  box-shadow: var(--pop-shadow);
+}
+.jump-bottom:hover { color: var(--accent-bright); border-color: var(--accent); }
 
 /* — dual-state action button (paseo style) — */
 .action-btn {
@@ -430,3 +452,139 @@ body {
   font-size: 11.5px;
   color: var(--fg-muted);
 }
+
+/* ——— dock: pinned between transcript and composer (TUI model) ——— */
+.dock {
+  flex: none;
+  margin: 0 20px 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface0) 60%, transparent);
+  overflow: hidden;
+}
+.dock-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 5px 12px; background: none; border: none; cursor: pointer;
+  color: var(--foreground); font-size: 12px;
+}
+.dock-head:hover { background: var(--surface2); }
+.dock-head .chevron { color: var(--fg-extra-muted); font-size: 10px; transition: transform 0.12s; }
+.dock-plan:not(.folded) .dock-head .chevron { transform: rotate(90deg); }
+.dock-plan.folded .plan-phase { display: none; }
+.plan-phase { padding: 0 12px 6px; }
+.plan-phase-name {
+  font-size: 10.5px; color: var(--fg-extra-muted);
+  margin: 4px 0 2px; letter-spacing: 0.04em;
+}
+
+.dock-jobs { padding: 4px 12px 6px; border-top: 1px solid var(--border); }
+.job-row {
+  display: flex; align-items: baseline; gap: 8px; padding: 2px 0;
+  font-size: 11.5px; min-width: 0;
+}
+.job-glyph { flex: none; }
+.job-id { color: var(--accent-bright); font-family: "SF Mono", Menlo, monospace; flex: none; }
+.job-kind { color: var(--fg-extra-muted); flex: none; font-size: 10.5px; }
+.job-label {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fg-muted);
+}
+.job-elapsed { flex: none; font-variant-numeric: tabular-nums; color: var(--fg-muted); }
+
+.dock-agents {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 5px 12px;
+  border-top: 1px solid var(--border);
+}
+.agent-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--fg-muted);
+  border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px;
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* branch button (assistant-tail, always visible — the user-row
+   hover variant died with the user-row button 2026-09-01) */
+.branch-btn {
+  align-self: center; margin-right: 6px; flex: none;
+  font-size: 10.5px; padding: 1px 7px; border-radius: 8px;
+  border: 1px solid var(--border); background: none;
+  color: var(--fg-extra-muted); cursor: pointer;
+}
+.branch-btn:hover { color: var(--accent-bright); border-color: var(--accent); }
+
+/* fast-mode chip + queue badge + steer button */
+.icon-chip.fast.on {
+  color: var(--accent-bright); border-color: var(--accent-bright);
+  background: var(--surface3);
+}
+.queue-badge {
+  font-size: 11px; color: var(--accent-bright);
+  border: 1px solid var(--accent); border-radius: 10px; padding: 1px 8px;
+  white-space: nowrap;
+}
+.action-btn.steer {
+  background: var(--surface3); color: var(--accent-bright);
+  font-size: 13px; line-height: 1;
+}
+.action-btn.steer:hover:not(:disabled) { background: var(--accent); color: #fff; }
+.action-btn.steer:disabled { color: var(--fg-extra-muted); cursor: default; }
+
+/* permission text-entry (input/editor dialogs) */
+.perm-input { display: flex; gap: 8px; margin-top: 10px; }
+.perm-input input {
+  flex: 1; min-width: 0; padding: 5px 10px;
+  background: var(--surface1); color: var(--foreground);
+  border: 1px solid var(--border); border-radius: 6px; font-size: 12.5px;
+  outline: none;
+}
+.perm-input input:focus { border-color: var(--accent); }
+
+/* stats overlay */
+.stats-overlay {
+  position: absolute; inset: 0; z-index: 40;
+  background: color-mix(in srgb, var(--surface0) 70%, transparent);
+  display: flex; align-items: center; justify-content: center;
+}
+.stats-card {
+  min-width: 300px; max-width: 80%; max-height: 70%; overflow: auto;
+  background: var(--surface1); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px 16px;
+}
+.stats-head {
+  display: flex; justify-content: space-between; align-items: center;
+  font-weight: 600; font-size: 13px; margin-bottom: 8px;
+}
+.stats-table { border-collapse: collapse; font-size: 12px; width: 100%; }
+.stats-table td { border: 1px solid var(--border); padding: 4px 10px; }
+.stats-table td:first-child { color: var(--fg-muted); white-space: nowrap; }
+
+/* history popover footer actions */
+.hist-footer {
+  display: flex; gap: 6px; padding: 8px 4px 2px; border-top: 1px solid var(--border);
+}
+.hist-act { font-size: 11px; flex: 1; justify-content: center; }
+.hist-providers { padding: 4px 0 0; }
+
+/* plan dock: open state is capped + scrollable — a 20-item plan must
+   not eat the pane; the head button folds it to one row. */
+.plan-body { max-height: 30vh; overflow-y: auto; }
+.dock-plan .chevron.up { transform: rotate(90deg); }
+.branch-btn.dim { opacity: 0.35; cursor: default; }
+
+/* queued follow-up messages: visible outbox above the composer —
+   the badge count alone hid what the user typed */
+.dock-outbox { border-top: 1px solid var(--border); }
+.outbox-row {
+  display: flex; gap: 8px; align-items: baseline;
+  padding: 3px 12px; font-size: 12px; color: var(--fg-muted);
+}
+.outbox-mark { color: var(--accent-bright); flex: none; font-size: 11px; }
+.outbox-text {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* assistant-tail branch button (gooey-pi style): hover-only affordance
+   at the end of each LLM output; entryId lands via store replay.
+   Always visible (2026-09-01): hover-only affordances hide the
+   feature from anyone who doesn't already know it exists. */
+.agent .agent-branch { margin-top: 6px; }

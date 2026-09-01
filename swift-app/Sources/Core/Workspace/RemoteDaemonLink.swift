@@ -146,7 +146,7 @@ final class RemoteDaemonLink {
             return
         }
 
-        let daemon = SessionDaemon(socketPath: forwardPath!)
+        let daemon = SessionDaemon(socketPath: forwardPath!, isRemote: true)
         remoteBinPath = binPath
         guard let capability = daemon.pingCapability() else {
             scheduleRetry(reason: "handshake failed")
@@ -172,6 +172,17 @@ final class RemoteDaemonLink {
             NSLog("remote-link %@: daemon capability %d < %d — outdated (agents %@)",
                   host, capability, SessionDaemon.expectedCapability,
                   agentAvailability.filter { $0.value }.keys.sorted().joined(separator: ","))
+            self.daemon = daemon
+            state = .outdated
+            return
+        }
+        // Below the STORE capability the panes work but omp history /
+        // resume paths read a foreign filesystem — same consent flow
+        // (restart ends the remote sessions; declining keeps panes and
+        // shows the per-pane notice instead).
+        guard capability >= SessionDaemon.storeCapability else {
+            NSLog("remote-link %@: daemon capability %d < %d — no store access",
+                  host, capability, SessionDaemon.storeCapability)
             self.daemon = daemon
             state = .outdated
             return

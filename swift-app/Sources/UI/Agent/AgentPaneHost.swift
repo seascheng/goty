@@ -51,6 +51,21 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     /// Session to re-load after the initial connect (from PaneState) —
     /// for adapters that don't self-manage restore (claude).
     var restoredSessionId: String?
+    /// Forked session to open in a NEW tab (branch-to-new-pane). Wired
+    /// by makeAgentPaneHost to the coordinator's tab creation.
+    var onBranchNewPane: ((String) -> Void)?
+    /// Queued follow-up texts, mirrored from the web's pendingQueue for
+    /// PERSISTENCE (omp reports only a count — texts must survive a
+    /// restart or the dock list comes back empty while the badge shows
+    /// N). Seeded at creation, reconciled against runtimeStatus counts,
+    /// re-pushed to the page after the handshake.
+    var initialQueuedOutbox: [String] = []
+    var onQueuedOutboxChange: (([String]) -> Void)?
+    private var queuedOutbox: [String] = []
+    private var lastQueueCount = 0
+    /// True while a worktree fork (throwaway process) is booting —
+    /// both the Swift handler and every BranchButton respect it.
+    private var forkInFlight = false
     /// Last title pushed to the page / sidebar; dedups list refreshes.
     private var lastSessionTitle: String?
 
@@ -138,6 +153,19 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             }
         }
     }
+
+    /// Background-job dock rows (daemon LIST poll → coordinator).
+    /// Deduped: the poll fires every 2s; unchanged rows must not
+    /// re-render the page.
+    func applyJobs(_ jobs: [AgentJobSnapshot]) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, jobs != self.lastJobsPushed else { return }
+            self.lastJobsPushed = jobs
+            self.bridge.push(AgentSessionEvent.backgroundJobs(jobs).jsRepresentation)
+        }
+    }
+    private var lastJobsPushed: [AgentJobSnapshot] = []
+
 
     /// One authoritative seed right after connect: the daemon holds the
     /// extension's last report for this pane, so a reattach mid-turn
@@ -296,20 +324,132 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                     self?.dumpFocusState("t+1.5s")
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                    self?.dumpFocusState("t+5s")
+            }
+        }
+        bridge.onSend = { [weak self] text, mode in
+            guard let self else { return }
+            switch mode {
+            case "steer":
+                self.session.steer(text)
+            case "followUp":
+                self.session.followUp(text)
+                self.recordQueued(text)
+            default:
+                // Working-session guard: a stale-idle composer (or an
+                // event the UI misrouted) must NEVER let a message
+                // evaporate in send()'s isWorking guard — queue it as a
+                // follow-up instead; omp delivers it after the turn.
+                if self.session.isWorking {
+                    self.session.followUp(text)
+                    self.recordQueued(text)
+                    return
+                }
+                self.setTurnState(.thinking)
+                self.session.send(text)
+                // An adapter with no live session id (attach replay rotated
+                // past the handshake) refuses send() — never leave the
+                // composer stuck "working".
+                if !self.session.isWorking {
+                    self.setTurnState(.errored("未关联到 agent 会话 — 请点重试"))
                 }
             }
         }
-        bridge.onSend = { [weak self] text in
+
+        bridge.onSetFast = { [weak self] enabled in
+            self?.session.setFastMode(enabled: enabled)
+        }
+        // Branch = worktree semantics: the fork runs in a THROWAWAY
+        // process (see forkToNewSession) — this pane's session is never
+        // swapped or reloaded, so it works mid-turn too. Both buttons
+        // (user-row and agent-tail) route through the new-pane flow.
+        bridge.onBranch = { [weak self] entryId in
+            self?.bridge.onBranchNewPane?(entryId)
+        }
+        bridge.onBranchNewPane = { [weak self] entryId in
+            guard let self, self.session.sessionId?.isEmpty == false
+            else { return }
+            // One fork at a time per pane: the throwaway process takes
+            // seconds to boot — a second click during that window must
+            // not spawn a second fork (the user got N tabs for N clicks).
+            guard !self.forkInFlight else { return }
+            self.forkInFlight = true
+            self.bridge.push(["type": "branchState", "active": true])
+            // The fork normally lands in ~14s (throwaway boot + branch).
+            // If the process or RPC dies silently the completion would
+            // never fire — the button stays dead with no feedback. A
+            // one-shot ceiling re-arms it; the idempotent real
+            // completion wins the race.
+            var settled = false
+            func settle(_ forkId: String?) {
+                guard !settled else { return }
+                settled = true
+                self.forkInFlight = false
+                self.bridge.push(["type": "branchState", "active": false])
+                guard let forkId else {
+                    self.bridge.push(AgentSessionEvent.notice(
+                        "分支失败：无法从该条目创建分叉会话").jsRepresentation)
+                    return
+                }
+                self.onBranchNewPane?(forkId)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 75) { [weak self] in
+                guard let self, self.forkInFlight else { return }
+                settle(nil)
+            }
+            self.session.forkToNewSession(entryId: entryId) { forkId in
+                DispatchQueue.main.async {
+                    settle(forkId)
+                }
+            }
+        }
+        bridge.onExport = { [weak self] in
             guard let self else { return }
-            self.setTurnState(.thinking)
-            self.session.send(text)
-            // An adapter with no live session id (attach replay rotated
-            // past the handshake) refuses send() — never leave the
-            // composer stuck on "working" for a turn that never started.
-            if !self.session.isWorking {
-                self.setTurnState(.errored("未关联到 agent 会话 — 请点重试"))
+            self.session.exportHTML { [weak self] path in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    guard let path else {
+                        self.bridge.push(AgentSessionEvent.notice("导出失败：agent 未返回文件路径").jsRepresentation)
+                        return
+                    }
+                    // The export lands on the AGENT's host. A remote
+                    // agent's file is not a Mac path — never probe the
+                    // local filesystem for it (2026-09-01 layering fix).
+                    guard self.session.runsOnThisMac else {
+                        self.bridge.push(AgentSessionEvent.notice(
+                            "已导出到远端主机：\(path)").jsRepresentation)
+                        return
+                    }
+                    guard FileManager.default.fileExists(atPath: path) else {
+                        self.bridge.push(AgentSessionEvent.notice("导出失败：agent 未返回文件路径").jsRepresentation)
+                        return
+                    }
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [URL(fileURLWithPath: path)])
+                }
+            }
+        }
+        bridge.onLogin = { [weak self] in
+            guard let self else { return }
+            self.session.loginProviders { [weak self] providers in
+                DispatchQueue.main.async {
+                    self?.bridge.push(["type": "loginProviders", "providers": providers])
+                }
+            }
+        }
+        bridge.onStartLogin = { [weak self] providerId in
+            self?.session.startLogin(providerId: providerId)
+        }
+        bridge.onStats = { [weak self] in
+            guard let self else { return }
+            self.session.sessionStats { [weak self] stats in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if let stats {
+                        self.bridge.push(AgentSessionEvent.sessionStats(stats).jsRepresentation)
+                    } else {
+                        self.bridge.push(AgentSessionEvent.notice("该 agent 暂不支持统计").jsRepresentation)
+                    }
+                }
             }
         }
         bridge.onStop = { [weak self] in self?.session.cancel() }
@@ -388,6 +528,96 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                 + "常见原因：该 agent 的 MCP/hooks 启动慢（项目索引、网络拉取）。"
                 + "面板已保留，可重试或关闭后重开。"))
         }
+        // Seed the persisted queue mirror BEFORE connect: the handshake's
+        // .ready restores these rows to the page (see didEmit .ready).
+        queuedOutbox = initialQueuedOutbox
+        // GUI-side tools the agent may call (omp set_host_tools):
+        // attention, reveal-in-Finder, open-URL. Registered before
+        // connect so the handshake's registration sees them.
+        session.setHostTools(AgentHostTools(tools: [
+            AgentHostTools.Tool(
+                name: "goty_attention",
+                label: "Goty Attention",
+                description: "Bounce the goty dock icon and surface a notice in the agent pane. Use when you need the user to look at the GUI.",
+                parameters: ["type": "object",
+                             "properties": ["message": ["type": "string",
+                                                        "description": "Short reason for the attention request"]],
+                             "required": []] as [String: Any],
+                run: { arguments in
+                    let text = (arguments["message"] as? String) ?? "agent 请求你的注意"
+                    DispatchQueue.main.async {
+                        NSApp.requestUserAttention(.criticalRequest)
+                        self.bridge.push(AgentSessionEvent.notice("🔔 \(text)").jsRepresentation)
+                    }
+                    return ["content": [["type": "text",
+                                         "text": "attention requested"]]]
+                }),
+            AgentHostTools.Tool(
+                name: "goty_reveal",
+                label: "Goty Reveal in Finder",
+                description: "Reveal a file or directory in the Finder on the user's Mac.",
+                parameters: ["type": "object",
+                             "properties": ["path": ["type": "string",
+                                                     "description": "Absolute path to reveal"]],
+                             "required": ["path"]] as [String: Any],
+                run: { arguments in
+                    guard let path = arguments["path"] as? String else {
+                        return ["content": [["type": "text",
+                                             "text": "path required"]]]
+                    }
+                    // Reveal is a MAC-side action; a remote agent's
+                    // paths are not Mac paths — answer honestly
+                    // instead of probing this Mac's filesystem.
+                    guard self.session.runsOnThisMac else {
+                        return ["content": [["type": "text",
+                                             "text": "\(path) is on the remote host — cannot reveal it in the Mac's Finder"]]]
+                    }
+                    guard FileManager.default.fileExists(atPath: path) else {
+                        return ["content": [["type": "text",
+                                             "text": "path not found"]]]
+                    }
+                    DispatchQueue.main.async {
+                        NSWorkspace.shared.activateFileViewerSelecting(
+                            [URL(fileURLWithPath: path)])
+                    }
+                    return ["content": [["type": "text",
+                                         "text": "revealed \(path)"]]]
+                }),
+            AgentHostTools.Tool(
+                name: "goty_open",
+                label: "Goty Open URL",
+                description: "Open a URL or file in the user's default handler (browser/Finder).",
+                parameters: ["type": "object",
+                             "properties": ["url": ["type": "string",
+                                                    "description": "URL or file path to open"]],
+                             "required": ["url"]] as [String: Any],
+                run: { arguments in
+                    guard let raw = arguments["url"] as? String,
+                          let url = URL(string: raw),
+                          url.scheme != nil else {
+                        return ["content": [["type": "text",
+                                             "text": "invalid url"]]]
+                    }
+                    // URLs open on the Mac regardless of where the
+                    // agent runs; FILE paths are agent-host paths and
+                    // only open when the agent is local.
+                    if url.scheme == "file" || !raw.contains("://") {
+                        guard self.session.runsOnThisMac else {
+                            return ["content": [["type": "text",
+                                                 "text": "\(raw) is on the remote host — cannot open it on the Mac"]]]
+                        }
+                        guard FileManager.default.fileExists(atPath: raw) else {
+                            return ["content": [["type": "text",
+                                                 "text": "path not found"]]]
+                        }
+                    }
+                    DispatchQueue.main.async {
+                        NSWorkspace.shared.open(url)
+                    }
+                    return ["content": [["type": "text",
+                                         "text": "opened \(raw)"]]]
+                }),
+        ]))
         session.connect { [weak self] ok in
             if ProcessInfo.processInfo.environment["GOTY_AUTOLOAD_SESSION"] != nil {
                 print("GOTY_DEBUG: connect ok=\(ok)")
@@ -545,6 +775,14 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         }
     }
 
+    /// Mirror a queued follow-up for restart persistence (see
+    /// initialQueuedOutbox). The page keeps its own pendingQueue; this
+    /// copy exists only so a GUI restart can rebuild the dock rows.
+    private func recordQueued(_ text: String) {
+        queuedOutbox.append(text)
+        onQueuedOutboxChange?(queuedOutbox)
+    }
+
     /// Turn-state derivation — the ONE place wire events become lifecycle.
     /// Replay traffic derives identically to live (the store is cleared
     /// first, so a rebuild lands on the right state by construction).
@@ -553,13 +791,15 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             guard let self else { return }
             for event in events {
                 switch event {
-                case .ready, .configChanged, .userMessage, .userChunk, .messageChunk, .toolCallUpdate:
+                case .ready, .configChanged, .userMessage, .userChunk, .messageChunk, .toolCallUpdate, .chunkBoundary:
                     // First handshake-complete signal cancels the
                     // watchdog (configChanged arrives even when an
                     // adapter omits ready).
                     self.handshakeDone = true
                 case .turnEnded, .plan, .commandsChanged, .usageUpdate,
-                     .permissionRequested, .thoughtChunk, .starting:
+                     .permissionRequested, .thoughtChunk, .starting,
+                     .runtimeStatus, .notice, .backgroundJobs, .subagentUpdate,
+                     .entryMark, .openURL, .sessionStats:
                     break
                 case .transcriptReset:
                     // Adapter rebuild incoming (death healing): drop the
@@ -568,12 +808,24 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     self.bridge.push(["type": "clearTranscript"])
                 }
                 switch event {
+                case .openURL(let url):
+                    // Login flow: host-consumed — open the browser and
+                    // skip the page push (the store would reject it).
+                    if let target = URL(string: url) {
+                        NSWorkspace.shared.open(target)
+                    }
+                    continue
                 case .ready:
+                    // A reattach/handshake settles every transient: a
+                    // fork left in flight across a GUI restart would
+                    // otherwise deadlock the branch button forever
+                    // (forkInFlight never resets; the click dies
+                    // silently — 2026-09-01 分支无响应 report).
+                    if self.forkInFlight {
+                        self.forkInFlight = false
+                        self.bridge.push(["type": "branchState", "active": false])
+                    }
                     // A PENDING PERMISSION outranks everything: the agent
-                    // is blocked waiting for the user's answer. Overriding
-                    // awaitingPermission with thinking/idle (2026-08-31)
-                    // hid the revival card on reattach and left the agent
-                    // blocked forever behind a lying "思考中".
                     if self.pendingPrompt != nil {
                         self.setTurnState(.awaitingPermission)
                     } else if self.session.isWorking {
@@ -584,11 +836,46 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     } else {
                         self.setTurnState(.idle)
                     }
+                    // Restore the queued-outbox dock rows: omp reports
+                    // only a count, so the persisted texts re-seed the
+                    // page's pendingQueue. Delivered-while-closed texts
+                    // (count 0) drop here — they are in the replay.
+                    if self.lastQueueCount == 0 {
+                        if !self.queuedOutbox.isEmpty {
+                            self.queuedOutbox = []
+                            self.onQueuedOutboxChange?([])
+                        }
+                    } else if !self.queuedOutbox.isEmpty {
+                        // FIFO delivery ate the oldest; keep the suffix.
+                        if self.queuedOutbox.count > self.lastQueueCount {
+                            self.queuedOutbox = Array(
+                                self.queuedOutbox.suffix(self.lastQueueCount))
+                            self.onQueuedOutboxChange?(self.queuedOutbox)
+                        }
+                        for text in self.queuedOutbox {
+                            self.bridge.push(["type": "queueMessage", "text": text])
+                        }
+                    }
                     // Handshake settled the session id — new sessions have
                     // no title yet, adopted ones (reattach) may.
                     self.onSessionId?(self.session.sessionId)
                     self.refreshSessionTitle()
-                case .messageChunk, .thoughtChunk:
+                case .runtimeStatus(let status):
+                    // Queue-count reconciliation: omp delivers FIFO, so a
+                    // shrinking count retires the OLDEST mirrored texts;
+                    // zero clears the mirror. Keeps persisted state true
+                    // across turns (and GUI restarts).
+                    let count = status.queuedMessages ?? 0
+                    defer { self.lastQueueCount = count }
+                    guard count != self.queuedOutbox.count else { break }
+                    if count == 0 {
+                        self.queuedOutbox = []
+                    } else if count < self.queuedOutbox.count {
+                        self.queuedOutbox = Array(
+                            self.queuedOutbox.suffix(count))
+                    } else { break }
+                    self.onQueuedOutboxChange?(self.queuedOutbox)
+                case .messageChunk, .thoughtChunk, .chunkBoundary:
                     // Replay/history chunks also arrive as these events
                     // (ring reattach, session load). Only a LIVE turn
                     // (the adapter's isWorking) means 思考中 — history

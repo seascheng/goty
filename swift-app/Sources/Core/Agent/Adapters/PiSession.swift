@@ -1,62 +1,67 @@
 // goty - see CLAUDE.md for the working principles.
 import Foundation
 
-/// Which pi-mono harness a session drives. Both speak the same JSONL
-/// RPC runtime (`--mode rpc`); the differences stop at this enum:
-///
-/// - argv: omp takes `--cwd <dir>` (and `--resume <file>`); pi has no
-///   --cwd (the pane's cwd buckets its sessions) and resumes via
-///   `--session`;
-/// - handshake: omp negotiates protocol v2 and may send base64
-///   `rpc_chunk` frames that reassemble into one logical frame; pi has
-///   neither;
-/// - events: omp streams tool lifecycle as tool_execution_* frames and
-///   terminates runs with agent_end (pi settles via agent_settled and
-///   carries tools as content blocks);
-/// - recovery: omp renders its transcript from the session store (the
-///   same jsonl the omp TUI reads); pi replays get_messages.
-///
-/// Probed live on omp 18.0.10 / pinned by fixtures for pi 0.84.3.
-enum PiMonoHarness {
-    case pi
-    case omp
-
-    var shell: String { self == .omp ? "omp" : "pi" }
-}
-
 /// One harness of the pi-mono family over `--mode rpc` — JSONL frames
 /// on a LineChannel pane. Commands carry optional ids; responses match
 /// by id. Events stream as id-less frames; PiFrameMapper shapes them.
-final class PiSession: AgentSessioning {
+///
+/// This is the TRANSPORT CORE: framing, request/response, the replay
+/// gate, state polling and the event choke point. The two dialects of
+/// the family diverge through overridable hooks, NOT branches:
+///
+/// - `PiLegacySession` — pi 0.8x: immediate get_state handshake,
+///   get_messages replay, PiSessionStore;
+/// - `OmpSession` — omp 18: negotiate_protocol v2 + ready-gated
+///   handshake, session-store replay, host tools, branch, fast mode,
+///   login, export/stats, pushed command directory.
+///
+/// Probed live on omp 18.0.11 / pi 0.84.3.
+class PiSession: AgentSessioning {
     weak var delegate: AgentSessionDelegate?
 
     let cwd: String?
     private(set) var sessionId: String?
-    private(set) var isWorking = false
+    var isWorking = false
+    /// When the last user `send` went out (optimistic working window).
+    private var lastSendAt: Date?
+    /// Consecutive get_state reads reporting a fully idle agent while
+    /// `isWorking` is still true (missed agent_settled — e.g. /compact
+    /// runs no ordinary turn). Two in a row confirm it is not a
+    /// slow-to-start model or a one-off glitch.
+    private var idlePollStreak = 0
+    /// True when the handshake attached onto a turn already in flight
+    /// (omp attach). The store replay freezes that turn's tool cards at
+    /// their in-flight statuses; when the turn settles we rebuild the
+    /// transcript from the settled store once — see emit().
+    var reattachedMidTurn = false
+    private var staleTailRereadDone = false
+    /// Deferred ring-mined command directory (omp) awaiting the
+    /// handshake's sessionId; flushed in handleStateResponse.
+    var pendingCommandsCache: [AgentSlashCommand]?
+    /// Live tool calls in pending/in_progress. Long tool executions
+    /// read isStreaming=false on some agents; an open tool call vetoes
+    /// the missed-settle heal.
+    private var activeToolIds: Set<String> = []
     private(set) var configOptions: [AgentConfigOption] = []
     private(set) var commands: [AgentSlashCommand] = []
-
-    private let harness: PiMonoHarness
-    private let paneId: String
-    private let environment: [String: String]
-    private let daemon: SessionDaemon
+    let paneId: String
+    let environment: [String: String]
+    let daemon: SessionDaemon
     private let grid: SessionGrid
-    private let channel = LineChannel()
+    let channel = LineChannel()
 
     /// get_state's model descriptor — the thinking-level ladder is
     /// model-specific (thinking.efforts), so applyState needs it when
     /// get_available_models lands.
-    private var currentModelDescriptor: [String: Any]?
-    private var thinkingLevelCache: String?
-    private var cachedModelCatalog: [[String: Any]] = []
-    private let mapper: PiFrameMapper
-    private var pane: PaneSession?
+    var currentModelDescriptor: [String: Any]?
+    var thinkingLevelCache: String?
+    var cachedModelCatalog: [[String: Any]] = []
+    let mapper: PiFrameMapper
+    var pane: PaneSession?
     /// omp handshake gate: the ready frame (not spawn) starts
-    /// negotiate+get_state — see openPane.
-    private var handshakeStarted = false
-    private var readyCompletion: ((Bool) -> Void)?
-    private var readyTimeoutScheduled = false
-    private var respawnedForReadyTimeout = false
+    /// negotiate+get_state — see OmpSession.interceptProtocolFrame.
+    var handshakeStarted = false
+    var readyCompletion: ((Bool) -> Void)?
     private var connected = false
     var lastSessionId: String?
     /// Replay gate: on a resume spawn every event is buffered until the
@@ -69,8 +74,8 @@ final class PiSession: AgentSessioning {
     private var gatedEvents: [AgentSessionEvent] = []
     private var replayGateTimeout: DispatchWorkItem?
     private var resumeSessionId: String?
-    private var nextRequestID = 1
-    private let responseLock = NSLock()
+    var nextRequestID = 1
+    let responseLock = NSLock()
     private var pendingResponses: [String: ([String: Any]) -> Void] = [:]
 
     /// omp attach: ring frames are SIGNAL-ONLY while the authoritative
@@ -78,8 +83,9 @@ final class PiSession: AgentSessioning {
     /// order is not chronological; rendering it scrambled transcripts).
     private var suppressReplay = false
 
-    /// v2 chunked frames: base64 rpc_chunk sequences reassembled per
-    /// chunkId (≤64 MiB, ≤4096 parts — omp's ready-frame caps).
+    /// v2 chunked frames (omp): base64 rpc_chunk sequences reassembled
+    /// per chunkId (≤64 MiB, ≤4096 parts — omp's ready-frame caps).
+    /// Inert for pi — it never emits rpc_chunk.
     private struct ChunkAssembly {
         var count: Int
         var parts: [Int: Data]
@@ -89,25 +95,98 @@ final class PiSession: AgentSessioning {
 
     /// Integrity accounting.
     private(set) var framesRouted = 0
+    /// Extension dialog frames awaiting an answer: rpc frame id →
+    /// method ("select"/"confirm"/"input"/"editor"/"open_url").
+    private var pendingDialogs: [Int: String] = [:]
+    /// Host-owned tools (set_host_tools), registered once after the
+    /// first successful handshake (omp; OmpSession.registerExtras).
+    var hostTools: AgentHostTools?
+    /// 2s get_state poll: the status strip's context/throughput/queue
+    /// numbers move mid-turn and todoPhases need post-tool refreshes.
+    private var stateTimer: DispatchSourceTimer?
 
-    init(params: AgentPaneParams, harness: PiMonoHarness = .pi) {
-        self.harness = harness
+    /// The mapper's terminal-frame flag rides the initializer instead
+    /// of an open hook: Swift's two-phase init forbids self dispatch
+    /// before every stored property is initialized (the mapper
+    /// included). omp passes true; the pi default stays false.
+    init(params: AgentPaneParams, mapperTerminalOnAgentEnd: Bool = false) {
         self.paneId = params.paneId
         self.cwd = params.cwd
         self.environment = params.environment
         self.daemon = params.daemon
         self.grid = AgentPaneDefaults.grid
-        self.mapper = PiFrameMapper(terminalOnAgentEnd: harness == .omp)
+        self.mapper = PiFrameMapper(terminalOnAgentEnd: mapperTerminalOnAgentEnd)
         self.resumeSessionId = params.restoredSessionId
-        // The catalog rides the FIRST configChanged: without it the
-        // models dropdown waits on a second emit that queues behind the
-        // transcript replay's render — seconds of "empty models" for a
-        // command that itself answers in 10ms.
-        self.cachedModelCatalog = Self.loadCachedCatalog()
         channel.onOutbound = { [weak self] in self?.pane?.sendInput($0) }
         channel.onFrame = { [weak self] frame, _ in
             self?.handleFrame(frame)
         }
+    }
+
+    // MARK: - dialect hooks
+
+    /// Process name for argv, diagnostics and failure messages.
+    var shellName: String { "pi" }
+    /// The pane (and its store) live on the daemon's machine.
+    var runsOnThisMac: Bool { !daemon.isRemote }
+    /// omp renders its transcript from the session store, not the ring.
+    var suppressesRingReplay: Bool { false }
+    /// Dialect resume/argv decoration (omp: --cwd/--resume + replay
+    /// gate; pi: --session when the store still has it).
+    func appendSpawnArgs(_ args: inout [String], resume sessionId: String?) {}
+    /// Spawn handshake kickoff: omp waits for the ready frame (or its
+    /// timeout probe), pi asks immediately.
+    func beginHandshakeAfterSpawn(completion: ((Bool) -> Void)?) {
+        handshake(completion: completion)
+    }
+    /// The handshake's state round-trip: omp negotiates protocol v2
+    /// first, pi goes straight to get_state.
+    func requestAgentState(_ completion: @escaping ([String: Any]) -> Void) {
+        request("get_state", completion: completion)
+    }
+    /// omp: the handshake attached onto a live turn — adopt streaming
+    /// as working state.
+    func adoptAttachedState(_ state: [String: Any]) {}
+    /// Command directory + dialect extras right after the handshake
+    /// completes (pi: get_commands; omp: cache/probe + models).
+    func loadCommandsAfterHandshake() {}
+    /// omp-only extras after a successful handshake: host tool
+    /// definitions and the subagent progress subscription.
+    func registerExtras() {}
+    /// Persisted-session directory filtered to the pane cwd. Async: the
+    /// omp dialect answers from the DAEMON's store (remote panes), pi
+    /// from the local PiSessionStore — hooks own their threading and
+    /// must always call the completion.
+    func sessionSummaries(_ completion: @escaping ([AgentSessionSummary]) -> Void) {
+        completion([])
+    }
+    /// Post-load resync (pi replays get_messages; omp renders through
+    /// the replay gate already opened by the spawn).
+    func completeSessionLoad(_ completion: @escaping (Bool) -> Void) {
+        completion(true)
+    }
+    /// Protocol plumbing interception (omp: the ready frame of a LIVE
+    /// pane arrives only inside the ring replay and starts the
+    /// handshake). true = frame consumed.
+    func interceptProtocolFrame(_ frame: [String: Any]) -> Bool { false }
+    /// Authoritative history for the replay gate (omp: the session
+    /// store, read through the daemon on remote panes). nil = nothing
+    /// stored → gate releases bare. Hooks own their threading and must
+    /// always call the completion.
+    func readStoredHistory(_ sid: String,
+                           completion: @escaping (StoredSessionHistory?) -> Void) {
+        completion(nil)
+    }
+    /// Persist the ring-mined command directory (omp disk cache).
+    func cacheCommands(_ list: [AgentSlashCommand]) {}
+
+
+    /// Authoritative history snapshot a resume/reattach rebuild renders
+    /// from, dialect-neutral so the replay gate stays in the core.
+    struct StoredSessionHistory {
+        var events: [AgentSessionEvent]
+        var openTools: Int
+        var aborted: Bool
     }
 
     // MARK: - AgentSessioning
@@ -144,40 +223,14 @@ final class PiSession: AgentSessioning {
             }
         }
         var args = ["--mode", "rpc"]
-        switch harness {
-        case .omp:
-            // omp buckets its sessions by --cwd; the pane cwd alone is
-            // not enough for a fresh spawn from a Finder-launched GUI.
-            if let cwd, !cwd.isEmpty { args += ["--cwd", cwd] }
-            // omp's --resume wants the exact session file path. The
-            // resume also opens the replay gate: the continued turn's
-            // live chunks race the store read, and only the gate keeps
-            // the final transcript free of wipes, duplicates, and lost
-            // turn stats (see beginReplayGate).
-            if let sessionId,
-               let url = OmpSessionStore.fileURL(sessionId: sessionId) {
-                args += ["--resume", url.path]
-                beginReplayGate(sessionId: sessionId)
-            }
-        case .pi:
-            // pi EXITS when --session names an id its store no longer
-            // has ("No session found matching '…'" → EXITED → the
-            // pane reported 进程已退出 forever). Only resume ids the
-            // store can still find; a missing one boots fresh.
-            if let sessionId, PiSessionStore.find(sessionId: sessionId) != nil {
-                args += ["--session", sessionId]
-            }
-        }
+        appendSpawnArgs(&args, resume: sessionId)
         // omp: the handshake is gated on the ready frame (see
-        // handleFrame) — the process answers stdin normally once its
-        // RPC loop is up; a burst written before that strands all but
-        // the first line (PTY line discipline, probed 2026-08-31).
-        // A pane left over from the pre-migration ACP era speaks a
-        // DIFFERENT protocol: its output has no ready frame, so the
-        // handshake would never fire — handleReadyTimeout respawns
-        // with the rpc argv and --resume below.
+        // OmpSession.interceptProtocolFrame) — the process answers
+        // stdin normally once its RPC loop is up; a burst written
+        // before that strands all but the first line (PTY line
+        // discipline, probed 2026-08-31).
         guard let opened = daemon.openPaneWithAttachment(
-            id: paneId, cwd: cwd, shell: harness.shell, args: args,
+            id: paneId, cwd: cwd, shell: shellName, args: args,
             environment: environment, grid: grid,
             noEcho: true, ringBytes: 16_777_216,
             onFrame: { [weak self] kind, data in
@@ -196,47 +249,7 @@ final class PiSession: AgentSessioning {
         }
         opened.session.start()
         pane = opened.session
-        // pi answers the handshake immediately after spawn (its node
-        // runtime has no PTY first-line stranding); omp waits for the
-        // ready frame — live on a fresh spawn, or inside the ring
-        // replay when attaching to a live pane.
-        if harness == .omp {
-            handshakeStarted = false
-            readyCompletion = completion
-            // A pane left over from the pre-migration ACP era speaks a
-            // DIFFERENT protocol: its output has no ready frame, so the
-            // handshake would never fire and the GUI would stall into
-            // the 90s timeout. Attaching to it can't be distinguished
-            // from a slow-booting rpc process up front — give the ready
-            // frame a short window, then respawn with the rpc argv and
-            // --resume (the session itself lives in the store file).
-            if !readyTimeoutScheduled {
-                readyTimeoutScheduled = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
-                    self?.handleReadyTimeout()
-                }
-            }
-        } else {
-            handshake(completion: completion)
-        }
-    }
-
-    /// The ready frame never arrived: the pane is either an old ACP
-    /// process or a dead process the daemon still lists. Respawn once
-    /// with the current harness argv; the next openPane's ready frame
-    /// (or the pane's exit) resolves the situation.
-    private func handleReadyTimeout() {
-        guard harness == .omp, !handshakeStarted else { return }
-        if respawnedForReadyTimeout { return }
-        respawnedForReadyTimeout = true
-        NSLog("GOTY pi-session: ready timeout — respawning %@ pane", harness.shell)
-        pane?.close()
-        pane = nil
-        // Acknowledged kill, same as load(): an unacknowledged one races
-        // the respawn's ATTACH probe and resurrects the dead pane.
-        daemon.killPaneAndWait(id: paneId) { [weak self] _ in
-            self?.openPane(resume: self?.resumeSessionId, completion: self?.readyCompletion)
-        }
+        beginHandshakeAfterSpawn(completion: completion)
     }
 
     /// Shared get_state handler: the pi immediate handshake and the omp
@@ -245,98 +258,48 @@ final class PiSession: AgentSessioning {
                                      completion: ((Bool) -> Void)?) {
         guard response["success"] as? Bool == true,
               let state = response["data"] as? [String: Any] else {
-            delegate?.sessionDidFail(self, reason: "\(harness.shell) get_state 失败")
+            delegate?.sessionDidFail(self, reason: "\(shellName) get_state 失败")
             completion?(false)
             return
         }
         handshakeStarted = true
         sessionId = state["sessionId"] as? String ?? sessionId
+        // Ring-mined command directory may arrive BEFORE the handshake
+        // sets sessionId (the whole boot sequence, ready frame included,
+        // rides the ring) — flush the deferred cache write here.
+        if let pending = pendingCommandsCache {
+            pendingCommandsCache = nil
+            cacheCommands(pending)
+        }
         currentModelDescriptor = state["model"] as? [String: Any]
         thinkingLevelCache = state["thinkingLevel"] as? String
         applyState(state)
-        // omp: the ring is signal-only; the authoritative transcript
-        // comes from the session store (user side included, aborted
-        // turns settled). pi: the ring replay already rendered through
-        // the mapper (replaying mode emits the user echo).
-        if harness == .omp {
-            isWorking = state["isStreaming"] as? Bool ?? false
-            // History lands through the replay gate (see openPane); no
-            // direct replay here — the gate owns the ordering.
-        }
+        adoptAttachedState(state)
         var events: [AgentSessionEvent] = [.ready]
         if !configOptions.isEmpty {
             events.append(.configChanged(configOptions))
         }
         emit(events)
-        if harness == .pi {
-            fetchCommands()
-        } else {
-            fetchAvailableModels()
-        }
+        loadCommandsAfterHandshake()
+        startStatePolling()
+        registerExtras()
         completion?(true)
     }
 
-    /// omp: the config buttons' dropdown contents. get_state carries
-    /// only the CURRENT model; the selectable list comes from
-    /// get_available_models (model ids as provider/id selectors — the
-    /// same shape set_model takes — and the current model's
-    /// thinking.efforts ladder).
-    private func fetchAvailableModels() {
-        request("get_available_models") { [weak self] response in
-            guard let self,
-                  response["success"] as? Bool == true,
-                  let data = response["data"] as? [String: Any],
-                  let models = data["models"] as? [[String: Any]] else { return }
-            self.cachedModelCatalog = models
-            Self.persistCatalog(models)
-            self.rebuildConfigOptions()
-        }
+    /// Publish a freshly sourced command directory.
+    func adoptCommands(_ list: [AgentSlashCommand]) {
+        guard !list.isEmpty else { return }
+        commands = list
+        emit([.commandsChanged(list)])
     }
 
-    /// Disk cache for the model catalog: the first configChanged of a
-    /// fresh PiSession carries full dropdown choices without waiting
-    /// for the (10ms, but render-queued) catalog round-trip. Refreshed
-    /// on every successful handshake.
-    private static var catalogCacheURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("goty/omp-model-catalog.json")
-    }
-
-    private static func loadCachedCatalog() -> [[String: Any]] {
-        guard let data = try? Data(contentsOf: catalogCacheURL),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              obj["v"] as? Int == 1,
-              let models = obj["models"] as? [[String: Any]] else { return [] }
-        return models
-    }
-
-    private static func persistCatalog(_ models: [[String: Any]]) {
-        guard let data = try? JSONSerialization.data(
-            withJSONObject: ["v": 1, "models": models]) else { return }
-        try? data.write(to: catalogCacheURL, options: .atomic)
-    }
-
-    /// Rebuild + republish the config options from the cached model
-    /// descriptor / thinking level (after get_available_models lands or
-    /// a set_model / set_thinking_level response moves a value).
-    private func rebuildConfigOptions() {
-        var state: [String: Any] = [:]
-        if let model = currentModelDescriptor { state["model"] = model }
-        if let thinking = thinkingLevelCache { state["thinkingLevel"] = thinking }
-        applyState(state, availableModels: cachedModelCatalog)
-        if !configOptions.isEmpty {
-            emit([.configChanged(configOptions)])
-        }
-    }
-
-    /// ready-gated handshake, one command in flight at a time. omp's
-    /// PTY delivers ONE line per read until its reader loop spins up,
-    /// so a two-line burst written at once can strand the second line
-    /// forever (probed 2026-08-31: prewrite boots answered negotiate
-    /// but never get_state). Sequential request→response→request is
-    /// also the shape gooey-pi's runtime uses against the same
-    /// protocol.
-    private func handshake(completion: ((Bool) -> Void)?) {
+    /// Handshake, one command in flight at a time. omp's PTY delivers
+    /// ONE line per read until its reader loop spins up, so a two-line
+    /// burst written at once can strand the second line forever (probed
+    /// 2026-08-31: prewrite boots answered negotiate but never
+    /// get_state). Sequential request→response→request is also the
+    /// shape gooey-pi's runtime uses against the same protocol.
+    func handshake(completion: ((Bool) -> Void)?) {
         // The host's 90s watchdog is disarmed by our early .ready (the
         // session-name render); a genuinely broken handshake must still
         // fail loudly — 20s ceiling here.
@@ -344,7 +307,7 @@ final class PiSession: AgentSessioning {
         let failAfter = DispatchWorkItem { [weak self] in
             guard let self, !finished else { return }
             finished = true
-            self.delegate?.sessionDidFail(self, reason: "\(self.harness.shell) 握手超时")
+            self.delegate?.sessionDidFail(self, reason: "\(self.shellName) 握手超时")
             completion?(false)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: failAfter)
@@ -354,59 +317,18 @@ final class PiSession: AgentSessioning {
             failAfter.cancel()
             completion?(ok)
         }
-        // negotiate_protocol is an omp extension (v2 chunked frames);
-        // base pi 0.8x answers it success=false and would fail the
-        // whole handshake (2026-08-31: every pi panel showed 连接失败).
-        // pi goes straight to get_state.
-        if harness == .omp {
-            request("negotiate_protocol", ["protocolVersion": 2]) { [weak self] response in
-                guard let self else { return }
-                guard response["success"] as? Bool == true else {
-                    self.delegate?.sessionDidFail(self, reason: "omp 不支持 RPC v2，请升级 CLI")
-                    finish(false)
-                    return
-                }
-                request("get_state") { [weak self] response in
-                    self?.handleStateResponse(response, completion: finish)
-                }
-            }
-        } else {
-            request("get_state") { [weak self] response in
-                self?.handleStateResponse(response, completion: finish)
-            }
+        requestAgentState { [weak self] response in
+            self?.handleStateResponse(response, completion: finish)
         }
-    }
-
-    private func fetchCommands() {
-        request("get_commands") { [weak self] response in
-            guard let self, response["success"] as? Bool == true else { return }
-            // Response wraps the list: {"commands":[…]} (verified
-            // live); a bare array is tolerated for forward compat.
-            let payload = response["data"] as? [String: Any]
-            let data = (payload?["commands"] as? [[String: Any]])
-                ?? (response["data"] as? [[String: Any]]) ?? []
-            self.applyCommands(data)
-        }
-    }
-
-    private func applyCommands(_ data: [[String: Any]]) {
-        let commands: [AgentSlashCommand] = data.compactMap { raw in
-            guard let name = raw["name"] as? String else { return nil }
-            return AgentSlashCommand(name: name,
-                                     description: raw["description"] as? String,
-                                     inputHint: (raw["input"] as? [String: Any])?["hint"] as? String)
-        }
-        guard !commands.isEmpty else { return }
-        self.commands = commands
-        emit([.commandsChanged(commands)])
     }
 
     /// Opens the replay gate for a resume spawn: starts reading the
-    /// store immediately (it races the handshake, not the other way
-    /// around) and buffers every emitted event until the authoritative
-    /// history is in. A 5s ceiling releases the gate even if the store
-    /// read fails — the pane must never freeze on its own history.
-    private func beginReplayGate(sessionId sid: String) {
+    /// stored history immediately (it races the handshake, not the
+    /// other way around) and buffers every emitted event until the
+    /// authoritative history is in. A 5s ceiling releases the gate even
+    /// if the read fails — the pane must never freeze on its own
+    /// history.
+    func beginReplayGate(sessionId sid: String) {
         replayGateActive = true
         gatedEvents.removeAll()
         let timeout = DispatchWorkItem { [weak self] in
@@ -414,10 +336,11 @@ final class PiSession: AgentSessioning {
         }
         replayGateTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeout)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let stored = OmpSessionStore.load(sessionId: sid)
+        readStoredHistory(sid) { [weak self] stored in
+            let stored = stored
+                ?? StoredSessionHistory(events: [], openTools: 0, aborted: false)
             DispatchQueue.main.async {
-                self?.finishReplayGate(with: stored.events)
+                self?.finishReplayGate(with: stored)
             }
         }
     }
@@ -427,36 +350,54 @@ final class PiSession: AgentSessioning {
     /// everything in order. If the 5s ceiling already released the
     /// gate, the history still MUST land (never dropped) — it replays
     /// over whatever rendered in the meantime.
-    private func finishReplayGate(with storedEvents: [AgentSessionEvent]) {
-        guard !storedEvents.isEmpty else {
+    private func finishReplayGate(with stored: StoredSessionHistory) {
+        guard !stored.events.isEmpty else {
             releaseReplayGate()
             return
         }
         var events: [AgentSessionEvent]
         if replayGateActive {
             replayGateTimeout?.cancel()
-            events = [.transcriptReset] + storedEvents + gatedEvents
+            events = [.transcriptReset] + stored.events + gatedEvents
             gatedEvents = []
             replayGateActive = false
         } else {
-            events = [.transcriptReset] + storedEvents
+            events = [.transcriptReset] + stored.events
         }
         delegate?.session(self, didEmit: events)
+        // Stale-tail heal: the read can race the turn settle (restart
+        // mid-tool → store write lands after our read). An idle,
+        // non-aborted session showing open tools is definitionally a
+        // stale read — the completion frames predated attach and will
+        // never re-fire. One delayed re-read settles the tail. Skipped
+        // while a turn runs (live frames close the cards) and never
+        // twice (an aborted tail legitimately stays open).
+        if stored.openTools > 0, !stored.aborted,
+           !isWorking, !staleTailRereadDone, let sid = sessionId {
+            staleTailRereadDone = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self, !self.isWorking else { return }
+                self.beginReplayGate(sessionId: sid)
+            }
+        }
     }
 
     /// Ceiling release (store read failed or hung): buffered events go
     /// out as-is, without the history.
     private func releaseReplayGate() {
         guard replayGateActive else { return }
+        replayGateTimeout?.cancel()
+        replayGateActive = false
         let events = gatedEvents
         gatedEvents = []
-        replayGateActive = false
         delegate?.session(self, didEmit: events)
     }
 
     func send(_ text: String) {
         guard !isWorking else { return }
         isWorking = true
+        lastSendAt = Date()
+        idlePollStreak = 0
         channel.send(["id": "u\(nextRequestID)", "type": "prompt", "message": text])
         nextRequestID += 1
     }
@@ -465,50 +406,30 @@ final class PiSession: AgentSessioning {
         channel.send(["type": "abort"])
     }
 
-    func setConfigOption(id: String, value: String) {
-        guard harness == .omp else { return }
-        switch id {
-        case "model":
-            // value is the provider/id selector applyState built; set_model
-            // takes it split (verified live). Bare ids pass through.
-            let parts = value.split(separator: "/", maxSplits: 1).map(String.init)
-            var extra: [String: Any] = [:]
-            if parts.count == 2 {
-                extra["provider"] = parts[0]
-                extra["modelId"] = parts[1]
-            } else {
-                extra["modelId"] = value
-            }
-            request("set_model", extra) { [weak self] response in
-                guard let self, response["success"] as? Bool == true else { return }
-                if let data = response["data"] as? [String: Any] {
-                    self.currentModelDescriptor = (data["model"] as? [String: Any])
-                        ?? self.currentModelDescriptor
-                }
-                self.rebuildConfigOptions()
-            }
-        case "thinking":
-            request("set_thinking_level", ["level": value]) { [weak self] response in
-                guard let self, response["success"] as? Bool == true else { return }
-                self.thinkingLevelCache = value
-                self.rebuildConfigOptions()
-            }
+    func setConfigOption(id: String, value: String) {}
+
+    func respondPermission(requestID: String, optionId: String) {
+        // Every interactive prompt in rpc mode rides extension dialogs
+        // (approvals = select). Answer by the recorded method shape:
+        // select/input/editor → value, confirm → boolean, the rest →
+        // cancelled.
+        guard let id = Int(requestID),
+              let method = pendingDialogs.removeValue(forKey: id) else { return }
+        switch method {
+        case "select", "input", "editor":
+            channel.send(["type": "extension_ui_response",
+                          "id": id, "value": optionId])
+        case "confirm":
+            channel.send(["type": "extension_ui_response",
+                          "id": id, "confirmed": optionId == "confirm"])
         default:
-            break
+            channel.send(["type": "extension_ui_response",
+                          "id": id, "cancelled": true])
         }
     }
 
-    func respondPermission(requestID: String, optionId: String) {
-        // rpc mode auto-approves per the agent's own config in v1; no
-        // permission requests are mapped, so an answer here is a no-op.
-    }
-
-
     func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let summaries = self.harness == .omp
-                ? OmpSessionStore.summaries(cwd: self.cwd)
-                : PiSessionStore.summaries(cwd: self.cwd)
+        sessionSummaries { summaries in
             DispatchQueue.main.async {
                 completion(summaries)
             }
@@ -516,7 +437,7 @@ final class PiSession: AgentSessioning {
     }
 
     func load(sessionId: String, completion: ((Bool) -> Void)? = nil) {
-        // Both harnesses swap sessions the same way: kill the pane (or
+        // Both dialects swap sessions the same way: kill the pane (or
         // the reopen would ATTACH to the old process), respawn with the
         // resume flag, and let the handshake path render — omp from the
         // store, pi from get_messages. The kill must be ACKNOWLEDGED
@@ -529,39 +450,247 @@ final class PiSession: AgentSessioning {
         pane?.close()
         pane = nil
         daemon.killPaneAndWait(id: paneId) { [weak self] _ in
-            self?.openPane(resume: sessionId) { [weak self] ok in
+            guard let self else { return }
+            self.openPane(resume: sessionId) { [weak self] ok in
                 guard let self, ok else {
                     completion?(false)
                     return
                 }
-                if self.harness == .pi {
-                    self.request("get_messages") { [weak self] response in
-                        guard let self,
-                              response["success"] as? Bool == true,
-                              let data = response["data"] as? [String: Any],
-                              let messages = data["messages"] as? [[String: Any]] else {
-                            completion?(false)
-                            return
-                        }
-                        let replayMapper = PiFrameMapper()
-                        var events: [AgentSessionEvent] = []
-                        for message in messages {
-                            events += replayMapper.mapReplayedMessage(message)
-                        }
-                        self.emit(events)
-                        completion?(true)
-                    }
-                } else {
-                    completion?(true)
-                }
+                self.completeSessionLoad { ok in completion?(ok) }
             }
         }
     }
 
     func shutdown() {
+        stopStatePolling()
         pane?.close()
         pane = nil
         connected = false
+    }
+
+    // MARK: - live state (get_state poll)
+
+    /// Runtime telemetry + plan snapshot from a get_state payload. The
+    /// plan event carries the WHOLE todoPhases list (empty = clear the
+    /// panel); the web store dedups unchanged snapshots.
+    private func applyLiveState(_ state: [String: Any]) {
+        var events: [AgentSessionEvent] = [.plan(Self.planEntries(state)),
+                                           .runtimeStatus(Self.runtimeStatus(state))]
+        // Missed-settle heal: some turns (notably /compact) never emit
+        // agent_settled, leaving isWorking stuck. get_state is the
+        // authority here — two consecutive fully-idle reads (not
+        // streaming, nothing queued, not compacting), no live tool
+        // call, and >4s past the optimistic send window, force the
+        // turn closed. emit() clears isWorking on turnEnded itself.
+        let streaming = state["isStreaming"] as? Bool ?? false
+        let queued = state["queuedMessageCount"] as? Int ?? 0
+        let compacting = state["isCompacting"] as? Bool ?? false
+        if Self.missedSettleHeal(isWorking: isWorking, streaming: streaming,
+                                 queued: queued, compacting: compacting,
+                                 activeToolCount: activeToolIds.count,
+                                 secondsSinceSend: lastSendAt.map(
+                                     Date().timeIntervalSince)) {
+            idlePollStreak += 1
+            if idlePollStreak >= 2 {
+                idlePollStreak = 0
+                events.append(.turnEnded(stopReason: nil))
+            }
+        } else {
+            idlePollStreak = 0
+        }
+        emit(events)
+    }
+
+    /// Pure verdict for ONE idle get_state read (streak counting stays
+    /// with the poll loop): should this read count toward forcing the
+    /// turn closed? Extracted static so agenttest can pin the contract.
+    static func missedSettleHeal(isWorking: Bool, streaming: Bool,
+                                 queued: Int, compacting: Bool,
+                                 activeToolCount: Int,
+                                 secondsSinceSend: Double?) -> Bool {
+        // Any sign of life vetoes the heal: still streaming, queued
+        // follow-ups, an open compaction, a tool mid-flight, or a send
+        // so recent the agent may just not have started yet.
+        guard isWorking, !streaming, queued == 0, !compacting,
+              activeToolCount == 0 else { return false }
+        guard let since = secondsSinceSend, since > 4 else { return false }
+        return true
+    }
+
+    private static func planEntries(_ state: [String: Any]) -> [AgentPlanEntry] {
+        let phases = state["todoPhases"] as? [[String: Any]] ?? []
+        var entries: [AgentPlanEntry] = []
+        for phase in phases {
+            let phaseName = phase["name"] as? String
+            let tasks = phase["tasks"] as? [[String: Any]] ?? []
+            for task in tasks {
+                guard let content = task["content"] as? String else { continue }
+                entries.append(AgentPlanEntry(content: content,
+                                              priority: phaseName,
+                                              status: task["status"] as? String))
+            }
+        }
+        return entries
+    }
+
+    private static func runtimeStatus(_ state: [String: Any]) -> AgentRuntimeStatus {
+        let context = state["contextUsage"] as? [String: Any]
+        var status = AgentRuntimeStatus()
+        status.fastModeEnabled = state["fastModeEnabled"] as? Bool
+        status.fastModeActive = state["fastModeActive"] as? Bool
+        status.contextTokens = context?["tokens"] as? Int
+        status.contextWindow = context?["contextWindow"] as? Int
+        // omp keeps reporting the LAST turn's rate after settle; only a
+        // live turn's number means anything (isStreaming is turn-level).
+        status.tokensPerSecond = (state["isStreaming"] as? Bool ?? false)
+            ? state["tokensPerSecond"] as? Double : nil
+        status.queuedMessages = state["queuedMessageCount"] as? Int
+        status.isCompacting = state["isCompacting"] as? Bool
+        status.isStreaming = state["isStreaming"] as? Bool
+        return status
+    }
+
+    /// Steady 2s get_state cadence (one local RPC) — covers mid-turn
+    /// telemetry drift and post-tool todoPhases refreshes without
+    /// event-specific bookkeeping.
+    private func startStatePolling() {
+        guard stateTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 2, repeating: 2)
+        timer.setEventHandler { [weak self] in self?.refreshState() }
+        timer.resume()
+        stateTimer = timer
+    }
+
+    private func stopStatePolling() {
+        stateTimer?.cancel()
+        stateTimer = nil
+    }
+
+    func refreshState(completion: ((Bool) -> Void)? = nil) {
+        request("get_state") { [weak self] response in
+            guard let self else {
+                completion?(false)
+                return
+            }
+            guard response["success"] as? Bool == true,
+                  let state = response["data"] as? [String: Any] else {
+                completion?(false)
+                return
+            }
+            // A session switch (branch → new session file) shows up
+            // here first — adopt the id so persistence and title
+            // refreshes target the new conversation.
+            sessionId = state["sessionId"] as? String ?? sessionId
+            currentModelDescriptor = state["model"] as? [String: Any] ?? currentModelDescriptor
+            thinkingLevelCache = state["thinkingLevel"] as? String ?? thinkingLevelCache
+            applyLiveState(state)
+            completion?(true)
+        }
+    }
+
+    // MARK: - extension UI (approvals, dialogs, login URLs)
+
+    private func handleExtensionUI(_ frame: [String: Any]) {
+        guard let rawId = frame["id"] as? Int else { return }
+        let method = frame["method"] as? String ?? "select"
+        let title = (frame["title"] as? String) ?? (frame["message"] as? String)
+        switch method {
+        case "select":
+            let options = ((frame["options"] as? [String]) ?? [])
+                .map { AgentPermissionOption(optionId: $0, name: $0, kind: nil) }
+            guard !options.isEmpty else { return }
+            pendingDialogs[rawId] = method
+            emit([.permissionRequested(AgentPermissionPrompt(
+                requestID: String(rawId), toolCallTitle: title,
+                options: options, dialog: "select"))])
+        case "confirm":
+            pendingDialogs[rawId] = method
+            emit([.permissionRequested(AgentPermissionPrompt(
+                requestID: String(rawId), toolCallTitle: title,
+                options: [
+                    AgentPermissionOption(optionId: "confirm",
+                                          name: "确认", kind: "allow"),
+                    AgentPermissionOption(optionId: "cancel",
+                                          name: "取消", kind: nil),
+                ], dialog: "confirm"))])
+        case "input", "editor":
+            pendingDialogs[rawId] = method
+            emit([.permissionRequested(AgentPermissionPrompt(
+                requestID: String(rawId), toolCallTitle: title,
+                options: [], dialog: method,
+                placeholder: frame["placeholder"] as? String,
+                defaultValue: (frame["value"] as? String) ?? (frame["default"] as? String)))])
+        case "notify":
+            let message = (frame["message"] as? String) ?? ""
+            let heading = frame["title"] as? String
+            emit([.notice(heading.map { $0 + ": " + message } ?? message)])
+        case "setStatus":
+            if let text = (frame["message"] as? String) ?? (frame["status"] as? String) {
+                emit([.notice(text)])
+            }
+        case "open_url":
+            // Login flow: the host opens the browser; the response only
+            // records the round trip.
+            guard let url = frame["url"] as? String else { return }
+            emit([.openURL(url)])
+            channel.send(["type": "extension_ui_response",
+                          "id": rawId, "value": "opened"])
+        default:
+            channel.send(["type": "extension_ui_response",
+                          "id": rawId, "cancelled": true])
+        }
+    }
+
+    // MARK: - host tools (agent → GUI callbacks)
+
+    func setHostTools(_ tools: AgentHostTools) {
+        hostTools = tools
+        registerExtras()
+    }
+
+    private func handleHostToolCall(_ frame: [String: Any]) {
+        guard let id = frame["id"] as? String,
+              let name = frame["toolName"] as? String else { return }
+        let arguments = frame["arguments"] as? [String: Any] ?? [:]
+        guard let tool = hostTools?.tools.first(where: { $0.name == name }) else {
+            channel.send(["type": "host_tool_result", "id": id, "isError": true,
+                          "result": ["content": [["type": "text",
+                                                 "text": "goty has no host tool named \(name)"]]] as [String: Any]])
+            return
+        }
+        channel.send(["type": "host_tool_result", "id": id,
+                      "result": tool.run(arguments)])
+    }
+
+    // MARK: - protocol capabilities
+
+    func steer(_ text: String) {
+        guard isWorking else { return send(text) }
+        channel.send(["type": "steer", "message": text])
+    }
+
+    func followUp(_ text: String) {
+        guard isWorking else { return send(text) }
+        channel.send(["type": "follow_up", "message": text])
+    }
+
+    // omp-only capabilities: default implementations mirror the
+    // AgentSessioning extension defaults so unsupported dialects
+    // no-op identically; OmpSession overrides each with the real RPC.
+
+    func setFastMode(enabled: Bool) {}
+    func loginProviders(completion: @escaping ([[String: Any]]) -> Void) {
+        completion([])
+    }
+    func startLogin(providerId: String) {}
+    func exportHTML(completion: @escaping (String?) -> Void) { completion(nil) }
+    func sessionStats(completion: @escaping ([String: Any]?) -> Void) { completion(nil) }
+    func branch(entryId: String, completion: @escaping (Bool) -> Void) {
+        completion(false)
+    }
+    func forkToNewSession(entryId: String, completion: @escaping (String?) -> Void) {
+        completion(nil)
     }
 
     // MARK: - plumbing
@@ -574,7 +703,7 @@ final class PiSession: AgentSessioning {
             // Ring replay (reattach). pi renders it through the mapper
             // with the user echo on; omp suppresses rendering entirely —
             // its transcript lands from the session store instead.
-            if harness == .omp { suppressReplay = true }
+            if suppressesRingReplay { suppressReplay = true }
             mapper.replaying = true
             channel.feed([UInt8](data), replay: true)
             mapper.replaying = false
@@ -593,7 +722,7 @@ final class PiSession: AgentSessioning {
             pane?.close()
             pane = nil
             daemon.killPane(id: paneId)
-            delegate?.sessionDidFail(self, reason: "\(harness.shell) 进程已退出")
+            delegate?.sessionDidFail(self, reason: "\(shellName) 进程已退出")
         default:
             break
         }
@@ -607,19 +736,9 @@ final class PiSession: AgentSessioning {
             }
             return
         }
-        // Protocol plumbing is exempt from replay suppression: the
-        // ready frame of a LIVE pane arrives only inside the ring
-        // replay (the process emitted it once at boot), so gating the
-        // handshake behind suppressReplay deadlocks attach. Stale
-        // replayed responses simply match no pending id and drop.
-        if frame["type"] as? String == "ready",
-           harness == .omp, !handshakeStarted {
-            handshakeStarted = true
-            let completion = readyCompletion
-            readyCompletion = nil
-            handshake(completion: completion)
-            return
-        }
+        // Dialect protocol plumbing intercepts first (omp's ready
+        // frame); stale replayed responses match no pending id and drop.
+        if interceptProtocolFrame(frame) { return }
         if frame["type"] as? String == "response",
            let id = frame["id"] as? String {
             responseLock.lock()
@@ -629,12 +748,39 @@ final class PiSession: AgentSessioning {
             return
         }
         // Transcript frames from the ring replay stay suppressed for
-        // omp: the session store is the authoritative transcript.
-        if suppressReplay { return }
+        // omp: the session store is the authoritative transcript. The
+        // command directory is EXEMPT: omp emits available_commands_
+        // update once at boot, an attach must mine it from the ring
+        // replay (the process never resends), and the capture point
+        // below writes the disk cache for the next attach whose ring
+        // has rotated past boot.
+        let frameType = frame["type"] as? String
+        if suppressReplay && frameType != "available_commands_update" { return }
+        if frameType == "extension_ui_request" {
+            handleExtensionUI(frame)
+            return
+        }
+        if frameType == "host_tool_call" {
+            handleHostToolCall(frame)
+            return
+        }
+        // State-affecting events the mapper has no case for: refresh
+        // get_state so the plan panel, dropdowns and status strip
+        // follow (todo tool ran, model switched elsewhere, todos
+        // auto-cleared).
+        if frameType == "todo_auto_clear" || frameType == "model_changed"
+            || frameType == "thinking_level_changed" {
+            refreshState()
+        }
+        if frameType == "tool_execution_end",
+           (frame["toolName"] as? String)?.lowercased() == "todo" {
+            refreshState()
+        }
         let events = mapper.map(frame)
         for event in events {
             if case .commandsChanged(let list) = event {
                 commands = list
+                cacheCommands(list)
             }
             if case .turnEnded = event {
                 isWorking = false
@@ -648,9 +794,15 @@ final class PiSession: AgentSessioning {
                 switch event {
                 case .messageChunk, .thoughtChunk:
                     isWorking = true
-                case .toolCallUpdate(_, _, _, let status, _, _, _, _)
-                    where status == "pending" || status == "in_progress":
-                    isWorking = true
+                    idlePollStreak = 0
+                case .toolCallUpdate(let id, _, _, let status, _, _, _, _):
+                    if status == "pending" || status == "in_progress" {
+                        isWorking = true
+                        idlePollStreak = 0
+                        activeToolIds.insert(id)
+                    } else {
+                        activeToolIds.remove(id)
+                    }
                 default:
                     break
                 }
@@ -666,6 +818,14 @@ final class PiSession: AgentSessioning {
                                costAmount: nil, costCurrency: nil)])
         }
         emit(events)
+        // Post-turn resync: queue depth, context usage and todos settle
+        // right after agent_end — one get_state answers all three.
+        if events.contains(where: { event in
+            if case .turnEnded = event { return true }
+            return false
+        }) {
+            refreshState()
+        }
     }
 
     // MARK: omp v2 chunked frames
@@ -707,8 +867,8 @@ final class PiSession: AgentSessioning {
         return try? JSONSerialization.jsonObject(with: joined) as? [String: Any]
     }
 
-    private func applyState(_ state: [String: Any],
-                            availableModels: [[String: Any]] = []) {
+    func applyState(_ state: [String: Any],
+                    availableModels: [[String: Any]] = []) {
         var options: [AgentConfigOption] = []
         let modelChoices: [AgentConfigChoice] = availableModels.compactMap { raw in
             guard let id = raw["id"] as? String else { return nil }
@@ -749,8 +909,8 @@ final class PiSession: AgentSessioning {
     /// pi-mono command with id-matched response completion. The pending
     /// entry registers BEFORE the frame hits the wire (same invariant
     /// as JSONRPCChannel).
-    private func request(_ command: String, _ extra: [String: Any] = [:],
-                         completion: @escaping ([String: Any]) -> Void) {
+    func request(_ command: String, _ extra: [String: Any] = [:],
+                 completion: @escaping ([String: Any]) -> Void) {
         responseLock.lock()
         let id = "r\(nextRequestID)"
         nextRequestID += 1
@@ -761,21 +921,54 @@ final class PiSession: AgentSessioning {
         channel.send(frame)
     }
 
-    /// Restore is self-managed: connect() spawns with the resume flag
-    /// and the handshake replays the store, so the host must NOT issue
-    /// a second load() on top (it would kill and respawn the pane the
-    /// handshake is running on).
-    var selfManagesRestore: Bool { true }
-
-    private func emit(_ events: [AgentSessionEvent]) {
+    /// Single choke point for outgoing events. turnEnded side effects
+    /// live HERE (not just handleFrame) — the missed-settle heal and
+    /// agent_settled both route through this method.
+    func emit(_ events: [AgentSessionEvent]) {
         guard !events.isEmpty else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            for event in events {
+                guard case .turnEnded = event else { continue }
+                self.isWorking = false
+                // Mid-turn reattach: the replayed transcript froze this
+                // turn's tool cards at their in-flight statuses — their
+                // completion frames fired during the attach gap and
+                // will never re-fire. The settled store has the truth;
+                // rebuild the transcript once.
+                //
+                // DELAYED by 1.5s on purpose: at settle, omp is still
+                // writing the tail entries (queued follow-up deliveries
+                // land user entries at exactly this moment — probe
+                // 2026-09-01). Reading instantly raced the write and
+                // the rebuilt transcript DROPPED the queued message
+                // that turnEnded had already flushed for display. Let
+                // the store settle first; the web keeps its live view
+                // (user block included) until the rebuild replaces it.
+                if self.reattachedMidTurn, let sid = self.sessionId,
+                   !sid.isEmpty {
+                    self.reattachedMidTurn = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        [weak self] in
+                        self?.beginReplayGate(sessionId: sid)
+                    }
+                }
+            }
             guard self.replayGateActive else {
                 self.delegate?.session(self, didEmit: events)
                 return
             }
             self.gatedEvents.append(contentsOf: events)
         }
+    }
+
+    /// Kill a throwaway helper process (fork/probe): detach, then an
+    /// ACKNOWLEDGED daemon kill (plain close() leaves it alive).
+    func teardownForker() {
+        stopStatePolling()
+        pane?.close()
+        pane = nil
+        connected = false
+        daemon.killPaneAndWait(id: paneId) { _ in }
     }
 }

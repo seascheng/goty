@@ -55,6 +55,10 @@ final class WorkspaceCoordinator {
         /// Live foreground command (sessiond list reply); nil = whatever
         /// the pane was spawned with is authoritative.
         var command: String?
+        /// Background async-job rows (extension report, capability 6);
+        /// the agent pane's jobs dock renders exactly these.
+        var jobs: [AgentJobSnapshot] = []
+
 
     }
 
@@ -222,6 +226,7 @@ final class WorkspaceCoordinator {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var cwdResult: (UUID, [String: String])?
             var fgResults: [(UUID, [String: String], [String: String])] = []
+            var jobResults: [(UUID, [String: [AgentJobSnapshot]])] = []
             for (ws, daemon) in targets {
                 let panes = daemon.listPanes()
                 if ws.id == focusedId {
@@ -233,6 +238,7 @@ final class WorkspaceCoordinator {
                 }
                 var fg: [String: String] = [:]
                 var agents: [String: String] = [:]
+                var jobs: [String: [AgentJobSnapshot]] = [:]
                 for info in panes {
                     // Daemon ids are "<workspace>_<pane>"; keep the pane half.
                     if let pane = info.id.split(separator: "_", maxSplits: 1).last {
@@ -242,18 +248,51 @@ final class WorkspaceCoordinator {
                         if let agent = info.agent {
                             agents[String(pane)] = agent
                         }
+                        jobs[String(pane)] = info.agentJobs
                     }
                 }
                 fgResults.append((ws.id, fg, agents))
+                jobResults.append((ws.id, jobs))
             }
             DispatchQueue.main.async { [weak self] in
                 if let (wsId, byRuntimeId) = cwdResult {
                     self?.applyCwds(wsId: wsId, byRuntimeId: byRuntimeId)
                 }
                 self?.applyForegrounds(fgResults)
+                self?.applyJobs(jobResults)
             }
         }
     }
+    /// Jobs dock data (capability 6): per-pane background async-job
+    /// rows from the same LIST reply. Separate from applyForegrounds
+    /// so the headless layout tests' seeded fg calls stay valid.
+    func applyJobs(_ results: [(UUID, [String: [AgentJobSnapshot]])]) {
+        guard let store else { return }
+        var changed = false
+        for (wsId, jobs) in results {
+            guard runtime[wsId] != nil,
+                  let wi = store.workspaces.firstIndex(where: { $0.id == wsId }) else { continue }
+            let paneIds = store.workspaces[wi].tabs.flatMap { $0.panes }.map(\.id)
+                + store.workspaces[wi].auxTerminalPanes.map(\.id)
+            for paneId in paneIds {
+                guard let rows = jobs[paneId] else { continue }
+                var entry = runtime[wsId]!.agents[paneId] ?? AgentPaneRuntime()
+                guard entry.jobs != rows else { continue }
+                entry.jobs = rows
+                runtime[wsId]!.agents[paneId] = entry
+                changed = true
+            }
+        }
+        if changed {
+            delegate?.coordinatorDidChange(.agent)
+        }
+    }
+
+    /// The pane's live background-job rows (extension → daemon LIST).
+    func agentJobs(wsId: UUID, paneId: String) -> [AgentJobSnapshot] {
+        runtime[wsId]?.agents[paneId]?.jobs ?? []
+    }
+
     // Internal (not private): the headless layout tests seed fg reports
     // straight in (spec 2026-08-30 §8) — pollDaemonLists needs a live
     // daemon, which a pure coordinator fixture doesn't have.
@@ -573,10 +612,15 @@ final class WorkspaceCoordinator {
 
     @discardableResult
     private func appendTab(name: String?, command: String?, cwd: String?,
-                           kind: PaneKind = .terminal) -> String? {
+                           kind: PaneKind = .terminal,
+                           agentSessionId: String? = nil) -> String? {
         guard let store, store.workspaces.indices.contains(store.focusedIndex) else { return nil }
         let wi = store.focusedIndex
-        let pane = PaneState(id: UUID().uuidString, cwd: cwd, kind: kind)
+        var pane = PaneState(id: UUID().uuidString, cwd: cwd, kind: kind)
+        // Seed BEFORE the structure change: the delegate builds the
+        // agent host synchronously on that notify, and the host reads
+        // agentSessionId to pick its restore target.
+        pane.agentSessionId = agentSessionId
         let number = store.workspaces[wi].tabs.count + 1
         store.workspaces[wi].tabs.append(TabState(
             id: UUID().uuidString, name: name ?? String(number), panes: [pane],
@@ -586,6 +630,15 @@ final class WorkspaceCoordinator {
         store.save()
         delegate?.coordinatorDidChange(.structure)
         return pane.id
+    }
+
+    /// gooey-pi-style branch landing: a NEW agent tab restored onto a
+    /// forked session file. The originating pane stays on its original
+    /// conversation.
+    @discardableResult
+    func openAgentBranchTab(agent: String, cwd: String?, sessionId: String) -> String? {
+        appendTab(name: agent, command: agent, cwd: cwd ?? activeCwd(),
+                  kind: .agent(agent), agentSessionId: sessionId)
     }
 
 
@@ -876,6 +929,25 @@ final class WorkspaceCoordinator {
             else { continue }
             guard store.workspaces[wi].tabs[ti].panes[pi].agentSessionId != sessionId else { return }
             store.workspaces[wi].tabs[ti].panes[pi].agentSessionId = sessionId
+            store.save()
+            return
+        }
+    }
+
+    /// Agent pane: persist the queued-outbox texts (dock queue list) so
+    /// a restart can rebuild what omp only reports as a count. Same
+    /// walk as setAgentSessionId; empty list stores nil (lean state).
+    func setAgentQueuedOutbox(paneId: String, texts: [String]) {
+        guard let store else { return }
+        let value = texts.isEmpty ? nil : texts
+        for wi in store.workspaces.indices {
+            guard let ti = store.workspaces[wi].tabs.firstIndex(where: {
+                $0.panes.contains { $0.id == paneId }
+            }) else { continue }
+            guard let pi = store.workspaces[wi].tabs[ti].panes.firstIndex(where: { $0.id == paneId })
+            else { continue }
+            guard store.workspaces[wi].tabs[ti].panes[pi].agentQueuedOutbox != value else { return }
+            store.workspaces[wi].tabs[ti].panes[pi].agentQueuedOutbox = value
             store.save()
             return
         }

@@ -9,6 +9,11 @@ import Foundation
 /// app uses. Both produce the same entries, sorted identically.
 protocol FileSource {
     var isRemote: Bool { get }
+    /// Identity of the machine this source talks to ("local",
+    /// "ssh:host"). The Files panel's transfer bar is scoped to it:
+    /// rebinding to a different machine drops the other machine's
+    /// transfers instead of carrying them along.
+    var machineID: String { get }
     /// Immediate (blocking) listing — call off the main thread.
     func entries(at path: String) throws -> [FileEntry]
     /// Mutations (blocking, off-main). Names are validated by the caller.
@@ -72,6 +77,8 @@ struct FileEntry: Equatable {
 /// Filesystem of the machine this app runs on.
 struct LocalFileSource: FileSource {
     let isRemote = false
+    let machineID = "local"
+
 
     func entries(at path: String) throws -> [FileEntry] {
         let urls = try FileManager.default.contentsOfDirectory(atPath: path)
@@ -123,6 +130,7 @@ struct LocalFileSource: FileSource {
 struct RemoteFileSource: FileSource {
     let host: String
     var isRemote: Bool { true }
+    var machineID: String { "ssh:" + host }
 
     func entries(at path: String) throws -> [FileEntry] {
         let result = Shell.exec("ls -1Ap \(shellQuoted(path))", host: host)
@@ -257,6 +265,66 @@ struct RemoteFileSource: FileSource {
                     return
                 }
                 progress(total ?? 0, total)
+                completion(.success(()))
+            }
+        }
+    }
+
+    /// Push local files/folders into a remote directory — scp streams
+    /// over the same ControlMaster socket the listings ride (same
+    /// no-metering caveat as download). Per-byte progress is one
+    /// multiplexed exec per tick summing the landed remote sizes
+    /// (stat for files, du -sb for folders — GNU-first; a BSD remote
+    /// just shows folder progress jumping at the end).
+    func upload(urls: [URL], into dir: String,
+                progress: @escaping (Int64) -> Void,
+                completion: @escaping (Result<Void, Error>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/scp")
+            // The remote target rides SFTP verbatim (OpenSSH ≥9): no
+            // shell evaluates it, so it must NOT be quoted — unlike
+            // the probe below, which runs through a real remote shell.
+            proc.arguments = ["-r"] + SshTransport.baseOptions
+                + urls.map(\.path) + ["\(host):\(dir)"]
+            proc.standardOutput = FileHandle.nullDevice
+            let err = Pipe()
+            proc.standardError = err
+            do { try proc.run() } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(CocoaError(.fileReadUnknown, userInfo: [
+                        NSLocalizedDescriptionKey: "scp: \(error.localizedDescription)"])))
+                }
+                return
+            }
+
+            let probe = urls.map { url -> String in
+                let dest = Shell.forceQuoted(dir + "/" + url.lastPathComponent)
+                var isDir: ObjCBool = false
+                let isFolder = FileManager.default.fileExists(atPath: url.path,
+                                                               isDirectory: &isDir)
+                    && isDir.boolValue
+                return isFolder ? "du -sb -- \(dest) 2>/dev/null"
+                                : "stat -c %s -- \(dest) 2>/dev/null"
+            }.joined(separator: ";")
+            while proc.isRunning {
+                Thread.sleep(forTimeInterval: 0.5)
+                let landed = String(decoding: Shell.exec(probe, host: host).stdout,
+                                    as: UTF8.self)
+                    .split(separator: "\n")
+                    .reduce(Int64(0)) { $0 + (Int64($1.split(whereSeparator: \.isWhitespace).first ?? "") ?? 0) }
+                DispatchQueue.main.async { progress(landed) }
+            }
+            let errText = String(data: err.fileHandleForReading.readDataToEndOfFile(),
+                                 encoding: .utf8) ?? ""
+            let code = proc.terminationStatus
+            DispatchQueue.main.async {
+                guard code == 0 else {
+                    completion(.failure(CocoaError(.fileReadUnknown, userInfo: [
+                        NSLocalizedDescriptionKey: "scp: exit \(code)"
+                            + (errText.isEmpty ? "" : ": \(errText)") ])))
+                    return
+                }
                 completion(.success(()))
             }
         }

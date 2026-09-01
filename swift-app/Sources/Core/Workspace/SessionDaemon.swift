@@ -44,6 +44,9 @@ private enum SessionFrame {
     static let kill: UInt8 = 6
     static let list: UInt8 = 7
     static let version: UInt8 = 8
+    static let sessionList: UInt8 = 9
+    static let sessionFile: UInt8 = 10
+    static let sessionFork: UInt8 = 11
 
     static let spawned: UInt8 = 0x81
     static let size: UInt8 = 0x82
@@ -53,7 +56,32 @@ private enum SessionFrame {
     static let paneList: UInt8 = 0x86
     static let versionReply: UInt8 = 0x87
     static let attached: UInt8 = 0x88
+    static let sessionListReply: UInt8 = 0x89
+    static let sessionFileReply: UInt8 = 0x8a
+    static let sessionForkReply: UInt8 = 0x8b
     static let error: UInt8 = 0xff
+}
+
+/// One omp store row from a capability-7 daemon (SESSION_LIST). The
+/// `path` is a DAEMON-side path — the resume flag and file reads must
+/// go back through the same daemon, never the local filesystem.
+struct DaemonSessionRow: Decodable {
+    let id: String
+    let cwd: String?
+    let title: String?
+    let mtimeMs: UInt64
+    let path: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id, cwd, title, path
+        case mtimeMs = "mtime_ms"
+    }
+
+    var summary: AgentSessionSummary {
+        AgentSessionSummary(sessionId: id, cwd: cwd, title: title,
+                            updatedAt: String(Int(mtimeMs / 1000)),
+                            messageCount: nil)
+    }
 }
 
 /// One sessiond endpoint: the local singleton, or a remote daemon reached
@@ -95,10 +123,15 @@ final class SessionDaemon {
 
     /// Remote daemon: the transport beneath the socket is managed elsewhere
     /// (RemoteDaemonLink), so there is nothing to launch here.
-    init(socketPath: String, launcher: (() -> Bool)? = nil) {
+    init(socketPath: String, launcher: (() -> Bool)? = nil, isRemote: Bool = false) {
         self.socketPath = socketPath
         self.launcher = launcher
+        self.isRemote = isRemote
     }
+
+    /// True when this endpoint's filesystem is NOT the GUI's — store
+    /// reads must go through the daemon, never FileManager.
+    let isRemote: Bool
 
     private static func startBundledDaemon(socketPath: String) -> Bool {
         guard let binary = bundledBinary(name: "goty-sessiond") else { return false }
@@ -177,6 +210,77 @@ final class SessionDaemon {
               let level = Int(String(decoding: frame.1, as: UTF8.self))
         else { return nil }
         return level
+    }
+
+    /// Capability 7: daemon-side omp store access. The store lives on
+    /// the DAEMON's machine — remote panes read their history and
+    /// resume paths through the tunnel. Below this level (or on any
+    /// error) callers must fall back to the local filesystem read.
+    static let storeCapability = 7
+
+    /// One-shot request/reply over a fresh connection (the daemon serves
+    /// a single first frame per connection). Runs on the caller's queue.
+    private func storeRoundTrip(kind requestKind: UInt8, payload: Data,
+                                replyKind: UInt8) -> Data? {
+        let fd = Self.connect(path: socketPath)
+        guard fd >= 0 else { return nil }
+        defer { Darwin.close(fd) }
+        guard Self.writeFrame(fd: fd, kind: requestKind, payload: payload),
+              let frame = Self.readFrame(fd: fd), frame.0 == replyKind
+        else { return nil }
+        return frame.1
+    }
+
+    /// SESSION_LIST: summaries (with daemon-side file paths) filtered
+    /// by cwd prefix. nil = daemon lacks capability 7 or the round trip
+    /// failed — the caller falls back to the local store.
+    func agentStoreSummaries(cwd: String?, store: String = "omp")
+            -> (rows: [DaemonSessionRow], paths: [String: String])? {
+        guard (pingCapability() ?? 0) >= Self.storeCapability else { return nil }
+        let request = try? JSONSerialization.data(
+            withJSONObject: ["cwd": (cwd as String? ?? "") as Any,
+                             "store": store])
+        guard let data = request,
+              let reply = storeRoundTrip(kind: SessionFrame.sessionList,
+                                         payload: data,
+                                         replyKind: SessionFrame.sessionListReply),
+              let decoded = try? JSONDecoder().decode(Reply.self, from: reply)
+        else { return nil }
+        var paths: [String: String] = [:]
+        for row in decoded.sessions { paths[row.id] = row.path }
+        return (decoded.sessions, paths)
+    }
+
+    /// SESSION_FILE: one store file's raw bytes (the authoritative
+    /// transcript), located by id on the daemon's machine. nil = miss.
+    func agentStoreFile(sessionId: String, store: String = "omp") -> Data? {
+        guard let request = try? JSONSerialization.data(
+                withJSONObject: ["sessionId": sessionId, "store": store]),
+              let data = storeRoundTrip(kind: SessionFrame.sessionFile,
+                                        payload: request,
+                                        replyKind: SessionFrame.sessionFileReply)
+        else { return nil }
+        return data
+    }
+
+    /// SESSION_FORK: write a prefix fork of one store file on the
+    /// daemon's machine (remote fast path for the branch button).
+    /// nil = unsupported daemon or fork failure.
+    func agentStoreFork(sourceId: String, entryId: String) -> String? {
+        guard let request = try? JSONSerialization.data(
+                withJSONObject: ["sessionId": sourceId, "entryId": entryId]),
+              let reply = storeRoundTrip(kind: SessionFrame.sessionFork,
+                                         payload: request,
+                                         replyKind: SessionFrame.sessionForkReply),
+              let obj = try? JSONSerialization.jsonObject(with: reply)
+                  as? [String: Any],
+              let id = obj["id"] as? String
+        else { return nil }
+        return id
+    }
+
+    private struct Reply: Decodable {
+        let sessions: [DaemonSessionRow]
     }
 
     /// The locally running daemon's capability, without launching
@@ -308,6 +412,9 @@ final class SessionDaemon {
         /// Live agent TUI state ("working"/"blocked"/"idle") from the
         /// omp/pi extension reporting to this daemon; nil = none.
         let agent: String?
+        /// Background async-job rows from the same extension report
+        /// (capability 6); empty = none or older daemon.
+        let agentJobs: [AgentJobSnapshot]
     }
 
     func listPanes() -> [PaneInfo] {
@@ -323,7 +430,9 @@ final class SessionDaemon {
             guard let id = item["pane_id"] as? String,
                   let alive = item["alive"] as? Bool else { return nil }
             return PaneInfo(id: id, alive: alive, cwd: item["cwd"] as? String,
-                            fg: item["fg"] as? String, agent: item["agent"] as? String)
+                            fg: item["fg"] as? String, agent: item["agent"] as? String,
+                            agentJobs: ((item["agent_jobs"] as? [[String: Any]]) ?? [])
+                                .compactMap(AgentJobSnapshot.init(raw:)))
         }
     }
 

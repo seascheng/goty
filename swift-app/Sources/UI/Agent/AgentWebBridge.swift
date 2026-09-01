@@ -6,27 +6,43 @@ import WebKit
 /// transport: `send`, `stop`, `permission`, `setConfig`, session
 /// listing/loading, and `@` file references.
 final class AgentWebBridge: WebBridge {
-    var onSend: ((String) -> Void)?
+    /// mode: "normal" (idle send) | "steer" (interrupt) | "followUp"
+    /// (queue behind the running turn).
+    var onSend: ((String, String) -> Void)?
     var onStop: (() -> Void)?
     var onSetConfig: ((String, String) -> Void)?
+    var onSetFast: ((Bool) -> Void)?
     var onListSessions: (() -> Void)?
     var onLoadSession: ((String) -> Void)?
     var onListFiles: ((@escaping ([String]) -> Void) -> Void)?
     var onPermissionOption: ((String) -> Void)?
     /// 重试 after an errored pane: attach-or-respawn from the user's hand.
     var onReconnect: (() -> Void)?
-
+    var onBranch: ((String) -> Void)?
+    /// gooey-pi style: fork from an entry and CONTINUE in a new tab;
+    /// this pane stays on the original conversation.
+    var onBranchNewPane: ((String) -> Void)?
+    var onExport: (() -> Void)?
+    var onLogin: (() -> Void)?
+    var onStartLogin: ((String) -> Void)?
+    var onStats: (() -> Void)?
     override func route(_ message: [String: Any]) {
         guard let type = message["type"] as? String else { return }
         switch type {
         case "send":
-            if let text = message["text"] as? String, !text.isEmpty { onSend?(text) }
+            if let text = message["text"] as? String, !text.isEmpty {
+                onSend?(text, (message["mode"] as? String) ?? "normal")
+            }
         case "stop":
             onStop?()
         case "setConfig":
             if let configId = message["configId"] as? String,
                let value = message["value"] as? String {
                 onSetConfig?(configId, value)
+            }
+        case "setFast":
+            if let enabled = message["enabled"] as? Bool {
+                onSetFast?(enabled)
             }
         case "listSessions":
             onListSessions?()
@@ -45,6 +61,24 @@ final class AgentWebBridge: WebBridge {
             onListFiles? { [weak self] files in
                 self?.push(["type": "files", "files": files])
             }
+        case "branch":
+            if let entryId = message["entryId"] as? String, !entryId.isEmpty {
+                onBranch?(entryId)
+            }
+        case "branchNewPane":
+            if let entryId = message["entryId"] as? String, !entryId.isEmpty {
+                onBranchNewPane?(entryId)
+            }
+        case "export":
+            onExport?()
+        case "login":
+            onLogin?()
+        case "startLogin":
+            if let providerId = message["providerId"] as? String {
+                onStartLogin?(providerId)
+            }
+        case "stats":
+            onStats?()
         default:
             break
         }

@@ -390,6 +390,7 @@ impl Pane {
             cwd: self.cwd(),
             fg: self.foreground_command(),
             agent: None,
+            agent_jobs: Vec::new(),
         }
     }
 

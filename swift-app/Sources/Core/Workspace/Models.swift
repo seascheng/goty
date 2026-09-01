@@ -44,6 +44,11 @@ struct PaneState: Codable {
     /// SAME conversation instead of a blank pane. Absent in older
     /// state.json — decodes as nil.
     var agentSessionId: String?
+    /// Agent pane: texts queued behind a running turn when the app last
+    /// ran. omp only reports a COUNT, so the dock's queued list would be
+    /// lost across a restart without this. Absent in older state.json —
+    /// decodes as nil.
+    var agentQueuedOutbox: [String]?
 
     init(id: String, cwd: String?, kind: PaneKind = .terminal,
          left: Int = 0, top: Int = 0, width: Int = 1, height: Int = 1) {

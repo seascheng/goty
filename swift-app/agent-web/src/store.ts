@@ -14,21 +14,27 @@ export type ToolCall = {
   oldText?: string | null;
 };
 export type PlanEntry = { content: string; priority?: string | null; status?: string | null };
-export type Permission = {
-  requestID: string; toolCallTitle?: string | null;
+export type JobRow = { id: string; kind: string; status: string;
+  label: string; startTime?: number | null };
+export type SubagentRow = { id: string; state?: string | null; detail?: string | null; at: number };
+export type RuntimeState = { fastEnabled?: boolean | null; fastActive?: boolean | null;
+  contextTokens?: number | null; contextWindow?: number | null;
+  tokensPerSecond?: number | null; queued?: number | null;
+  compacting?: boolean | null; streaming?: boolean | null };
+export type Permission = { requestID: string; toolCallTitle?: string | null;
   options: { optionId: string; name: string; kind?: string | null }[];
-};
+  dialog?: string | null; placeholder?: string | null; defaultValue?: string | null };
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 /// A block before it gets its stable identity stamp.
 type BlockInput = DistributiveOmit<Block, "id">;
 
+
 export type Block =
-  | { kind: "user"; id: number; text: string }
-  | { kind: "agent"; id: number; text: string }
+  | { kind: "user"; id: number; text: string; entryId?: string }
+  | { kind: "agent"; id: number; text: string; entryId?: string }
   | { kind: "thought"; id: number; text: string }
   | { kind: "tool"; id: number; call: ToolCall }
   | { kind: "turnStats"; id: number; text: string }
-  | { kind: "plan"; id: number; entries: PlanEntry[] }
 
 /// Compact token counts (k/M/G), shared by the transcript's turn-stats
 /// rows and the composer usage segments.
@@ -89,9 +95,11 @@ export type AgentCommand = z.infer<typeof AgentCommandSchema>;
 
 const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("userMessage"), text: z.string() }),
+  z.object({ type: z.literal("queueMessage"), text: z.string() }),
   z.object({ type: z.literal("userChunk"), text: z.string() }),
   z.object({ type: z.literal("agentChunk"), text: z.string() }),
   z.object({ type: z.literal("thoughtChunk"), text: z.string() }),
+  z.object({ type: z.literal("chunkBoundary") }),
   z.object({
     type: z.literal("toolCall"),
     id: z.string(),
@@ -108,6 +116,9 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
     type: z.literal("permission"),
     requestID: z.string(),
     toolCallTitle: z.string().nullish(),
+    dialog: z.string().nullish(),
+    placeholder: z.string().nullish(),
+    defaultValue: z.string().nullish(),
     options: z.array(PermissionOptionSchema),
   }),
   z.object({ type: z.literal("permissionResolved") }),
@@ -115,6 +126,7 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("error"), text: z.string() }),
   z.object({ type: z.literal("reconnecting"), value: z.boolean() }),
   z.object({ type: z.literal("turnEnded") }),
+  z.object({ type: z.literal("branchState"), active: z.boolean() }),
   z.object({ type: z.literal("working"), value: z.boolean() }),
   z.object({ type: z.literal("starting"), agent: z.string() }),
   z.object({ type: z.literal("status"), text: z.string() }),
@@ -132,6 +144,41 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("sessions"), sessions: z.unknown().nullish() }),
   z.object({ type: z.literal("clearTranscript") }),
   z.object({ type: z.literal("files"), files: z.array(z.string()) }),
+  z.object({
+    type: z.literal("runtimeStatus"),
+    fastEnabled: z.boolean().nullish(),
+    fastActive: z.boolean().nullish(),
+    contextTokens: z.number().nullish(),
+    contextWindow: z.number().nullish(),
+    tokensPerSecond: z.number().nullish(),
+    queued: z.number().nullish(),
+    compacting: z.boolean().nullish(),
+    streaming: z.boolean().nullish(),
+  }),
+  z.object({
+    type: z.literal("jobs"),
+    jobs: z.array(z.object({
+      id: z.string(),
+      kind: z.string().nullish(),
+      status: z.string().nullish(),
+      label: z.string().nullish(),
+      startTime: z.number().nullish(),
+    })).nullish(),
+  }),
+  z.object({
+    type: z.literal("subagent"),
+    id: z.string(),
+    state: z.string().nullish(),
+    detail: z.string().nullish(),
+  }),
+  z.object({
+    type: z.literal("entryMark"),
+    role: z.string(),
+    entryId: z.string(),
+  }),
+  z.object({ type: z.literal("stats"), stats: z.record(z.string(), z.unknown()) }),
+  z.object({ type: z.literal("loginProviders"), providers: z.array(z.record(z.string(), z.unknown())) }),
+  z.object({ type: z.literal("openURL"), url: z.string() }),
   z.object({
     type: z.literal("sessionTitle"),
     title: z.string().nullish(),
@@ -169,12 +216,16 @@ function coerceList<T>(raw: unknown, schema: z.ZodType<T>): T[] {
 /// no per-event allocation on transcript replay.
 const STARTING_TERMINATORS: Record<string, true> = {
   status: true,
+  plan: true,
+  runtimeStatus: true,
+  jobs: true,
   configOptions: true,
   commands: true,
   userMessage: true,
   userChunk: true,
   agentChunk: true,
   thoughtChunk: true,
+  chunkBoundary: true,
   toolCall: true,
   permission: true,
   turnEnded: true,
@@ -188,7 +239,28 @@ class Store {
   tools = new Map<string, ToolCall>();
   files: string[] = [];
   permission: Permission | null = null;
+  /// Dock state — pinned between transcript and composer, never
+  /// transcript blocks: plan (todoPhases), background jobs, subagents.
+  plan: { entries: PlanEntry[] } | null = null;
+  jobs: JobRow[] = [];
+  subagents: SubagentRow[] = [];
+  runtime: RuntimeState | null = null;
+  /// Stats dialog payload (get_session_stats); null = closed.
+  stats: Record<string, unknown> | null = null;
   working = false;
+  /// Follow-ups queued while a turn ran (Enter mid-turn). omp delivers
+  /// them after settle; they flush as user blocks at turnEnded.
+  pendingQueue: string[] = [];
+  /// True while a worktree fork (throwaway process) is booting — every
+  /// BranchButton disables on it; the Swift handler holds the same flag.
+  branchBusy = false;
+  /// Set at turnEnded: the next agent/thought chunk opens a fresh block
+  /// instead of merging into the closed turn's tail.
+  private tailSealed = false;
+  /// chunkBoundary sealed the current content-block run: the next
+  /// chunk opens a fresh block (faithful stream order).
+  private chunkSealed = false;
+  loginProviders: Record<string, unknown>[] = [];
   /// Agent handshake phase: set on "starting", cleared by the first
   /// handshake-complete signal or a terminal error. The composer renders
   /// an explicit chip while this is non-null.
@@ -240,28 +312,21 @@ class Store {
     return stamped;
   }
 
-  /// agent/thought chunks append to the LAST block of that kind; a closed
-  /// turn (turnEnded/userMessage/tool in between) starts a fresh block.
-  /// The merged block is replaced (not mutated) so memoized rows keyed by
-  /// stable ids re-render only the tail.
+  /// agent/thought chunks append to the tail block of that kind while
+  /// the stream continues it; a sealed boundary (turn end, message end,
+  /// chunkBoundary) starts a fresh block. FAITHFUL DISPLAY CONTRACT
+  /// the transcript mirrors the model's actual output structure. The
+  /// wire's contentIndex (omp/pi-mono and claude stream-json both
+  /// carry it) drives chunkBoundary upstream of here.
   private tail(kind: "agent" | "thought"): { kind: "agent" | "thought"; text: string } {
-    // Thought-passthrough merge: claude (esp. GLM-via-proxy) interleaves
-    // reasoning and text deltas arbitrarily, even MID-SENTENCE. Merging
-    // only when the same kind is literally last shattered the text into
-    // mid-word fragments ("…work" [thought] "bench, …"). Walk back over
-    // thought blocks for agent text (and vice versa) — reasoning is
-    // ambient, not a boundary; tool cards and user prompts still start
-    // a fresh block.
-    for (let i = this.blocks.length - 1; i >= 0; i--) {
-      const b = this.blocks[i];
-      if (b.kind === kind) {
-        const merged = { kind, id: b.id, text: b.text };
-        this.blocks[i] = merged;
-        return merged;
-      }
-      if (kind === "agent" && b.kind !== "thought") break;
-      if (kind === "thought" && b.kind !== "agent") break;
+    const last = this.blocks[this.blocks.length - 1];
+    if (last && last.kind === kind && !this.tailSealed && !this.chunkSealed) {
+      const merged = { kind, id: last.id, text: last.text };
+      this.blocks[this.blocks.length - 1] = merged;
+      return merged;
     }
+    this.tailSealed = false;
+    this.chunkSealed = false;
     const block = this.push({ kind, text: "" }) as { kind: "agent" | "thought"; text: string };
     return block;
   }
@@ -310,6 +375,12 @@ class Store {
     this.revision += 1;
     this.emit();
   }
+
+  closeStats() {
+    this.stats = null;
+    this.revision += 1;
+    this.emit();
+  }
   private applyParsed(event: IncomingEvent) {
     // A terminal error ends startup too: a process that exited cannot
     // complete its handshake, and leaving `starting` set renders a
@@ -317,10 +388,16 @@ class Store {
     if (STARTING_TERMINATORS[event.type]) this.starting = null;
     switch (event.type) {
       case "userMessage": this.push({ kind: "user", text: event.text }); break;
+      case "queueMessage": this.pendingQueue.push(event.text); break;
       case "userChunk":
         this.userTail(event.text); break;
       case "agentChunk":
         if (event.text) this.tail("agent").text += event.text; break;
+      case "chunkBoundary":
+        // The model switched content blocks: seal the current run so
+        // the NEXT chunk opens a fresh block below, in true stream
+        // order. No same-kind merging across the boundary.
+        this.chunkSealed = true; break;
       case "thoughtChunk":
         if (event.text) this.tail("thought").text += event.text; break;
       case "toolCall": {
@@ -356,9 +433,13 @@ class Store {
         this.tools.set(event.id, call);
         break;
       }
-      case "plan": this.push({ kind: "plan", entries: event.entries ?? [] }); break;
+      case "plan":
+        this.plan = (event.entries ?? []).length > 0
+          ? { entries: event.entries as PlanEntry[] } : null;
+        break;
       case "permission": this.permission = event; break;
       case "permissionResolved": this.permission = null; break;
+      case "branchState": this.branchBusy = event.active; break;
       case "turnEnded": {
         // Settled-turn stats land IN the transcript, glued to the turn
         // they close — the next user message must append BELOW them,
@@ -377,6 +458,17 @@ class Store {
           }
           this.push({ kind: "turnStats", text: parts.join(" · ") });
         }
+        // Turn boundary SEAL: the next turn's text must never merge
+        // into this turn's tail block (tail() only breaks on intervening
+        // blocks; a turn can end with none pushed).
+        this.tailSealed = true;
+        // Queued follow-ups flush HERE, in order, at the bottom — omp
+        // delivers them right after settle; this is the true processing
+        // order (matching the store replay after a restart).
+        for (const text of this.pendingQueue) {
+          this.push({ kind: "user", text });
+        }
+        this.pendingQueue = [];
         this.working = false;
         this.phase = null;
         break;
@@ -429,8 +521,62 @@ class Store {
         this.permission = null; this.working = false;
         this.phase = null; this.error = null; this.reconnecting = false;
         this.turnStartedAt = null;
+        this.pendingQueue = []; this.tailSealed = false;
+        this.plan = null; this.jobs = []; this.subagents = [];
         this.generation += 1;
         break;
+      case "runtimeStatus": {
+        const next: RuntimeState = {
+          fastEnabled: event.fastEnabled ?? null,
+          fastActive: event.fastActive ?? null,
+          contextTokens: event.contextTokens ?? null,
+          contextWindow: event.contextWindow ?? null,
+          tokensPerSecond: event.tokensPerSecond ?? null,
+          queued: event.queued ?? null,
+          compacting: event.compacting ?? null,
+          streaming: event.streaming ?? null,
+        };
+        if (JSON.stringify(next) !== JSON.stringify(this.runtime)) {
+          this.runtime = next;
+        }
+        break;
+      }
+      case "jobs": {
+        const rows = (event.jobs ?? []) as JobRow[];
+        const key = rows.map((j) => `${j.id}:${j.status}:${j.startTime ?? 0}`).join("|");
+        const prevKey = this.jobs.map((j) => `${j.id}:${j.status}:${j.startTime ?? 0}`).join("|");
+        if (key !== prevKey) {
+          this.jobs = rows;
+        }
+        break;
+      }
+      case "subagent": {
+        const row: SubagentRow = { id: event.id, state: event.state ?? null,
+          detail: event.detail ?? null, at: Date.now() };
+        const idx = this.subagents.findIndex((s) => s.id === row.id);
+        if (idx >= 0) {
+          this.subagents[idx] = { ...this.subagents[idx], ...row,
+            state: row.state ?? this.subagents[idx].state,
+            detail: row.detail ?? this.subagents[idx].detail };
+        } else {
+          this.subagents.push(row);
+        }
+        break;
+      }
+      case "entryMark": {
+        const kind = event.role === "user" ? "user" : "agent";
+        for (let i = this.blocks.length - 1; i >= 0; i--) {
+          const b = this.blocks[i];
+          if (b.kind === kind) {
+            this.blocks[i] = { ...b, entryId: event.entryId } as typeof b;
+            break;
+          }
+        }
+        break;
+      }
+      case "stats": this.stats = event.stats; break;
+      case "loginProviders": this.loginProviders = event.providers; break;
+      case "openURL": break;   // host-consumed (login browser hop)
       case "files": this.files = event.files; break;
       case "meta":
         this.meta = { workspace: event.workspace ?? null,

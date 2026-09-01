@@ -606,6 +606,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                       restoredSessionId: pane.agentSessionId))
         let host = AgentPaneHost(key: key, session: session, agentLabel: descriptor.label)
         host.daemonRef = daemon
+        host.initialQueuedOutbox = pane.agentQueuedOutbox ?? []
+        host.onQueuedOutboxChange = { [weak self] texts in
+            self?.coordinator.setAgentQueuedOutbox(paneId: pane.id, texts: texts)
+        }
         host.onSessionId = { [weak self] sid in
             self?.coordinator.setAgentSessionId(paneId: pane.id, sessionId: sid)
         }
@@ -625,6 +629,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // still outrank it — see TabState.agentTitle).
         host.onSessionTitle = { [weak self] title in
             self?.coordinator.setAgentTabTitle(paneId: pane.id, name: title)
+        }
+        // Branch-to-new-pane: the forked session file opens as its own
+        // tab (same agent, same cwd); the source pane reloads the
+        // original conversation.
+        host.onBranchNewPane = { [weak self] forkSessionId in
+            self?.coordinator.openAgentBranchTab(agent: agentKey,
+                                                 cwd: pane.cwd,
+                                                 sessionId: forkSessionId)
         }
         return host
     }
@@ -937,6 +949,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             RemoteFileSource(host: host).download(
                 path: path, isDirectory: isDirectory, into: dest,
                 progress: progress, completion: completion)
+        }
+
+        // Remote Files tab → drag-to-upload: scp -r push over the same
+        // ControlMaster. Had the same never-wired hole download did:
+        // the drop started a transfer that never ran — the bar sat at
+        // "0 bytes · 0%" forever (and survived server switches, since
+        // one FilesView serves every workspace).
+        rightPanel.onUpload = { [weak self] urls, dir, progress, completion in
+            guard let self, let ws = self.coordinator.store?.focused,
+                  ws.isRemote, let host = ws.sshHost else {
+                DispatchQueue.main.async {
+                    completion(.failure(CocoaError(.fileReadUnknown, userInfo: [
+                        NSLocalizedDescriptionKey: "upload: no remote workspace"])))
+                }
+                return
+            }
+            RemoteFileSource(host: host).upload(urls: urls, into: dir,
+                                                progress: progress,
+                                                completion: completion)
         }
     }
 

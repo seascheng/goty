@@ -57,7 +57,7 @@ enum AgentRegistry {
             binary: "omp",
             spawn: AgentSpawn(command: "omp", args: ["--mode", "rpc"],
                               ringBytes: 67_108_864),
-            make: { params in PiSession(params: params, harness: .omp) }),
+            make: { params in OmpSession(params: params) }),
         AgentDescriptor(
             key: "claude",
             label: "Claude Code",
@@ -80,10 +80,10 @@ enum AgentRegistry {
             binary: "pi",
             spawn: AgentSpawn(command: "pi", args: ["--mode", "rpc"],
                               ringBytes: 16_777_216),
-            make: { params in PiSession(params: params) }),
+            make: { params in PiLegacySession(params: params) }),
     ]
 
-    /// The omp spawn shape tests construct PiSession(.omp) panes with.
+    /// The omp spawn shape tests construct OmpSession panes with.
     static let ompSpawn = AgentSpawn(command: "omp", args: ["--mode", "rpc"],
                                      ringBytes: 67_108_864)
 

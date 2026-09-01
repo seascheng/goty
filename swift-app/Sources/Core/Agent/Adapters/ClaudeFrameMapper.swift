@@ -34,6 +34,9 @@ final class ClaudeFrameMapper {
     /// first's length (never observed).
     private var streamedTextLen = 0
     private var streamedThinkingLen = 0
+    /// Content block the current delta extends (stream-json `index`);
+    /// nil until the first delta of a message.
+    private var lastBlockIndex: Int?
     /// result.result repeats the last assistant text on success AND on
     /// error runs (claude's error message arrives in an assistant frame
     /// first) — emit it once.
@@ -127,6 +130,21 @@ final class ClaudeFrameMapper {
                                               status: "in_progress",
                                               content: summary, output: [],
                                               rawInput: input, oldText: nil))
+                // TodoWrite IS the plan dock payload (omp todoPhases
+                // parity): todos land as plan entries; the tool card
+                // stays for the call itself.
+                if name == "TodoWrite",
+                   let todos = input?["todos"] as? [[String: Any]] {
+                    let entries = todos.compactMap { todo in
+                        (todo["content"] as? String).map {
+                            AgentPlanEntry(content: $0, priority: nil,
+                                           status: todo["status"] as? String)
+                        }
+                    }
+                    if !entries.isEmpty {
+                        events.append(.plan(entries))
+                    }
+                }
             default:
                 break
             }
@@ -148,6 +166,7 @@ final class ClaudeFrameMapper {
         case "message_start":
             streamedTextLen = 0
             streamedThinkingLen = 0
+            lastBlockIndex = nil
             return []
         case "content_block_delta":
             let delta = event["delta"] as? [String: Any] ?? [:]
@@ -155,17 +174,28 @@ final class ClaudeFrameMapper {
             case "text_delta":
                 guard let text = delta["text"] as? String, !text.isEmpty else { return [] }
                 streamedTextLen += text.count
-                return [.messageChunk(text)]
+                return boundaryed(.messageChunk(text), event: event)
             case "thinking_delta":
                 guard let text = delta["thinking"] as? String, !text.isEmpty else { return [] }
                 streamedThinkingLen += text.count
-                return [.thoughtChunk(text)]
+                return boundaryed(.thoughtChunk(text), event: event)
             default:
                 return []
             }
         default:
             return []
         }
+    }
+
+    /// Faithful routing: claude's stream carries the content block
+    /// index on every delta; a change opens a new UI block in true
+    /// stream order (2026-09-01 faithful-display contract).
+    private func boundaryed(_ chunk: AgentSessionEvent,
+                            event: [String: Any]) -> [AgentSessionEvent] {
+        let index = event["index"] as? Int
+        guard index != lastBlockIndex else { return [chunk] }
+        lastBlockIndex = index
+        return [.chunkBoundary, chunk]
     }
 
     /// Portion of `text` not yet streamed: `already` tracks the prefix

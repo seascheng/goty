@@ -16,12 +16,23 @@ pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 ///   the user's side of a recovered conversation. An older daemon
 ///   silently omits them (2026-08-31: recovered transcripts lost the
 ///   user's "继续" and the composer could not tell working from idle).
+/// - 6 = PaneInfo.agent_jobs — the extension report carries the
+///   agent's background async-job rows (id/type/status/label/startTime)
+///   so the GUI can render a live jobs dock.
+/// - 7 = SESSION_LIST + SESSION_FILE — daemon-side omp store access.
+///   The store lives on the DAEMON's machine; remote panes read their
+///   history/resume paths through the tunnel instead of the GUI's
+///   local disk (which sees a different machine's ~/.omp).
+/// - 8 = the store RPCs take a `store` field ("omp" default, "claude",
+///   "pi") — every agent family's session store is reachable the same
+///   way, so no adapter reads the GUI's filesystem as if it were the
+///   host's.
 ///
-/// Daemons are singleton and detached (sessions outlive the GUI), so a
-/// host can keep serving an old build indefinitely — this is the only
+/// Daemons are singleton and detached (sessions outlive the GUI), so
+/// a host can keep serving an old build indefinitely — this is the only
 /// way the client can tell (2026-08-24: remote workspaces silently
 /// lost agent logo/status to exactly this).
-pub const CAPABILITY: u8 = 5;
+pub const CAPABILITY: u8 = 8;
 
 pub mod kind {
     pub const SPAWN: u8 = 1;
@@ -32,6 +43,13 @@ pub mod kind {
     pub const KILL: u8 = 6;
     pub const LIST: u8 = 7;
     pub const VERSION: u8 = 8;
+    /// Capability 7: omp store queries answered from THIS machine's
+    /// ~/.omp/agent/sessions (payload = the JSON request structs below).
+    pub const SESSION_LIST: u8 = 9;
+    pub const SESSION_FILE: u8 = 10;
+    /// Write a prefix fork of one store file (the branch button's
+    /// remote fast path — a pure file operation, no agent process).
+    pub const SESSION_FORK: u8 = 11;
 
     pub const SPAWNED: u8 = 0x81;
     pub const SIZE: u8 = 0x82;
@@ -41,7 +59,55 @@ pub mod kind {
     pub const PANE_LIST: u8 = 0x86;
     pub const VERSION_REPLY: u8 = 0x87;
     pub const ATTACHED: u8 = 0x88;
+    pub const SESSION_LIST_REPLY: u8 = 0x89;
+    /// Payload = the raw session file bytes (no JSON envelope — the
+    /// client parses the JSONL directly, same parser as its local read).
+    pub const SESSION_FILE_REPLY: u8 = 0x8a;
+    /// Payload = JSON {"id": "<new session id>"}.
+    pub const SESSION_FORK_REPLY: u8 = 0x8b;
     pub const ERROR: u8 = 0xff;
+}
+
+/// Capability 7-8: store listing, filtered server-side by cwd prefix.
+/// `store` selects the agent family ("omp" | "claude" | "pi").
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionListRequest {
+    pub store: Option<String>,
+    pub cwd: Option<String>,
+}
+
+/// One store file: id from the filename suffix, cwd/title from the
+/// head lines, path so the GUI can pass `--resume <path>` to a
+/// respawned pane on THIS machine.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionSummaryRow {
+    pub id: String,
+    pub cwd: Option<String>,
+    pub title: Option<String>,
+    pub mtime_ms: u64,
+    pub path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionListReply {
+    pub sessions: Vec<SessionSummaryRow>,
+}
+
+/// Capability 7-8: one store file's full bytes (the authoritative
+/// transcript omp's TUI renders from). `store` as above.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionFileRequest {
+    pub store: Option<String>,
+    pub session_id: String,
+}
+
+/// Capability 9: write a prefix fork of one omp store file at an
+/// entry. Probed 2026-09-01: omp resumes a hand-made fork (title slot
+/// + fresh v3 header + verbatim prefix) in <1s — no agent process.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionForkRequest {
+    pub session_id: String,
+    pub entry_id: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +162,20 @@ pub struct AttachRequest {
     pub pane_id: String,
 }
 
+/// One background async-job row from the agent extension's report —
+/// the omp TUI's `bg_2 ⟨bash⟩ cmd … 18m53s` line, field by field.
+/// `start_time` is epoch ms; elapsed time is the GUI's job (it ticks).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentJobInfo {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub status: String,
+    pub label: String,
+    #[serde(rename = "startTime", default)]
+    pub start_time: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaneInfo {
     pub pane_id: String,
@@ -110,6 +190,10 @@ pub struct PaneInfo {
     /// reported (older daemons, non-agent panes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Live background jobs from the same extension report; empty or
+    /// absent = no jobs (older daemons/extensions).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_jobs: Vec<AgentJobInfo>,
 }
 
 pub fn write_frame(mut writer: impl Write, kind: u8, payload: &[u8]) -> io::Result<()> {
