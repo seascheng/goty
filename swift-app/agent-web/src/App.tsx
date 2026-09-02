@@ -342,7 +342,8 @@ function SubagentLine({ rows }: { rows: { id: string; state?: string | null;
 /// popover. Selection posts `setConfig`; the OK response re-syncs the
 /// whole knob list, so this component is stateless about current values.
 /// Minimal 24px stroke icons (lucide-style geometry, no dependency).
-function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking" | "stop" | "send" }) {
+function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking"
+  | "stop" | "send" | "folder" | "branch" }) {
   const common = { width: 13, height: 13, viewBox: "0 0 24 24", fill: "none",
                    stroke: "currentColor", strokeWidth: 2,
                    strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
@@ -359,6 +360,10 @@ function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking" | "sto
       return <svg {...common}><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" /></svg>;
     case "send":
       return <svg {...common}><path d="M12 19V5" /><path d="M5 12l7-7 7 7" /></svg>;
+    case "folder":
+      return <svg {...common}><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg>;
+    case "branch":
+      return <svg {...common}><line x1="6" x2="6" y1="3" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></svg>;
   }
 }
 
@@ -947,10 +952,20 @@ function Composer({ working, phase, scrollerRef, draft }: { working: boolean;
             ))}
           </div>
         <div className="toolbar-right">
-          {store.meta?.directory && (
-            <span className="pane-meta" title={[store.meta.workspace, store.meta.directory]
-              .filter(Boolean).join("/") + (store.meta.branch ? ` · ${store.meta.branch}` : "")}>
-              {[store.meta.workspace, store.meta.directory].filter(Boolean).join("/")}
+          {(store.meta?.directory || store.meta?.workspace) && (
+            <span className="pane-meta"
+              title={[store.meta.workspace, store.meta.directory]
+                .filter(Boolean).join("/")
+                + (store.meta.branch ? ` · ${store.meta.branch}` : "")}>
+              <Icon kind="folder" />
+              <span>{[store.meta.workspace, store.meta.directory]
+                .filter(Boolean).join("/")}</span>
+            </span>
+          )}
+          {store.meta?.branch && (
+            <span className="pane-meta" title={`分支 ${store.meta.branch}`}>
+              <Icon kind="branch" />
+              <span>{store.meta.branch}</span>
             </span>
           )}
           {(() => {

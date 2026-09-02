@@ -463,6 +463,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return (nil, nil, nil, nil) }
             let name = self.coordinator.store?.workspaces.first(where: { $0.id == ws.id })?.name
             let dir = paneCwd.map { ($0 as NSString).lastPathComponent }
+            // A pane at the space root repeats the space name
+            // ("goty/goty") — the tail adds nothing there; subdirs and
+            // worktrees still show their own segment.
+            let dirTail = dir == name ? nil : dir
             let branch = paneCwd.flatMap {
                 GitStatusStore.shared.summary(for: $0, host: ws.sshHost)?.branch
             }
@@ -470,7 +474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // to the live theme (re-pushed on every theme flip).
             let icon = AgentBrandIcons.tintedDataURL(for: agentKey,
                                                      color: Chrome.theme.iconTint)
-            return (name, dir, branch, icon)
+            return (name, dirTail, branch, icon)
         }
         if let paneCwd {
             // Populate the git cache for the composer's branch read; the
