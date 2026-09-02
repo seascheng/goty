@@ -631,6 +631,37 @@ enum AgentTest {
         }, "/rename frame maps to live sessionTitle")
         check(renameMapper.map(["type": "session_info_update", "title": ""])
             .isEmpty, "empty retitle emits nothing")
+
+        print("— subagent roster (omp payload frames) —")
+        // omp wraps roster data in `payload` (RpcSubagent*Frame); the
+        // old top-level extraction silently dropped EVERY subagent
+        // frame — the dock stayed empty while agents ran (2026-09-02).
+        let saMapper = PiFrameMapper(terminalOnAgentEnd: true)
+        let saLife = saMapper.map([
+            "type": "subagent_lifecycle",
+            "payload": ["id": "task-1", "agent": "ChA",
+                        "description": "写第 1 章", "status": "started"]
+                as [String: Any]])
+        check(saLife.contains {
+            if case .subagentUpdate(let u) = $0 {
+                return u.id == "task-1" && u.state == "started"
+                    && (u.detail ?? "").contains("写第 1 章")
+            }
+            return false
+        }, "lifecycle payload unwrapped: id/status/description reach the roster")
+        let saProg = saMapper.map([
+            "type": "subagent_progress",
+            "payload": ["agent": "ChA", "task": "第 1 章",
+                        "progress": ["id": "task-1", "status": "running",
+                                     "currentTool": "Edit"]
+                    as [String: Any]] as [String: Any]])
+        check(saProg.contains {
+            if case .subagentUpdate(let u) = $0 {
+                return u.id == "task-1" && u.state == "running"
+                    && (u.detail ?? "").contains("Edit")
+            }
+            return false
+        }, "progress id dug out of the nested AgentProgress object")
         // Untitled sessions (probes, aborted turns) fall back to the
         // first user message — not 未命名会话 soup.
         do {

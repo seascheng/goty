@@ -446,8 +446,10 @@ function JobsLine({ jobs }: { jobs: { id: string; kind: string;
 /// Subagent roster chips (subagent_lifecycle/progress frames).
 function SubagentLine({ rows }: { rows: { id: string; state?: string | null;
   detail?: string | null }[] }) {
+  // Terminal states: omp says completed/failed/aborted; the legacy set
+  // covers exit/done/released shapes. A settled agent leaves the dock.
   const live = rows.filter((r) =>
-    !(r.state ?? "").match(/exit|done|fail|released/i));
+    !(r.state ?? "").match(/exit|done|fail|released|complete|abort/i));
   if (live.length === 0) return null;
   return (
     <div className="dock-agents">
@@ -872,11 +874,20 @@ const streamdownProps = {
 /// moves on — the reasoning stays one click away, not sprawled between
 /// the answer's paragraphs.
 /// Thinking streams are chatty: models emit double-blank-line breaks
-/// between every volley, which markdown renders as full paragraph gaps.
-/// Collapse runs of blank lines to one and trim the edges — the card
-/// reads as a compact reasoning trace, not a blog post.
+/// between every volley AND bare list markers ("-", "*") with no
+/// content — markdown renders those as empty <li> rows while UA-default
+/// list margins (1em + 40px indent, no tailwind loaded to tame them)
+/// blow every marker into an airy paragraph. Drop marker-only lines,
+/// collapse blank runs, trim the edges — the card reads as a compact
+/// reasoning trace, not a blog post.
 function compactThought(text: string): string {
-  return text.replace(/\n{3,}/g, "\n\n").replace(/^\n+|\n+$/g, "");
+  return text
+    .split("\n")
+    .filter((line) => !/^\s*[-*•]\s*$/.test(line) && !/^\s*\d+[.)]\s*$/.test(line))
+    .join("\n")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/^\n+|\n+$/g, "");
 }
 
 function ThoughtView({ text, isTail }: { text: string; isTail: boolean }) {

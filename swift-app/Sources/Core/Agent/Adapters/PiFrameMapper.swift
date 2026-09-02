@@ -354,26 +354,37 @@ final class PiFrameMapper {
     // MARK: - tool shaping
 
 
-    /// subagent_lifecycle/progress — shapes not pinned by fixtures, so
-    /// every field is defensively extracted; a frame that names no
-    /// agent id drops.
+    /// subagent_lifecycle/progress. omp wraps the roster data in a
+    /// `payload` object (rpc-types.ts RpcSubagent*Frame): lifecycle
+    /// carries {id, agent, description?, status, index…}; progress
+    /// carries {index, agent, task, progress:{id, status, task,
+    /// currentTool?, tokens, cost…}} — its id sits one level deeper.
+    /// Shapes stay defensively extracted (not pinned by fixtures); a
+    /// frame that names no agent id drops. The top-level fallback keeps
+    /// a hypothetical unwrapped dialect working.
     private func mapSubagent(_ frame: [String: Any], lifecycle: Bool) -> [AgentSessionEvent] {
-        guard let id = (frame["subagentId"] as? String)
-            ?? (frame["agentId"] as? String)
-            ?? (frame["id"] as? String) else { return [] }
+        let payload = (frame["payload"] as? [String: Any]) ?? frame
+        let progress = payload["progress"] as? [String: Any]
+        guard let id = (progress?["id"] as? String)
+                ?? (payload["id"] as? String)
+                ?? (frame["id"] as? String) else { return [] }
         if lifecycle {
-            let state = (frame["state"] as? String)
-                ?? (frame["status"] as? String)
-                ?? (frame["phase"] as? String)
-            let detail = (frame["label"] as? String)
-                ?? (frame["name"] as? String)
-                ?? (frame["event"] as? String)
+            let state = (payload["status"] as? String) ?? (payload["state"] as? String)
+            // Detail = task description first, agent name second — the
+            // chip title should say WHAT runs, not just which agent.
+            let desc = (payload["description"] as? String) ?? ""
+            let agent = (payload["agent"] as? String) ?? ""
+            let detail = [desc.isEmpty ? nil : desc, agent.isEmpty ? nil : agent]
+                .compactMap { $0 }.joined(separator: " · ")
             return [.subagentUpdate(AgentSubagentUpdate(id: id, state: state, detail: detail))]
         }
-        let detail = (frame["progress"] as? String)
-            ?? (frame["message"] as? String)
-            ?? (frame["detail"] as? String)
-        return [.subagentUpdate(AgentSubagentUpdate(id: id, state: nil, detail: detail))]
+        let agent = (progress?["agent"] as? String) ?? (payload["agent"] as? String) ?? ""
+        let task = (progress?["task"] as? String) ?? (payload["task"] as? String) ?? ""
+        let tool = progress?["currentTool"] as? String
+        var detail = task.isEmpty ? agent : (agent.isEmpty ? task : "\(agent)：\(task)")
+        if let tool, !tool.isEmpty { detail += " · \(tool)" }
+        return [.subagentUpdate(AgentSubagentUpdate(
+            id: id, state: progress?["status"] as? String, detail: detail))]
     }
     private func toolCallStarted(_ block: [String: Any]) -> [AgentSessionEvent] {
         guard let id = block["id"] as? String,
