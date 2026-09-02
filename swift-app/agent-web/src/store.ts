@@ -352,6 +352,16 @@ class Store {
     this.emit();
   }
 
+  /// Remove the oldest queued text matching `text` (the Swift outbox is
+  /// the queue authority; its queueRemoved/queueDelivered events drive
+  /// this mirror). Returns false when the row is already gone.
+  private dequeue(text: string): boolean {
+    const idx = this.pendingQueue.indexOf(text);
+    if (idx < 0) return false;
+    this.pendingQueue.splice(idx, 1);
+    return true;
+  }
+
   private push(block: BlockInput): Block {
     const stamped = { ...block, id: this.nextBlockId++ } as Block;
     this.blocks.push(stamped);
@@ -460,24 +470,16 @@ class Store {
     switch (event.type) {
       case "userMessage": this.push({ kind: "user", text: event.text }); break;
       case "queueMessage": this.pendingQueue.push(event.text); break;
-      // Outbox row actions (Swift-side). Text-keyed removal keeps the
-      // mirror aligned without index bookkeeping; a missing text (already
-      // delivered) is a harmless no-op.
-      case "queueRemoved": {
-        const idx = this.pendingQueue.indexOf(event.text);
-        if (idx >= 0) this.pendingQueue.splice(idx, 1);
-        break;
-      }
-      case "queueDelivered": {
-        // The queued text leaves the dock and lands in the transcript as
-        // a user block — the host sends it through send()/steer() as it
-        // pushes this, so the block IS the delivery echo (harnesses
-        // suppress their own live echo for sends).
-        const idx = this.pendingQueue.indexOf(event.text);
-        if (idx >= 0) this.pendingQueue.splice(idx, 1);
+      // Outbox row actions (Swift-side), text-keyed so the mirror never
+      // drifts; a missing text (already delivered) is a harmless no-op.
+      case "queueRemoved": this.dequeue(event.text); break;
+      case "queueDelivered":
+        // The queued text leaves the dock and lands in the transcript:
+        // the host sends it through send()/steer() as it pushes this,
+        // so the block IS the delivery echo.
+        this.dequeue(event.text);
         this.push({ kind: "user", text: event.text });
         break;
-      }
       case "userChunk":
         this.userTail(event.text); break;
       case "agentChunk":
@@ -572,21 +574,22 @@ class Store {
       case "turnEnded": {
         // Settled-turn stats land IN the transcript, glued to the turn
         // they close — the next user message must append BELOW them,
-        // not sandwich them at the composer (2026-08-31).
-        if (this.turnStartedAt != null) {
-          this.lastTurnMs = Date.now() - this.turnStartedAt;
-          this.turnStartedAt = null;
+        // not sandwich them at the composer (2026-08-31). Duration is
+        // PER-TURN (a stale lastTurnMs used to replay the previous
+        // turn's time on a bare turnEnded), and the line needs at
+        // least one meaningful part — a sub-100ms turn with no token
+        // counts is pure noise next to the "压缩中…" chip.
+        const ms = this.turnStartedAt != null ? Date.now() - this.turnStartedAt : null;
+        this.turnStartedAt = null;
+        const u = this.usage;
+        const parts: string[] = [];
+        if (ms != null && ms >= 100) parts.push(`⏱ ${(ms / 1000).toFixed(1)}s`);
+        if (u?.input != null) parts.push(`↑${fmtTokens(u.input)}`);
+        if (u?.output != null) parts.push(`↓${fmtTokens(u.output)}`);
+        if (u?.costAmount != null) {
+          parts.push(`$${u.costAmount < 1 ? u.costAmount.toFixed(4) : u.costAmount.toFixed(2)}`);
         }
-        if (this.lastTurnMs != null) {
-          const parts: string[] = [`⏱ ${(this.lastTurnMs / 1000).toFixed(1)}s`];
-          const u = this.usage;
-          if (u?.input != null) parts.push(`↑${fmtTokens(u.input)}`);
-          if (u?.output != null) parts.push(`↓${fmtTokens(u.output)}`);
-          if (u?.costAmount != null) {
-            parts.push(`$${u.costAmount < 1 ? u.costAmount.toFixed(4) : u.costAmount.toFixed(2)}`);
-          }
-          this.push({ kind: "turnStats", text: parts.join(" · ") });
-        }
+        if (parts.length > 0) this.push({ kind: "turnStats", text: parts.join(" · ") });
         // Turn boundary SEAL: the next turn's text must never merge
         // into this turn's tail block (tail() only breaks on intervening
         // blocks; a turn can end with none pushed).

@@ -521,12 +521,26 @@ function HistoryChip({ open, onToggle, onSelect }: {
   );
 }
 
-function Composer({ working, phase, scrollerRef, draft }: { working: boolean;
+function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: boolean;
   phase: "thinking" | "executing" | "awaitingPermission" | null;
   scrollerRef?: { current: HTMLDivElement | null };
-  draft?: { text: string; seq: number } }) {
+  draft?: { text: string; seq: number };
+  /// localStorage key for unsent-text survival (workspace + directory).
+  /// The page's memory dies with every GUI restart; a draft typed
+  /// mid-turn must not vanish with it (2026-09-02 lost-message bug).
+  draftKey?: string }) {
   const [text, setText] = useState("");
   const lastDraftSeq = useRef(0);
+  // Restore ONCE, as soon as the handshake lands meta (empty key =
+  // meta not yet pushed). A restart mid-typing rebuilds the page with
+  // the composer cleared — this puts the unsent text back.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current || !draftKey) return;
+    restoredRef.current = true;
+    const saved = localStorage.getItem(draftKey);
+    if (saved) setText(saved);
+  }, [draftKey]);
   // ✎ on a queued row: the host already dequeued the text; land it in
   // the composer (overwrite — editing intent) and focus for typing.
   useEffect(() => {
@@ -676,8 +690,10 @@ function Composer({ working, phase, scrollerRef, draft }: { working: boolean;
       histIdx.current = null;
     }
     setText("");
+    // Sent (or queued — the pane owns the outbox): the draft storage
+    // must not resurrect submitted text after a restart.
+    if (draftKey) localStorage.removeItem(draftKey);
     setAttach([]);
-    setAttachNote(null);
   };
 
   // Auto-fit height on EVERY text change — programmatic ones included
@@ -854,10 +870,12 @@ function Composer({ working, phase, scrollerRef, draft }: { working: boolean;
         <textarea
           ref={ref}
           value={text}
-          rows={1}
-          placeholder="Message the agent…  (Enter 发送 · ⌘⏎ 排队 · ⇧⏎ 换行 · / 指令 · @ 文件)"
           onChange={(e) => {
             setText(e.target.value);
+            if (draftKey) {
+              if (e.target.value) localStorage.setItem(draftKey, e.target.value);
+              else localStorage.removeItem(draftKey);
+            }
             setSlashIndex(0);
             setAtIndex(0);
             setDismissed(false);
@@ -1408,7 +1426,10 @@ export function App() {
       )}
       {store.permission && <PermissionCard permission={store.permission} />}
       <Composer working={store.working} phase={store.phase} scrollerRef={scroller}
-        draft={draft} />
+        draft={draft}
+        draftKey={(store.meta?.workspace || store.meta?.directory)
+          ? `draft:${store.meta.workspace ?? ""}|${store.meta.directory ?? ""}`
+          : undefined} />
       {store.stats && <StatsDialog stats={store.stats} />}
     </div>
   );
