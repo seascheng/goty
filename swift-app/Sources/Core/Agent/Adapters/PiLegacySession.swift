@@ -52,27 +52,132 @@ final class PiLegacySession: PiSession {
     /// pi's history source is the LIVE process: get_messages answers
     /// the resumed session. File-based sources don't exist for the
     /// GUI when the pane runs on a remote daemon.
+    ///
+    /// TAIL-FIRST, omp parity (the 2026-09-02 flash-vs-哗哗 report):
+    /// get_messages returns the WHOLE session, and rendering every
+    /// message made a big pi pane visibly stream on open while omp
+    /// (512KB store tail) flashed. Window the replay at a USER-message
+    /// boundary; the anchor rides back through loadOlderHistory.
+    private static let tailBudget = 200_000
+
+    /// One replayed message with its render budget and identity —
+    /// slicing needs per-message granularity the mapped events alone
+    /// don't carry (mapReplayedMessage emits no entry ids).
+    struct ReplayedMessage {
+        let id: String?
+        let role: String
+        let events: [AgentSessionEvent]
+        let budget: Int
+    }
+
+    static func replayMessages(_ messages: [[String: Any]]) -> [ReplayedMessage] {
+        let mapper = PiFrameMapper()
+        return messages.map { message in
+            let events = mapper.mapReplayedMessage(message)
+            var budget = 64
+            for event in events {
+                switch event {
+                case .userMessage(let t), .messageChunk(let t), .thoughtChunk(let t):
+                    budget += t.utf8.count
+                default:
+                    budget += 200   // tool cards, results — flat cost
+                }
+            }
+            return ReplayedMessage(id: message["id"] as? String,
+                                   role: message["role"] as? String ?? "",
+                                   events: events, budget: budget)
+        }
+    }
+
+    /// Keep the smallest suffix that fits the budget, cut at a user
+    /// message so the page never receives half a turn. anchor = the
+    /// cut point's message id (nil = nothing was dropped).
+    static func tailWindow(_ replayed: [ReplayedMessage],
+                           budget: Int = PiLegacySession.tailBudget)
+            -> (events: [AgentSessionEvent], anchor: String?) {
+        let total = replayed.reduce(0) { $0 + $1.budget }
+        guard total > budget else {
+            return (replayed.flatMap(\.events), nil)
+        }
+        var acc = 0
+        var cut: Int? = nil
+        for i in stride(from: replayed.count - 1, through: 0, by: -1) {
+            acc += replayed[i].budget
+            if acc > budget { break }
+            if replayed[i].role == "user" { cut = i }
+        }
+        // A single oversized turn: render it whole rather than a
+        // boundary-less partial.
+        let start = cut ?? 0
+        let tail = replayed[start...]
+        return (Array(tail.flatMap(\.events)), tail.first?.id ?? nil)
+    }
+
     override func readStoredHistory(
             _ sid: String,
             completion: @escaping (StoredSessionHistory?) -> Void) {
-        request("get_messages") { response in
-            guard response["success"] as? Bool == true,
+        request("get_messages") { [weak self] response in
+            guard let self,
+                  response["success"] as? Bool == true,
                   let data = response["data"] as? [String: Any],
                   let messages = data["messages"] as? [[String: Any]] else {
                 completion(nil)
                 return
             }
-            let mapper = PiFrameMapper()
-            var events: [AgentSessionEvent] = []
-            for message in messages {
-                events += mapper.mapReplayedMessage(message)
-            }
+            let replayed = Self.replayMessages(messages)
+            let window = Self.tailWindow(replayed)
+            var events = window.events
             if let assistant = messages.last(where: { $0["role"] as? String == "assistant" }),
                assistant["stopReason"] as? String == "error",
                let text = AgentSessionEvent.providerErrorText(from: assistant) {
                 events.append(.error(text: text))
             }
-            completion(StoredSessionHistory(events: events, openTools: 0, aborted: false))
+            DispatchQueue.main.async {
+                self.piHistoryAnchor = window.anchor
+            }
+            completion(StoredSessionHistory(events: events, openTools: 0, aborted: false,
+                                            firstEntryId: window.anchor))
+        }
+    }
+
+    /// Prepend pipeline, omp semantics: one-shot — re-fetch the full
+    /// history and hand back everything before the anchor; the anchor
+    /// clears (a fresh gate from a later rebuild re-arms it).
+    private var piHistoryAnchor: String?
+    private var olderLoadInFlight = false
+
+    override func loadOlderHistory(
+            completion: @escaping ([AgentSessionEvent]?) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.olderLoadInFlight,
+                  let anchor = self.piHistoryAnchor else {
+                completion(nil)
+                return
+            }
+            self.olderLoadInFlight = true
+            self.request("get_messages") { [weak self] response in
+                DispatchQueue.main.async {
+                    guard let self else {
+                        completion(nil)
+                        return
+                    }
+                    self.olderLoadInFlight = false
+                    self.piHistoryAnchor = nil
+                    guard response["success"] as? Bool == true,
+                          let data = response["data"] as? [String: Any],
+                          let messages = data["messages"] as? [[String: Any]] else {
+                        completion(nil)
+                        return
+                    }
+                    let replayed = Self.replayMessages(messages)
+                    guard let idx = replayed.firstIndex(where: { $0.id == anchor }) else {
+                        completion(nil)
+                        return
+                    }
+                    let older = replayed[..<idx].flatMap(\.events)
+                    completion(older.isEmpty ? nil : older)
+                }
+            }
         }
     }
 

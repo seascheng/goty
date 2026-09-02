@@ -253,9 +253,25 @@ final class SessionDaemon {
 
     /// SESSION_FILE: one store file's raw bytes (the authoritative
     /// transcript), located by id on the daemon's machine. nil = miss.
+    ///
+    /// Wire payloads live as pure functions below so tests can pin the
+    /// exact JSON keys: the Rust structs decode snake_case, and a
+    /// camelCase drift here fails the daemon's from_json — the request
+    /// connection just closes (EOF) and every local-store fallback
+    /// misses on a REMOTE pane, so history loads come up empty while
+    /// the resumed agent's own state (plan, todos) still shows (the
+    /// 2026-09-02 empty-remote-history report).
+    static func storeFilePayload(sessionId: String, store: String) -> [String: Any] {
+        ["session_id": sessionId, "store": store]
+    }
+
+    static func storeForkPayload(sessionId: String, entryId: String) -> [String: Any] {
+        ["session_id": sessionId, "entry_id": entryId]
+    }
+
     func agentStoreFile(sessionId: String, store: String = "omp") -> Data? {
         guard let request = try? JSONSerialization.data(
-                withJSONObject: ["sessionId": sessionId, "store": store]),
+                withJSONObject: Self.storeFilePayload(sessionId: sessionId, store: store)),
               let data = storeRoundTrip(kind: SessionFrame.sessionFile,
                                         payload: request,
                                         replyKind: SessionFrame.sessionFileReply)
@@ -268,7 +284,7 @@ final class SessionDaemon {
     /// nil = unsupported daemon or fork failure.
     func agentStoreFork(sourceId: String, entryId: String) -> String? {
         guard let request = try? JSONSerialization.data(
-                withJSONObject: ["sessionId": sourceId, "entryId": entryId]),
+                withJSONObject: Self.storeForkPayload(sessionId: sourceId, entryId: entryId)),
               let reply = storeRoundTrip(kind: SessionFrame.sessionFork,
                                          payload: request,
                                          replyKind: SessionFrame.sessionForkReply),

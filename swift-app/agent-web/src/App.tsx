@@ -855,7 +855,7 @@ function Composer({ working, phase, scrollerRef, draft }: { working: boolean;
           ref={ref}
           value={text}
           rows={1}
-          placeholder="Message the agent…  (Enter 发送，/ 指令，@ 引用文件)"
+          placeholder="Message the agent…  (Enter 发送 · ⌘⏎ 排队 · ⇧⏎ 换行 · / 指令 · @ 文件)"
           onChange={(e) => {
             setText(e.target.value);
             setSlashIndex(0);

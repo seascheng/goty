@@ -703,6 +703,52 @@ enum AgentTest {
         check(PiLegacySession.builtinCommands.count == 23
               && PiLegacySession.builtinCommands.contains { $0.name == "compact" },
               "pi builtin directory carries /compact (get_commands omits builtins)")
+
+        // Store-RPC wire shapes must match the Rust structs EXACTLY —
+        // the daemon decodes snake_case, and a camelCase key fails
+        // from_json so silently the connection just closes (the
+        // 2026-09-02 empty-remote-history report; local panes never
+        // noticed because the local-store fallback masked it).
+        let filePayload = SessionDaemon.storeFilePayload(sessionId: "S", store: "omp")
+        check(Array(filePayload.keys.sorted()) == ["session_id", "store"],
+              "SESSION_FILE payload uses the daemon's snake_case keys")
+        let forkPayload = SessionDaemon.storeForkPayload(sessionId: "S", entryId: "E")
+        check(Array(forkPayload.keys.sorted()) == ["entry_id", "session_id"],
+              "SESSION_FORK payload uses the daemon's snake_case keys")
+
+        // pi tail-first window (omp parity): a small session renders in
+        // full; a big one cuts at a USER-message boundary with an anchor
+        // loadOlderHistory can page back through.
+        do {
+            func msg(_ id: String, _ role: String, _ text: String, _ bytes: Int)
+                    -> PiLegacySession.ReplayedMessage {
+                PiLegacySession.ReplayedMessage(
+                    id: id, role: role,
+                    events: role == "user" ? [.userMessage(text)] : [.messageChunk(text)],
+                    budget: bytes)
+            }
+            let small = [msg("u1", "user", "hi", 10), msg("a1", "assistant", "hello", 20)]
+            let whole = PiLegacySession.tailWindow(small, budget: 100)
+            check(whole.anchor == nil && whole.events.count == 2,
+                  "small pi session renders whole (no truncation)")
+            // u1/a1 … u5/a5, each turn ~90 bytes, budget 200 → keeps the
+            // last ~2 turns, cut at u4 (a user boundary, not mid-turn).
+            var big: [PiLegacySession.ReplayedMessage] = []
+            for i in 1...5 {
+                big.append(msg("u\(i)", "user", "q\(i)", 40))
+                big.append(msg("a\(i)", "assistant", "answer\(i)", 50))
+            }
+            let window = PiLegacySession.tailWindow(big, budget: 200)
+            check(window.anchor == "u4",
+                  "big pi session cuts at a user-message boundary (got \(String(describing: window.anchor)))")
+            let texts = window.events.compactMap { event -> String? in
+                if case .userMessage(let t) = event { return t }
+                if case .messageChunk(let t) = event { return t }
+                return nil
+            }
+            check(texts == ["q4", "answer4", "q5", "answer5"],
+                  "tail window keeps exactly the recent turns (got \(texts))")
+        }
         check(AgentRegistry.descriptors.map(\.key) == ["omp", "claude", "codex", "pi"],
               "registry order omp, claude, codex, pi")
         let piFixture = (CommandLine.arguments.count > 1

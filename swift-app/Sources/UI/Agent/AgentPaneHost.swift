@@ -347,10 +347,10 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
             case "steer":
                 self.session.steer(text, images: images)
             case "followUp":
-                // THE PANE owns the follow-up queue (no harness exposes
-                // queue removal/edit; omp's count-only mirror died with
-                // the reconcile below) — park it here, drainOutbox
-                // re-sends through send() at turn settle.
+                // THE PANE owns the follow-up queue: no harness exposes
+                // queue removal/edit (omp reports only a count), so
+                // park it here — drainOutbox re-sends through send()
+                // at turn settle.
                 self.enqueueOutbox(text, images: images)
             default:
                 // Stale-idle composer (UI thought idle, the session is

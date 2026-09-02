@@ -10,7 +10,7 @@
 
 <br />
 
-<sub>v0.1.0 · macOS 13+ · themed by your own Ghostty config · MPL-2.0</sub>
+<sub>v0.2.0 · macOS 13+ · themed by your own Ghostty config · MPL-2.0</sub>
 
 <br />
 
@@ -26,7 +26,7 @@ Grab the DMG from [**Releases**](https://github.com/seascheng/goty/releases/late
 
 <sub>macOS 13+ · Apple Silicon (arm64)</sub>
 
-**Agent GUI Session** ships with four adapters — `omp` (RPC mode, ≥ 18.0.11 recommended), `pi`, Claude Code, and Codex — whichever is on the target machine's PATH. Remote SSH hosts need the same, plus a CAPABILITY-4 `goty-sessiond` there.
+**Agent GUI Session** ships with four adapters — `omp` (RPC mode, ≥ 18.0.11 recommended), `pi`, Claude Code, and Codex — whichever is on the target machine's PATH. Remote SSH hosts need the same, plus a CAPABILITY-5+ `goty-sessiond` there (7+ for remote history & resume).
 
 <sub>Ad-hoc signed for now: on first open, right-click the app → **Open** (once). Updates check automatically — or Goty ▸ <b>Check for Updates…</b></sub>
 
@@ -49,7 +49,7 @@ Everything builds from one script (Xcode command-line tools + Rust stable):
 patches/build-libghostty.sh
 
 swift-app/build.sh          # builds goty + Goty.app + goty-sessiond
-swift-app/run-tests.sh      # four headless suites: layout, files, settings, ai
+swift-app/run-tests.sh      # five headless suites: layout, files, settings, ai, agent
 swift-app/restart-app.sh    # anchored restart (never pkill — it matches sessiond too)
 ```
 
@@ -64,7 +64,7 @@ swift-app/restart-app.sh    # anchored restart (never pkill — it matches sessi
 | **Right panel** | Files (local + remote over ssh) · Info · Git: branch, staged/unstaged, inline commit box, worktrees |
 | **Editor** | built-in overlay editor with syntax highlighting, markdown preview, gutter |
 | **AI** | `@ai` inline trigger · streaming markdown card · bash / write / edit proposals with confirm · OpenAI-compatible endpoints |
-| **Agents** | `@omp` / `@pi` / `@claude` / `@codex` in any pane opens an Agent GUI space (bare `@omp` just opens it) · streaming transcript with tool cards and plans · model & thinking pickers · session history |
+| **Agents** | `@omp` / `@pi` / `@claude` / `@codex` in any pane opens an Agent GUI space (bare `@omp` just opens it) · streaming transcript with tool cards and plans · model & thinking pickers · session history · live steering (Enter interrupts, ⌘⏎ queues) with a manageable follow-up queue |
 | **Settings** | everything Ghostty-configurable, searchable, applies live to open terminals |
 
 <div align="center">
@@ -93,7 +93,7 @@ invalidation) live in `CLAUDE.md` and are binding.
 <div align="center">
 <sub>
 
-Terminal core from [Ghostty](https://github.com/ghostty-org/ghostty) · [MPL-2.0](LICENSE) · v0.1.0
+Terminal core from [Ghostty](https://github.com/ghostty-org/ghostty) · [MPL-2.0](LICENSE) · v0.2.0
 
 </sub>
 </div>
