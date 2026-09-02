@@ -109,10 +109,12 @@ final class OmpSession: PiSession {
         // The ready frame rides the ring replay on attach. Two windows:
         //
         // - ATTACH (the pane's process booted long ago): a rolled ring
-        //   (64MB of output) has already dropped the ready frame — the
-        //   probe answers in milliseconds, so a SHORT window turns the
-        //   worst-case button delay from 10s into ~1.5s (2026-09-02
-        //   slow-models-on-old-tab report).
+        //   has already dropped the ready frame — the probe answers in
+        //   milliseconds, so a SHORT window keeps the worst-case attach
+        //   near-instant (2026-09-02 slow-models-on-old-tab report;
+        //   tightened 2026-09-02 again with the 1MB ring: rolling is
+        //   the COMMON case now, and a probe that races a still-
+        //   streaming ring-ready is harmless — first handshake wins).
         // - SPAWN: a fresh omp may legitimately take seconds before its
         //   RPC loop is up (MCP servers, network pulls) — the probe
         //   failing there would MURDER a slow-booting pane (2026-08-31
@@ -121,7 +123,7 @@ final class OmpSession: PiSession {
         // Armed per open: a reconnect's attach needs its own window
         // (the one-shot `readyTimeoutScheduled` guard left later
         // attaches probe-less, falling to the 90s watchdog).
-        let window: TimeInterval = attachedExisting ? 1.5 : 10
+        let window: TimeInterval = attachedExisting ? 0.25 : 10
         DispatchQueue.main.asyncAfter(deadline: .now() + window) { [weak self] in
             self?.handleReadyTimeout()
         }

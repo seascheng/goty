@@ -273,7 +273,15 @@ class PiSession: AgentSessioning {
             guard let opened = self.daemon.openPaneWithAttachment(
                 id: self.paneId, cwd: self.cwd, shell: self.shellName, args: args,
                 environment: self.environment, grid: self.grid,
-                noEcho: true, ringBytes: 16_777_216,
+                // 1MB ring for every pi-mono pane: both dialects rebuild
+                // transcripts from their history source (store /
+                // get_messages), never from the ring — the ring only
+                // feeds omp's boot-frame mining (ready frame,
+                // available_commands_update), which quiet panes still
+                // carry inside 1MB and busy panes lose to the probe
+                // path (handleReadyTimeout) anyway. Streaming 16× less
+                // snapshot per attach is the faster load.
+                noEcho: true, ringBytes: 1_048_576,
                 onFrame: { [weak self] kind, data in
                     self?.handleTransportFrame(kind: kind, data: data)
                 },

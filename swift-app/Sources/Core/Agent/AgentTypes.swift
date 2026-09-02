@@ -476,7 +476,11 @@ extension AgentSessionEvent {
         case .starting(let agent):
             return ["type": "starting", "agent": agent]
         case .ready:
-            return ["type": "status", "text": "就绪"]
+            // Session-lifecycle signal, NOT transcript content: "就绪"
+            // as a notice block accumulated once per load (no reset on
+            // bare gate releases) — readiness shows through state
+            // affordances (starting chip gone, composer enabled).
+            return ["type": "ready"]
         case .statusFlash(let text):
             return ["type": "statusFlash", "text": text]
         case .userMessage(let text):

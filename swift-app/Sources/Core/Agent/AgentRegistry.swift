@@ -57,8 +57,11 @@ enum AgentRegistry {
             label: "OMP",
             binary: "omp",
             storeListKey: "omp",
+            // NOTE: ringBytes here is descriptive metadata only — the
+            // live value every pi-mono pane spawns with lives in
+            // PiSession.openPane (1MB, see the comment there).
             spawn: AgentSpawn(command: "omp", args: ["--mode", "rpc"],
-                              ringBytes: 67_108_864),
+                              ringBytes: 1_048_576),
             make: { params in OmpSession(params: params) }),
         AgentDescriptor(
             key: "claude",
@@ -83,16 +86,9 @@ enum AgentRegistry {
             label: "pi",
             binary: "pi",
             storeListKey: "pi",
+            // Descriptive only — see PiSession.openPane for the live
+            // ring size (1MB, both dialects).
             spawn: AgentSpawn(command: "pi", args: ["--mode", "rpc"],
-                              // pi suppresses ring replay entirely (its
-                              // transcript rebuilds from get_messages),
-                              // so the ring is pure pumping waste: a 1MB
-                              // tail keeps diagnostics alive while the
-                              // attach snapshot streams 16× less. omp
-                              // KEEPS its big ring — ready-frame and
-                              // available_commands_update mining from a
-                              // long-lived pane's boot frames is what
-                              // makes ITS attach instant.
                               ringBytes: 1_048_576),
             make: { params in PiLegacySession(params: params) }),
     ]

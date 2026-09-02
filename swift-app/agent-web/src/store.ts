@@ -145,6 +145,7 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("branchState"), active: z.boolean() }),
   z.object({ type: z.literal("working"), value: z.boolean() }),
   z.object({ type: z.literal("starting"), agent: z.string() }),
+  z.object({ type: z.literal("ready") }),
   z.object({ type: z.literal("status"), text: z.string() }),
   z.object({ type: z.literal("configOptions"), options: z.unknown().nullish() }),
   z.object({ type: z.literal("commands"), commands: z.unknown().nullish() }),
@@ -231,6 +232,7 @@ function coerceList<T>(raw: unknown, schema: z.ZodType<T>): T[] {
 /// Events that definitively end the initial startup phase. Static lookup:
 /// no per-event allocation on transcript replay.
 const STARTING_TERMINATORS: Record<string, true> = {
+  ready: true,
   status: true,
   plan: true,
   runtimeStatus: true,
@@ -649,6 +651,10 @@ class Store {
         break;
       }
       case "starting": this.starting = event.agent; break;
+      case "ready":
+        // Handshake complete — pure state (the STARTING_TERMINATORS
+        // lookup already cleared `starting`); never transcript content.
+        break;
       case "status":
         // Agent notices (extension setStatus, command_output…): transcript
         // lines, not a hidden field — /compact's "Compaction failed: …"

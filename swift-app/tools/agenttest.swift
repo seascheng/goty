@@ -343,7 +343,8 @@ enum AgentTest {
         print("— registry —")
         let omp = AgentRegistry.descriptor(for: "omp")
         check(omp?.spawn.command == "omp" && omp?.spawn.args == ["--mode", "rpc"], "omp rpc spawn")
-        check(omp?.spawn.ringBytes == 67_108_864, "omp uses the 64 MiB ring")
+        check(omp?.spawn.ringBytes == 1_048_576,
+              "pi-mono panes use the 1 MiB ring (live value: PiSession.openPane)")
         check(AgentRegistry.descriptors.first?.key == "omp", "picker order leads with omp")
         let path = UserShellEnv.asDictionary["PATH"] ?? ""
         check(omp?.isAvailable(path: path) == true, "omp resolves in captured PATH")
