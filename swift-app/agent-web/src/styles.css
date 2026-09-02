@@ -256,6 +256,32 @@ body {
   transition: border-color 0.12s;
 }
 .composer-box:focus-within { border-color: var(--accent); }
+/* — image attachments (paste / 📎 / drop) — */
+.attach-row {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 6px 2px 2px;
+}
+.attach-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  max-width: 220px; padding: 3px 6px 3px 3px;
+  background: var(--surface2); border: 1px solid var(--border-accent);
+  border-radius: 8px;
+}
+.attach-thumb {
+  width: 26px; height: 26px; border-radius: 5px; object-fit: cover;
+  display: block; background: var(--surface3);
+}
+.attach-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: var(--foreground);
+}
+.attach-x {
+  flex: none; width: 16px; height: 16px; padding: 0; line-height: 1;
+  border: none; border-radius: 50%; background: none; cursor: pointer;
+  color: var(--muted); font-size: 10px;
+}
+.attach-x:hover { background: var(--surface3); color: var(--foreground); }
+.attach-note { font-size: 11px; color: var(--warn, #e0a030); }
 .composer textarea {
   width: 100%; background: none; border: none; outline: none; resize: none;
   color: var(--foreground); font: inherit; line-height: 1.55;
@@ -681,6 +707,21 @@ body {
 .outbox-text {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.outbox-actions {
+  margin-left: auto; flex: none; display: none; gap: 2px;
+}
+.outbox-row:hover .outbox-actions,
+.outbox-actions:focus-within { display: flex; }
+.outbox-actions button {
+  border: none; background: none; color: var(--fg-extra-muted);
+  font-size: 11px; line-height: 1; padding: 2px 5px; cursor: pointer;
+  border-radius: 4px;
+}
+.outbox-actions button:hover {
+  color: var(--foreground);
+  background: var(--surface2);
+}
+.outbox-actions button:last-child:hover { color: var(--destructive); }
 
 /* Render-crash fallback (main.tsx ErrorBoundary) */
 .errorBoundary {

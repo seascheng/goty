@@ -330,7 +330,11 @@ final class RemoteDaemonLink {
     /// session mid-kill — hence the `[g]` character-class trick.
     func upgradeDaemon() {
         queue.async { [weak self] in
-            guard let self, self.state == .outdated, !self.stopping else { return }
+            // `.ready` is accepted-outdated: the once-per-build prompt
+            // was declined (or missed) — an explicit menu action must
+            // still reach the kill-and-reboot pipeline.
+            guard let self, !self.stopping,
+                  self.state == .outdated || self.state == .ready else { return }
             self.state = .connecting
             self.daemon = nil
             if let binPath = self.remoteBinPath {

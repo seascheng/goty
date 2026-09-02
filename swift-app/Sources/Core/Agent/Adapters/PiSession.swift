@@ -84,7 +84,15 @@ class PiSession: AgentSessioning {
     private var gatedEvents: [AgentSessionEvent] = []
     private var replayGateTimeout: DispatchWorkItem?
     private var resumeSessionId: String?
-    var nextRequestID = 1
+    /// Randomly seeded: request ids must never collide with the ids
+    /// of RESPONSE frames replayed from an attached pane's ring — the
+    /// counter used to restart at 1 every session, so a reattach's
+    /// handshake get_state ("r1") got answered by YESTERDAY'S replayed
+    /// "r1" response, and pi's get_commands completion was consumed by
+    /// a stale poll response instead of the real one (omp survived by
+    /// design: its command directory rides the pushed
+    /// available_commands_update frame, not an id-matched request).
+    var nextRequestID = Int.random(in: 1_000_000 ..< 500_000_000)
     let responseLock = NSLock()
     private var pendingResponses: [String: ([String: Any]) -> Void] = [:]
 
@@ -145,10 +153,16 @@ class PiSession: AgentSessioning {
     /// gate; pi: --session when the store still has it).
     func appendSpawnArgs(_ args: inout [String], resume sessionId: String?) {}
     /// Spawn handshake kickoff: omp waits for the ready frame (or its
-    /// timeout probe), pi asks immediately.
-    func beginHandshakeAfterSpawn(completion: ((Bool) -> Void)?) {
+    /// timeout probe), pi asks immediately. `attachedExisting`: the
+    /// daemon pane already existed (its process booted long ago) —
+    /// dialects may shrink boot-tolerance windows on that path.
+    func beginHandshakeAfterSpawn(attachedExisting: Bool,
+                                  completion: ((Bool) -> Void)?) {
         handshake(completion: completion)
     }
+    /// A handshake just completed against the live process — a fresh
+    /// healthy epoch. Dialects reset their one-shot heal guards here.
+    func handshakeSucceeded() {}
     /// The handshake's state round-trip: omp negotiates protocol v2
     /// first, pi goes straight to get_state.
     func requestAgentState(_ completion: @escaping ([String: Any]) -> Void) {
@@ -279,7 +293,8 @@ class PiSession: AgentSessioning {
             }
             opened.session.start()
             self.pane = opened.session
-            self.beginHandshakeAfterSpawn(completion: completion)
+            self.beginHandshakeAfterSpawn(attachedExisting: opened.attachedExisting,
+                                          completion: completion)
         }
     }
 
@@ -294,6 +309,7 @@ class PiSession: AgentSessioning {
             return
         }
         handshakeStarted = true
+        handshakeSucceeded()
         sessionId = state["sessionId"] as? String ?? sessionId
         // Ring-mined command directory may arrive BEFORE the handshake
         // sets sessionId (the whole boot sequence, ready frame included,
@@ -430,7 +446,7 @@ class PiSession: AgentSessioning {
         delegate?.session(self, didEmit: events)
     }
 
-    func send(_ text: String) {
+    func send(_ text: String, images: [AgentImage]) {
         guard !isWorking else { return }
         isWorking = true
         lastSendAt = Date()
@@ -453,7 +469,9 @@ class PiSession: AgentSessioning {
             }
         }
         responseLock.unlock()
-        channel.send(["id": id, "type": "prompt", "message": text])
+        var frame: [String: Any] = ["id": id, "type": "prompt", "message": text]
+        if !images.isEmpty { frame["images"] = images.map(\.piWire) }
+        channel.send(frame)
     }
 
     func cancel() {
@@ -747,17 +765,22 @@ class PiSession: AgentSessioning {
                       "result": tool.run(arguments)])
     }
 
-    func steer(_ text: String) {
-        guard isWorking else { return send(text) }
+    func steer(_ text: String, images: [AgentImage]) {
+        guard isWorking else { return send(text, images: images) }
         // A mid-turn builtin (/rename …) must NOT ride a steer frame —
         // pi-mono never parses commands on the steer path, and sending
         // a prompt mid-stream kills the turn on omp 18.0.11. Park it.
-        if Self.isBuiltinCommand(text, commandNames: commands.map(\.name)) {
+        // Builtins are text-only by nature: an image-bearing /command
+        // steers as typed (the model sees both).
+        if images.isEmpty,
+           Self.isBuiltinCommand(text, commandNames: commands.map(\.name)) {
             pendingCommandText = text
             emit([.notice("⟳ 命令将在本轮结束后执行")])
             return
         }
-        channel.send(["type": "steer", "message": text])
+        var frame: [String: Any] = ["type": "steer", "message": text]
+        if !images.isEmpty { frame["images"] = images.map(\.piWire) }
+        channel.send(frame)
     }
 
     /// Matches "/name" or "/name args" against the session's command
@@ -769,10 +792,9 @@ class PiSession: AgentSessioning {
         return commandNames.contains(String(head.dropFirst()))
     }
 
-    func followUp(_ text: String) {
-        guard isWorking else { return send(text) }
-        channel.send(["type": "follow_up", "message": text])
-    }
+    // followUp: REMOVED — the pane owns the follow-up queue (queue
+    // management needs text-level control no harness exposes) and
+    // re-sends through send()/steer() at turn settle.
 
     // MARK: - protocol capabilities
 

@@ -26,7 +26,7 @@ protocol AgentSessioning: AnyObject {
     var debugReplayFrames: Int { get }
 
     func connect(completion: ((Bool) -> Void)?)
-    func send(_ text: String)
+    func send(_ text: String, images: [AgentImage])
     func cancel()
     func respondPermission(requestID: String, optionId: String)
     func setConfigOption(id: String, value: String)
@@ -47,9 +47,9 @@ protocol AgentSessioning: AnyObject {
     // statically binds to the extension default and silently bypasses
     // the adapter's implementation (the 2026-08-31 vanishing-steer bug).
     /// Mid-turn steering: `steer` interrupts the current run with the
-    /// message, `followUp` queues it for after the run settles.
-    func steer(_ text: String)
-    func followUp(_ text: String)
+    /// message. Follow-ups are NOT an adapter concern — the pane owns
+    /// the outbox queue and re-sends through send() at turn settle.
+    func steer(_ text: String, images: [AgentImage])
     /// Fast-mode toggle (omp set_fast_mode).
     func setFastMode(enabled: Bool)
     /// OAuth login surface; empty completion = unsupported.
@@ -96,11 +96,14 @@ extension AgentSessioning {
     /// connect (claude: store replay + --resume respawn) and the caller
     /// must NOT also load() after connect.
     var selfManagesRestore: Bool { false }
-    /// Mid-turn steering (RPC steer/follow_up): `steer` interrupts the
-    /// current run with the message, `followUp` queues it for after the
-    /// run settles. Unsupported adapters no-op.
-    func steer(_ text: String) {}
-    func followUp(_ text: String) {}
+    /// Mid-turn steering (RPC steer): `steer` interrupts the current run
+    /// with the message. Unsupported adapters no-op.
+    func steer(_ text: String, images: [AgentImage]) {}
+    /// Single-argument conveniences: extension bodies forward into the
+    /// requirements above, so calls through `any AgentSessioning`
+    /// still dispatch dynamically to the adapter's implementation.
+    func send(_ text: String) { send(text, images: []) }
+    func steer(_ text: String) { steer(text, images: []) }
     /// Fast-mode toggle (omp set_fast_mode). Unsupported adapters no-op.
     func setFastMode(enabled: Bool) {}
     /// OAuth login surface (omp get_login_providers/login); empty = none.

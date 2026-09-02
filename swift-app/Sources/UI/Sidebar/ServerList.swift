@@ -3,11 +3,23 @@ import AppKit
 
 func buildServerMenu(rowEnabled: Bool, onReconnect: (() -> Void)?,
                 onDisconnect: (() -> Void)?,
+                onUpgradeDaemon: (() -> Void)? = nil,
                 onDeleteWorkspace: ((Bool) -> Void)?) -> NSMenu {
     let menu = NSMenu()
     if let onReconnect {
         menu.addItem(ActionMenuItem("Reconnect", symbol: "arrow.clockwise",
                                     action: onReconnect))
+    }
+    // The daemon upgrade is its own escape hatch: the once-per-build
+    // boot prompt can be declined (remembered per host) or land between
+    // capability bands — the transcript notice then shows with no
+    // affordance. nil = the link is current; the item disappears.
+    if let onUpgradeDaemon {
+        menu.addItem(ActionMenuItem("Upgrade Remote Daemon…",
+                                    symbol: "arrow.up.circle",
+                                    action: onUpgradeDaemon))
+    }
+    if onReconnect != nil || onUpgradeDaemon != nil {
         menu.addItem(.separator())
     }
     if rowEnabled, let onDisconnect {
@@ -35,6 +47,7 @@ final class ServerRailButton: NSView {
     private let rowEnabled: Bool
     private let onReconnect: (() -> Void)?
     private let onDisconnect: (() -> Void)?
+    private let onUpgradeDaemon: (() -> Void)?
     private let onDeleteWorkspace: ((Bool) -> Void)?
     private var selected: Bool
     private var isHovered = false
@@ -42,12 +55,14 @@ final class ServerRailButton: NSView {
 
     init(name: String, state: WorkspaceCoordinator.WsState, selected: Bool,
          onReconnect: (() -> Void)?, onDisconnect: (() -> Void)?,
+         onUpgradeDaemon: (() -> Void)? = nil,
          onDeleteWorkspace: ((Bool) -> Void)?, select: @escaping () -> Void) {
         self.selected = selected
         self.rowEnabled = state != .disconnected
         self.onClick = select
         self.onReconnect = onReconnect
         self.onDisconnect = onDisconnect
+        self.onUpgradeDaemon = onUpgradeDaemon
         self.onDeleteWorkspace = onDeleteWorkspace
         switch state {
         case .connected: dotFill = Chrome.theme.wsConnected
@@ -94,6 +109,7 @@ final class ServerRailButton: NSView {
         NSMenu.popUpContextMenu(
             buildServerMenu(rowEnabled: rowEnabled, onReconnect: onReconnect,
                        onDisconnect: onDisconnect,
+                       onUpgradeDaemon: onUpgradeDaemon,
                        onDeleteWorkspace: onDeleteWorkspace),
             with: event, for: self)
     }

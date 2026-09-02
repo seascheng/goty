@@ -187,7 +187,7 @@ final class CodexSession: AgentSessioning {
         }
     }
 
-    func send(_ text: String) {
+    func send(_ text: String, images: [AgentImage]) {
         guard let threadId, !isWorking else { return }
         // Builtin slash handling: app-server takes raw text; /compact
         // is ours to translate.
@@ -196,13 +196,43 @@ final class CodexSession: AgentSessioning {
             return
         }
         isWorking = true
+        // turn/start input carries text blocks only (no base64 image
+        // block in the app-server dialect we bind to) — tty7's
+        // convention instead: stage the bytes next to the agent and
+        // name the paths; codex loads readable image paths as images.
+        var prompt = text
+        for image in images {
+            if let path = Self.stageImage(image) {
+                prompt += "\n\(path)"
+            } else {
+                emit([.notice("⚠︎ 一张图片未能保存，已跳过")])
+            }
+        }
         client.request("turn/start", [
             "threadId": threadId,
-            "input": [["type": "text", "text": text]],
+            "input": [["type": "text", "text": prompt]],
         ]) { [weak self] _ in
             // turn outcome arrives as turn/completed notification; the
             // request result only acknowledges the turn object.
             _ = self
+        }
+    }
+
+    /// Base64 → temp file the codex process can read (it runs on this
+    /// Mac — runsOnThisMac default). tty7 models this exact staging.
+    private static func stageImage(_ image: AgentImage) -> String? {
+        guard let bytes = Data(base64Encoded: image.data) else { return nil }
+        let ext = ["image/png": "png", "image/jpeg": "jpg", "image/gif": "gif",
+                   "image/webp": "webp"][image.mimeType] ?? "png"
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("goty-attachments", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("img-\(UUID().uuidString.prefix(8)).\(ext)")
+            try bytes.write(to: url)
+            return url.path
+        } catch {
+            return nil
         }
     }
 
@@ -309,19 +339,20 @@ final class CodexSession: AgentSessioning {
         }
     }
 
-    /// Mid-turn input queue — same contract as ClaudeSession: codex
-    /// has no steer/followUp RPC and the protocol defaults no-op'd, so
-    /// a mid-turn Enter was dropped silently. Parked, then sent when
-    /// the turn settles (send() re-runs its /compact translation then).
-    private var pendingMidTurn: [String] = []
+    /// Mid-turn steering park — same contract as ClaudeSession: codex
+    /// has no steer RPC and the protocol default no-op'd, so a mid-turn
+    /// interrupt was dropped silently. Parked, then sent when the turn
+    /// settles (send() re-runs its /compact translation then).
+    /// Follow-ups no longer route here: the pane's outbox owns queuing.
+    private var pendingMidTurn: [(text: String, images: [AgentImage])] = []
 
-    func steer(_ text: String) { enqueueMidTurn(text) }
+    func steer(_ text: String, images: [AgentImage]) {
+        enqueueMidTurn(text, images: images)
+    }
 
-    func followUp(_ text: String) { enqueueMidTurn(text) }
-
-    private func enqueueMidTurn(_ text: String) {
-        guard isWorking else { return send(text) }
-        pendingMidTurn.append(text)
+    private func enqueueMidTurn(_ text: String, images: [AgentImage]) {
+        guard isWorking else { return send(text, images: images) }
+        pendingMidTurn.append((text, images))
         emit([.notice("⟳ 消息已排队，本轮结束后发送")])
     }
 
@@ -329,7 +360,7 @@ final class CodexSession: AgentSessioning {
         guard !pendingMidTurn.isEmpty else { return }
         let queued = pendingMidTurn
         pendingMidTurn = []
-        for text in queued { send(text) }
+        for item in queued { send(item.text, images: item.images) }
     }
 
     private func handleNotification(method: String, params: [String: Any]) {

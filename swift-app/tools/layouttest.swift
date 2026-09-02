@@ -121,6 +121,107 @@ func run() {
             sidebar.toggleSpaceFold("/tmp/fold-b")
             check(sidebar.tabsRowsForTest.allSatisfy { !$0.isHidden }, "expand restores every row")
         }
+        // — Sidebar drag-reorder: visual order → one array move —
+        do {
+            // Dropped between two tabs: land right after the upper one.
+            let between = SidebarView.reorderMove(visualOrder: [0, 3, 1], moved: 3)
+            check(between?.from == 3 && between?.to == 1,
+                  "drag between tabs lands after the tab above")
+            // Dragged DOWN past a tab that started above it.
+            let swap = SidebarView.reorderMove(visualOrder: [1, 0], moved: 0)
+            check(swap?.from == 0 && swap?.to == 1,
+                  "drag past the neighbor swaps them")
+            // Dragged to the top slot: insert before the old first.
+            let top = SidebarView.reorderMove(visualOrder: [2, 0, 1], moved: 2)
+            check(top?.from == 2 && top?.to == 0,
+                  "drag to the top lands before the old first")
+            // No-ops: a lone tab never moves; dropping back in place is a
+            // same-index move the coordinator ignores.
+            check(SidebarView.reorderMove(visualOrder: [5], moved: 5) == nil,
+                  "single-member section cannot be reordered")
+            let same = SidebarView.reorderMove(visualOrder: [0, 1], moved: 0)
+            check(same?.from == 0 && same?.to == 0,
+                  "dropping back in place is a no-op move")
+        }
+
+        // — Sidebar drag-reorder: the full mouse session through the
+        // row's own event handlers (down → dragged → up) —
+        do {
+            let sidebar = SidebarView()
+            func spaceTab(_ id: String, _ cwd: String) -> TabState {
+                TabState(id: id, name: id, panes: [PaneState(id: "p-\(id)", cwd: cwd)])
+            }
+            let ws = WorkspaceState(id: UUID(), name: "local",
+                tabs: [spaceTab("a", "/tmp/space"), spaceTab("b", "/tmp/space"),
+                       spaceTab("c", "/tmp/space")],
+                focusedTabIndex: 0, sshHost: nil)
+            // A real (offscreen) window: the drag session converts
+            // window coordinates, which needs a window in the chain.
+            let win = NSWindow(contentRect: NSRect(x: -2000, y: -2000, width: 240, height: 500),
+                               styleMask: [.borderless], backing: .buffered, defer: false)
+            let host = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 500))
+            win.contentView = host
+            sidebar.frame = host.bounds
+            sidebar.autoresizingMask = [.width, .height]
+            host.addSubview(sidebar)
+            sidebar.render(workspace: ws)
+            win.layoutIfNeeded()
+            check(sidebar.tabsRowsForTest.count == 3, "three rows render for the drag test")
+            // Drag b (middle) toward a's midline — far enough to cross
+            // the click threshold and a's midpoint.
+            let a = sidebar.tabsRowsForTest[0] as! SidebarRowView
+            let b = sidebar.tabsRowsForTest[1] as! SidebarRowView
+            let down = b.convert(NSPoint(x: b.bounds.midX, y: b.bounds.midY), to: nil)
+            // Aim ABOVE a's midline (rows live in a NON-flipped
+            // container: top edge = maxY). The reorder triggers once
+            // the pointer crosses the sibling's midline, so an
+            // exact-midY aim must not move anything (checked below).
+            let wrap = a.superview!
+            let up = wrap.convert(NSPoint(x: a.frame.midX, y: a.frame.maxY - 5),
+                                  to: nil)
+            func ev(_ type: NSEvent.EventType, _ at: NSPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: at, modifierFlags: [],
+                                   timestamp: 0, windowNumber: win.windowNumber,
+                                   context: nil, eventNumber: 0, clickCount: 1,
+                                   pressure: 0)!
+            }
+            var reordered: (from: Int, to: Int)?
+            sidebar.onReorderTab = { reordered = ($0, $1) }
+            b.mouseDown(with: ev(.leftMouseDown, down))
+            // Sub-threshold wiggle must NOT start a session.
+            b.mouseDragged(with: ev(.leftMouseDragged,
+                                    NSPoint(x: down.x, y: down.y - 2)))
+            b.mouseUp(with: ev(.leftMouseUp, NSPoint(x: down.x, y: down.y - 2)))
+            check(reordered == nil, "sub-threshold drag commits nothing")
+            // The real drag: down on b, move past the threshold toward
+            // a, drop.
+            b.mouseDown(with: ev(.leftMouseDown, down))
+            b.mouseDragged(with: ev(.leftMouseDragged,
+                                    wrap.convert(NSPoint(x: a.frame.midX, y: a.frame.midY),
+                                                 to: nil)))
+            check(sidebar.tabsRowsForTest.compactMap { ($0 as? SidebarRowView)?.tabIndex }
+                    == [0, 1, 2],
+                  "pointer on the neighbor's exact midline moves nothing")
+            b.mouseUp(with: ev(.leftMouseUp, up))
+            check(reordered == nil, "midline-hover drop commits nothing")
+            // The real drag: down on b, move past the threshold toward
+            // a, drop. Mid-drag the row DIMS to 0.25 (the landing slot)
+            // while a ghost snapshot follows the pointer — the row must
+            // stay in the stack: hiding it would cut AppKit's drag-event
+            // delivery (the stuck-lift report).
+            b.mouseDown(with: ev(.leftMouseDown, down))
+            b.mouseDragged(with: ev(.leftMouseDragged, up))
+            check(b.alphaValue < 1 && !b.isHidden,
+                  "drag dims the row in place (never hides it)")
+            let visual = sidebar.tabsRowsForTest.compactMap { ($0 as? SidebarRowView)?.tabIndex }
+            check(visual == [1, 0, 2], "row live-moves above its neighbor (got \(visual))")
+            b.mouseUp(with: ev(.leftMouseUp, up))
+            check(b.alphaValue == 1, "drop restores full opacity")
+            let after = sidebar.tabsRowsForTest.compactMap { ($0 as? SidebarRowView)?.tabIndex }
+            check(after == [1, 0, 2], "drop keeps the row above its neighbor (got \(after))")
+            check(reordered?.from == 1 && reordered?.to == 0,
+                  "drop commits the array move (got \(String(describing: reordered)))")
+        }
     let d = UserDefaults.standard
     d.set(false, forKey: "sidebarCollapsed")
     d.set(200.0, forKey: "sidebarWidth")

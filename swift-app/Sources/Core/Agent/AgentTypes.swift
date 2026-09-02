@@ -1,6 +1,32 @@
 // goty — see CLAUDE.md for the working principles.
 import Foundation
 
+/// One image riding a user message (paste/pick/drop in the composer).
+/// `data` is bare base64 (no data: prefix) — the pi-mono RPC ImageContent
+/// shape; claude/codex adapters translate from it. Byte-for-byte what
+/// the webview clipboard reader produced.
+struct AgentImage {
+    let mimeType: String
+    let data: String
+
+    init?(_ raw: [String: Any]) {
+        guard let mimeType = raw["mimeType"] as? String,
+              let data = raw["data"] as? String else { return nil }
+        self.mimeType = mimeType
+        self.data = data
+    }
+
+    init(mimeType: String, data: String) {
+        self.mimeType = mimeType
+        self.data = data
+    }
+
+    /// pi-mono RPC `images` entry — {type:"image", mimeType, data}.
+    var piWire: [String: Any] {
+        ["type": "image", "mimeType": mimeType, "data": data]
+    }
+}
+
 /// Hand-written M1 subset of the ACP content shapes (spec: Risk — ACP
 /// v2 drift; we bind to v1 only, loosely, and ignore unknown fields).
 struct AgentContent {

@@ -233,11 +233,20 @@ function ToolCard({ id }: { id: string }) {
   );
 }
 
+/// PlanPanel fold state — see the component note. Written on toggle,
+/// read on (re)mount.
+let planDockOpen = true;
+
 /// Dock plan panel: pinned above the composer (TUI model), phase-
 /// grouped, collapsible. Replaces the old inline transcript card —
 /// which the 60-block render window could scroll out of view.
 function PlanPanel({ entries }: { entries: PlanEntry[] }) {
-  const [open, setOpen] = useState(true);
+  // Fold state is MODULE-scoped: at turn end the dock flickers through
+  // empty (queue flush, plan null) and unmounts — a local useState
+  // re-opened the panel the user had folded, and the taller dock then
+  // shoved the transcript (the auto-expand + scroll-jump report,
+  // 2026-09-02). Module scope survives the remount.
+  const [open, setOpen] = useState(planDockOpen);
   const done = entries.filter((e) => e.status === "completed").length;
   const phases: { name: string | null; items: PlanEntry[] }[] = [];
   for (const e of entries) {
@@ -247,9 +256,9 @@ function PlanPanel({ entries }: { entries: PlanEntry[] }) {
   }
   return (
     <div className={"dock-plan" + (open ? "" : " folded")}>
-      <button className="dock-head" onClick={() => setOpen(!open)}
+      <button className="dock-head"
+        onClick={() => setOpen((v) => { planDockOpen = !v; return !v; })}
         title={open ? "收起计划面板" : "展开计划面板"}>
-        <span className={"chevron" + (open ? " up" : "")}>▸</span>
         <span className="plan-title">计划</span>
         <span className="plan-progress">{done}/{entries.length}</span>
       </button>
@@ -507,9 +516,20 @@ function HistoryChip({ open, onToggle, onSelect }: {
   );
 }
 
-function Composer({ working, phase }: { working: boolean;
-  phase: "thinking" | "executing" | "awaitingPermission" | null }) {
+function Composer({ working, phase, scrollerRef, draft }: { working: boolean;
+  phase: "thinking" | "executing" | "awaitingPermission" | null;
+  scrollerRef?: { current: HTMLDivElement | null };
+  draft?: { text: string; seq: number } }) {
   const [text, setText] = useState("");
+  const lastDraftSeq = useRef(0);
+  // ✎ on a queued row: the host already dequeued the text; land it in
+  // the composer (overwrite — editing intent) and focus for typing.
+  useEffect(() => {
+    if (!draft || draft.seq === lastDraftSeq.current || draft.seq === 0) return;
+    lastDraftSeq.current = draft.seq;
+    setText(draft.text);
+    ref.current?.focus();
+  }, [draft]);
   const [openPop, setOpenPop] = useState<string | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const [atIndex, setAtIndex] = useState(0);
@@ -526,6 +546,52 @@ function Composer({ working, phase }: { working: boolean;
     const t = setInterval(() => setRetryNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [store.retry]);
+
+  // ——— Image attachments (paste ⌘V / picker 📎 / drop) ———
+  // Limits mirror gooey-pi's composer contract: 8 files max, 10 MiB
+  // total, shared across all three intake paths. `data` stays bare
+  // base64 — AgentImage on the Swift side takes it verbatim.
+  const MAX_ATTACH = 8;
+  const MAX_ATTACH_BYTES = 10 * 1024 * 1024;
+  const [attach, setAttach] = useState<
+    { id: number; name: string; mimeType: string; data: string }[]>([]);
+  const [attachNote, setAttachNote] = useState<string | null>(null);
+  const attachSeq = useRef(0);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const attachBytes = (a: typeof attach) =>
+    a.reduce((n, x) => n + Math.floor(x.data.length * 0.75), 0);
+
+  const ingestFiles = async (files: File[]) => {
+    const picked = files.filter((f) => f.type.startsWith("image/"));
+    if (picked.length < files.length) {
+      setAttachNote("仅支持图片附件");
+    }
+    const loaded: typeof attach = [];
+    for (const f of picked) {
+      const url = await new Promise<string>((resolve) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result));
+        r.onerror = () => resolve("");
+        r.readAsDataURL(f);
+      });
+      const b64 = url.slice(url.indexOf(",") + 1);
+      if (!b64) { setAttachNote(`无法读取 ${f.name}`); continue; }
+      loaded.push({ id: attachSeq.current++, name: f.name || "图片",
+        mimeType: f.type, data: b64 });
+    }
+    setAttach((cur) => {
+      const next = [...cur, ...loaded].slice(0, MAX_ATTACH);
+      if (loaded.length > 0 && cur.length + loaded.length > MAX_ATTACH) {
+        setAttachNote(`最多 ${MAX_ATTACH} 张图片`);
+      }
+      if (attachBytes(next) > MAX_ATTACH_BYTES) {
+        setAttachNote("附件总大小超过 10 MiB");
+        return cur.slice(0, Math.max(0, next.length - loaded.length));
+      }
+      return next;
+    });
+  };
+
 
   // Boot focus (DOM side): the app focuses the webview (responder
   // level); without this the page's activeElement stays BODY and every
@@ -585,24 +651,28 @@ function Composer({ working, phase }: { working: boolean;
   /// turn — the ⌘⏎ path, omp's app.message.followUp).
   const submit = (mode: "normal" | "steer" | "followUp" = "normal") => {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    const images = attach.map(({ mimeType, data }) => ({ mimeType, data }));
+    if (!trimmed && images.length === 0) return;
     if (working && mode === "normal") mode = "steer";
-    postToHost({ type: "send", text: trimmed, mode });
+    postToHost({ type: "send", text: trimmed, mode, images });
+    const echo = trimmed || (images.length ? `🖼 ×${images.length}` : "");
     if (mode === "followUp") {
-      // QUEUED, not sent yet: omp holds it until the turn settles (probe
-      // 2026-09-01: no user echo at enqueue, only at delivery). Echoing
-      // it now would park it mid-stream above text that keeps appending —
-      // park it instead; the store flushes it as a user block at
-      // turnEnded, so it lands in true processing order at the bottom.
-      store.apply({ type: "queueMessage", text: trimmed });
+      // QUEUED, not sent yet — the PANE (Swift) owns the outbox now: it
+      // pushes queueMessage back, so no optimistic echo here (a local
+      // push would double the row). The dock row and the delivery user
+      // block (queueDelivered at turn settle) are both host-driven.
     } else {
       // steer interrupts NOW (echoing immediately is the true order);
       // idle sends render optimistically until omp's suppressed echo.
-      store.apply({ type: "userMessage", text: trimmed });
+      store.apply({ type: "userMessage", text: echo });
     }
-    setHist((h) => (h[h.length - 1] === trimmed ? h : [...h, trimmed]));
-    histIdx.current = null;
+    if (trimmed) {
+      setHist((h) => (h[h.length - 1] === trimmed ? h : [...h, trimmed]));
+      histIdx.current = null;
+    }
     setText("");
+    setAttach([]);
+    setAttachNote(null);
   };
 
   // Auto-fit height on EVERY text change — programmatic ones included
@@ -612,8 +682,16 @@ function Composer({ working, phase }: { working: boolean;
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
+    // Composer growth eats the transcript viewport ABOVE it. When the
+    // reader is pinned at the tail, hold it there in the SAME layout
+    // pass — otherwise every wrapped line kicks the page up and the
+    // stream above visibly jumps while typing (2026-09-02 report).
+    const sc = scrollerRef?.current ?? null;
+    const pinned = sc != null
+      && sc.scrollHeight - sc.clientHeight - sc.scrollTop < 2;
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 160) + "px";
+    if (pinned && sc) sc.scrollTop = sc.scrollHeight;
   }, [text]);
 
   const pickSlash = (name: string) => {
@@ -708,7 +786,16 @@ function Composer({ working, phase }: { working: boolean;
 
   return (
     <div className="composer">
-      <div className="composer-box" ref={boxRef}>
+      <div
+        className="composer-box"
+        ref={boxRef}
+        onDragOver={(e) => { e.preventDefault(); }}
+        onDrop={(e) => {
+          if (e.dataTransfer?.files?.length) {
+            e.preventDefault();
+            void ingestFiles([...e.dataTransfer.files]);
+          }
+        }}>
         {(store.reconnecting || store.starting || store.error != null || store.retry != null
           || store.flash != null) && (
         <div className="composer-status">
@@ -741,6 +828,24 @@ function Composer({ working, phase }: { working: boolean;
           )}
         </div>
         )}
+        {(attach.length > 0 || attachNote != null) && (
+          <div className="attach-row">
+            {attach.map((a) => (
+              <span className="attach-chip" key={a.id} title={a.name}>
+                <img className="attach-thumb"
+                  src={`data:${a.mimeType};base64,${a.data}`} alt="" />
+                <span className="attach-name">{a.name}</span>
+                <button className="attach-x" aria-label={`移除 ${a.name}`}
+                  onClick={() => setAttach((cur) => cur.filter((x) => x.id !== a.id))}>✕</button>
+              </span>
+            ))}
+          </div>
+        )}
+        <input ref={fileInput} type="file" accept="image/*" multiple hidden
+          onChange={(e) => {
+            if (e.target.files?.length) void ingestFiles([...e.target.files]);
+            e.target.value = "";
+          }} />
         <textarea
           ref={ref}
           value={text}
@@ -754,6 +859,13 @@ function Composer({ working, phase }: { working: boolean;
             histIdx.current = null;
           }}
           onKeyDown={onComposerKeyDown}
+          onPaste={(e) => {
+            const files = [...(e.clipboardData?.files ?? [])];
+            if (files.length > 0) {
+              e.preventDefault();
+              void ingestFiles(files);
+            }
+          }}
         />
         {atOpen && atMatches.length > 0 && (
           <div className="slash-pop">
@@ -812,6 +924,8 @@ function Composer({ working, phase }: { working: boolean;
               store.apply({ type: "clearTranscript" });
               setOpenPop(null);
             }} />
+          <button className="icon-chip" title="添加图片（也可 ⌘V 粘贴或拖入）"
+            onClick={() => fileInput.current?.click()}>📎</button>
           {store.runtime?.fastEnabled != null && (
             <button
               className={"icon-chip fast" + (store.runtime.fastActive ? " on" : "")}
@@ -876,7 +990,8 @@ function Composer({ working, phase }: { working: boolean;
             </span>
           )}
           {working && (
-            <button className="action-btn queue" disabled={!text.trim()}
+            <button className="action-btn queue"
+              disabled={!text.trim() && attach.length === 0}
               title="排队发送 (⌘⏎) — 当前 turn 结束后依次处理"
               onClick={() => submit("followUp")}>
               ⇥
@@ -885,10 +1000,10 @@ function Composer({ working, phase }: { working: boolean;
           <button
             className={"action-btn " + (working ? "stop" : "send")
               + (phase === "awaitingPermission" ? " awaiting" : "")}
-            disabled={working ? false : !text.trim()}
+            disabled={working ? false : (!text.trim() && attach.length === 0)}
             title={working ? "插话发送 (Enter，中断当前 turn) / 停止 (空文本或 Esc)" : "发送 (Enter)"}
             onClick={() => working
-              ? (text.trim() ? submit("steer")
+              ? ((text.trim() || attach.length > 0) ? submit("steer")
                 : postToHost({ type: "stop" }))
               : submit()}>
             <Icon kind={working ? "stop" : "send"} />
@@ -1025,7 +1140,11 @@ export function App() {
   const scroller = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
 
-  // ——— scroll controller: happier's userScrollIntentOwner, distilled ———
+  // Composer draft injection (✎ on a queued row): seq-bump carries the
+  // text into the composer's INTERNAL state — the gooey-pi sendSignal
+  // pattern; seq 0 never fires.
+  const [draft, setDraft] = useState({ text: "", seq: 0 });
+
   // THREE invariants (their viewport subsystem, battle-tested):
   //  1. ONE writer: the only automatic scroll is follow-to-bottom, and
   //     only when (not parked) AND (no live user gesture). Multiple
@@ -1167,6 +1286,18 @@ export function App() {
     if (Math.abs(target - el.clientHeight - el.scrollTop) < 0.5) return;
     lastWriteAt.current = performance.now();
     el.scrollTop = target;
+    // One rAF correction: layout landing AFTER this write (dock
+    // remount at turn end, image decode) re-opens a gap under a pinned
+    // tail, leaving the pane parked mid-history (the "turn end scrolled
+    // me backwards" report, 2026-09-02).
+    requestAnimationFrame(() => {
+      if (parked.current) return;
+      if (performance.now() - lastRawInputAt.current < INTENT_WINDOW_MS) return;
+      const residual = el.scrollHeight - el.clientHeight - el.scrollTop;
+      if (residual < 0.5) return;
+      lastWriteAt.current = performance.now();
+      el.scrollTop = el.scrollHeight;
+    });
   });
 
   const onScroll = () => {
@@ -1243,6 +1374,17 @@ export function App() {
                 <div className="outbox-row" key={i}>
                   <span className="outbox-mark">⇥</span>
                   <span className="outbox-text">{text}</span>
+                  <span className="outbox-actions">
+                    <button type="button" title="立即插话：中断当前 turn，现在就发送这条"
+                      onClick={() => postToHost({ type: "queueSendNow", text })}>↑</button>
+                    <button type="button" title="收回编辑：放回输入框"
+                      onClick={() => {
+                        postToHost({ type: "queueRemove", text });
+                        setDraft({ text, seq: draft.seq + 1 });
+                      }}>✎</button>
+                    <button type="button" title="删除这条排队消息"
+                      onClick={() => postToHost({ type: "queueRemove", text })}>✕</button>
+                  </span>
                 </div>
               ))}
             </div>
@@ -1250,7 +1392,8 @@ export function App() {
         </div>
       )}
       {store.permission && <PermissionCard permission={store.permission} />}
-      <Composer working={store.working} phase={store.phase} />
+      <Composer working={store.working} phase={store.phase} scrollerRef={scroller}
+        draft={draft} />
       {store.stats && <StatsDialog stats={store.stats} />}
     </div>
   );

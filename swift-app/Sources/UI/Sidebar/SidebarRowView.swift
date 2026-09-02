@@ -9,6 +9,14 @@ final class SidebarRowView: NSView {
     /// Tab index this row renders (nil = non-tab row). Rows are grouped by
     /// directory, so identity — not visual order — addresses a row.
     var tabIndex: Int?
+    /// Space (section fold key) this row belongs to — drag-reorder only
+    /// crosses rows of the SAME section. nil = the headerless flat
+    /// section, which drags within itself via nil == nil.
+    var spaceKey: String?
+    /// Drag-to-reorder handoff (tab rows only): fired from mouseDragged
+    /// once the pointer passes the click threshold, then for every drag
+    /// event and the matching mouseUp. The sidebar owns the session.
+    var dragHandler: ((SidebarRowView, NSEvent) -> Void)?
     /// Inline rename in progress (the edit field is up). SidebarView
     /// suppresses row rebuilds while any row is in this state.
     var isRenaming: Bool { !editField.isHidden }
@@ -275,15 +283,19 @@ final class SidebarRowView: NSView {
                    status: SpaceStatus? = nil,
                    brandImage: NSImage? = nil,
                    tabIndex: Int? = nil,
+                   spaceKey: String? = nil,
                    onClose: (() -> Void)? = nil,
                    onRename: (() -> Void)? = nil,
                    onSetColor: ((String?) -> Void)? = nil,
                    onCommitName: ((String) -> Void)? = nil,
                    onReconnect: (() -> Void)? = nil,
                    onDisconnect: (() -> Void)? = nil,
+                   onUpgradeDaemon: (() -> Void)? = nil,
                    onSetIcon: ((String?) -> Void)? = nil,
                    onDeleteWorkspace: ((Bool) -> Void)? = nil) {
+        self.onUpgradeDaemon = onUpgradeDaemon
         self.tabIndex = tabIndex
+        self.spaceKey = spaceKey
         rowEnabled = enabled
         self.onReconnect = onReconnect
         self.onDisconnect = onDisconnect
@@ -426,7 +438,14 @@ final class SidebarRowView: NSView {
         }
     }
 
+    /// Click threshold state: selection fires on mouse DOWN, so the drag
+    /// session must not hijack the gesture until the pointer really moves.
+    private var dragUnderway = false
+    private var downY: CGFloat = 0
+
     override func mouseDown(with event: NSEvent) {
+        downY = event.locationInWindow.y
+        dragUnderway = false
         // Double-click opens the inline rename — detected on the DOWN
         // phase: the single click's re-render replaces this row before
         // any mouseUp could arrive, so a mouseUp-based check never fires.
@@ -435,6 +454,20 @@ final class SidebarRowView: NSView {
             return
         }
         click()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard dragHandler != nil, tabIndex != nil else { return }
+        if !dragUnderway {
+            guard abs(event.locationInWindow.y - downY) > 4 else { return }
+            dragUnderway = true
+        }
+        dragHandler?(self, event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { dragUnderway = false }
+        if dragUnderway { dragHandler?(self, event) }
     }
 
 
@@ -555,6 +588,7 @@ final class SidebarRowView: NSView {
     func serverMenu() -> NSMenu {
         buildServerMenu(rowEnabled: rowEnabled, onReconnect: onReconnect,
                         onDisconnect: onDisconnect,
+                        onUpgradeDaemon: onUpgradeDaemon,
                         onDeleteWorkspace: onDeleteWorkspace)
     }
 
@@ -581,6 +615,7 @@ final class SidebarRowView: NSView {
     private var rowEnabled = true
     private var onReconnect: (() -> Void)?
     private var onDisconnect: (() -> Void)?
+    private var onUpgradeDaemon: (() -> Void)?
     private var onDeleteWorkspace: ((Bool) -> Void)?
 
     private lazy var editField: RenameField = {

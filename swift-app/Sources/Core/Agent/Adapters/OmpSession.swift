@@ -21,7 +21,6 @@ import Foundation
 /// branch in shared code.
 final class OmpSession: PiSession {
     // ready-frame handshake bookkeeping (spawn-gated)
-    private var readyTimeoutScheduled = false
     private var respawnedForReadyTimeout = false
     /// Respawn-after-probe guard: the failed probe and the 3s silence
     /// timer must not both kill the pane.
@@ -103,22 +102,37 @@ final class OmpSession: PiSession {
         }
     }
 
-    override func beginHandshakeAfterSpawn(completion: ((Bool) -> Void)?) {
+    override func beginHandshakeAfterSpawn(attachedExisting: Bool,
+                                           completion: ((Bool) -> Void)?) {
         handshakeStarted = false
         readyCompletion = completion
-        // A pane left over from the pre-migration ACP era speaks a
-        // DIFFERENT protocol: its output has no ready frame, so the
-        // handshake would never fire and the GUI would stall into
-        // the 90s timeout. Attaching to it can't be distinguished
-        // from a slow-booting rpc process up front — give the ready
-        // frame a short window, then probe (handleReadyTimeout) and
-        // respawn with the rpc argv + --resume if needed.
-        if !readyTimeoutScheduled {
-            readyTimeoutScheduled = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
-                self?.handleReadyTimeout()
-            }
+        // The ready frame rides the ring replay on attach. Two windows:
+        //
+        // - ATTACH (the pane's process booted long ago): a rolled ring
+        //   (64MB of output) has already dropped the ready frame — the
+        //   probe answers in milliseconds, so a SHORT window turns the
+        //   worst-case button delay from 10s into ~1.5s (2026-09-02
+        //   slow-models-on-old-tab report).
+        // - SPAWN: a fresh omp may legitimately take seconds before its
+        //   RPC loop is up (MCP servers, network pulls) — the probe
+        //   failing there would MURDER a slow-booting pane (2026-08-31
+        //   lesson), so the tolerance stays 10s.
+        //
+        // Armed per open: a reconnect's attach needs its own window
+        // (the one-shot `readyTimeoutScheduled` guard left later
+        // attaches probe-less, falling to the 90s watchdog).
+        let window: TimeInterval = attachedExisting ? 1.5 : 10
+        DispatchQueue.main.asyncAfter(deadline: .now() + window) { [weak self] in
+            self?.handleReadyTimeout()
         }
+    }
+
+    /// A handshake completed — healthy epoch: re-arm the one-shot
+    /// respawn guards so a LATER death still heals instead of parking
+    /// the pane at the 90s watchdog.
+    override func handshakeSucceeded() {
+        respawnedForReadyTimeout = false
+        readyRespawned = false
     }
 
     override func requestAgentState(_ completion: @escaping ([String: Any]) -> Void) {

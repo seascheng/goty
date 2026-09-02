@@ -173,8 +173,15 @@ final class SidebarView: NSView {
     var onCloseTab: ((Int) -> Void)?
     var onReconnectWorkspace: ((Int) -> Void)?
     var onDisconnectWorkspace: ((Int) -> Void)?
+
+    /// Server-row menu → upgrade that host's daemon (visible only when
+    /// the link reports a daemon below the store capability).
+    var onUpgradeDaemonWorkspace: ((Int) -> Void)?
     var onRenameTab: ((Int) -> Void)?
     var onRenameTabTo: ((Int, String) -> Void)?
+    /// Drag-reorder commit: one array move (from → to, `to` already
+    /// post-removal). Fired on drop, after the row's live preview.
+    var onReorderTab: ((Int, Int) -> Void)?
     var onTabIcon: ((Int, String?) -> Void)?
     var onTabColor: ((Int, String?) -> Void)?
     var onWidthChange: ((CGFloat) -> Void)?
@@ -187,6 +194,142 @@ final class SidebarView: NSView {
     /// Per-space "+" → "New Worktree…" — the git-repo-only entry of the
     /// space menu. Fires with the section's directory.
     var onNewWorktreeInDir: ((String?) -> Void)?
+
+    // MARK: - Tab drag reorder (within a space section)
+
+    /// The row being dragged right now; non-nil also suppresses data
+    /// re-renders (title/git events arrive at shell-prompt cadence and
+    /// would rebuild the pre-drag order mid-drag, like isRenaming).
+    private var dragRow: SidebarRowView?
+    /// Pointer-following snapshot of the dragged row (the lift).
+    private var dragGhost: NSImageView?
+    private var dragGrabOffset: CGFloat = 0
+
+    /// Row drag session: a shadowed snapshot (ghost) follows the
+    /// pointer while the row itself — dimmed — slides through the
+    /// stack as the landing slot; midline crossings move it among its
+    /// section's siblings. Drop commits one array move.
+    private func handleTabDrag(_ row: SidebarRowView, _ event: NSEvent) {
+        if dragRow == nil, event.type == .leftMouseDragged {
+            beginDrag(row, with: event)
+        }
+        guard dragRow === row, row.tabIndex != nil, let container = row.superview else { return }
+        // Arranged-view surgery targets OUR stack, but row FRAMES live
+        // in AppKit's private container view (a plain NSView wrapper,
+        // NOT the NSStackView — walking up with `as? NSStackView`
+        // never matched, which is why the first build couldn't drag).
+        // That wrapper is non-flipped: larger y = visually higher.
+        // The row STAYS in the stack as the dimmed slot marker — hiding
+        // it cuts AppKit's drag-event delivery to the mouse-down view
+        // (the stuck-lift report: one drag event lands, then no
+        // movement and no mouseUp ever arrive).
+        let stack = tabsStack
+        let siblings = stack.arrangedSubviews.compactMap { $0 as? SidebarRowView }
+            .filter { $0 !== row && $0.spaceKey == row.spaceKey
+                && $0.tabIndex != nil && !$0.isHidden }
+        switch event.type {
+        case .leftMouseDragged:
+            moveGhost(with: event)
+            let loc = container.convert(event.locationInWindow, from: nil)
+            for s in siblings {
+                if row.frame.midY < s.frame.midY, loc.y > s.frame.midY {
+                    // Dragged UP past the sibling's midline.
+                    place(row, in: stack, beside: s, below: false)
+                } else if row.frame.midY > s.frame.midY, loc.y < s.frame.midY {
+                    // Dragged DOWN past the sibling's midline.
+                    place(row, in: stack, beside: s, below: true)
+                }
+            }
+        case .leftMouseUp:
+            endDrag()
+            let order: [Int] = stack.arrangedSubviews.compactMap { v in
+                guard let r = v as? SidebarRowView, r.spaceKey == row.spaceKey,
+                      let idx = r.tabIndex else { return nil }
+                return idx
+            }
+            if let (from, to) = Self.reorderMove(visualOrder: order,
+                                                 moved: row.tabIndex!),
+               from != to {
+                onReorderTab?(from, to)
+            }
+        default:
+            endDrag()   // cancelled: ghost down, dim off, no commit
+        }
+    }
+
+    /// Lift: snapshot the row into a shadowed ghost that tracks the
+    /// pointer; the row itself dims in place and becomes the slot.
+    private func beginDrag(_ row: SidebarRowView, with event: NSEvent) {
+        dragRow = row
+        let ghost = NSImageView()
+        if let rep = row.bitmapImageRepForCachingDisplay(in: row.bounds) {
+            row.cacheDisplay(in: row.bounds, to: rep)
+            let img = NSImage()
+            img.addRepresentation(rep)
+            ghost.image = img
+        }
+        let frame = row.convert(row.bounds, to: self)
+        ghost.frame = frame
+        ghost.alphaValue = 0.95
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.45)
+        shadow.shadowBlurRadius = 12
+        shadow.shadowOffset = NSSize(width: 0, height: -4)
+        ghost.shadow = shadow
+        addSubview(ghost, positioned: .above, relativeTo: nil)
+        row.alphaValue = 0.25
+        dragGhost = ghost
+        dragGrabOffset = convert(event.locationInWindow, from: nil).y - frame.minY
+        moveGhost(with: event)
+    }
+
+    private func moveGhost(with event: NSEvent) {
+        guard let ghost = dragGhost else { return }
+        ghost.frame.origin.y = convert(event.locationInWindow, from: nil).y
+            - dragGrabOffset
+    }
+
+    /// End the session: ghost down, row back to full opacity. Runs on
+    /// drop AND cancel — cancel just skips the commit.
+    private func endDrag() {
+        guard let row = dragRow else { return }
+        dragGhost?.removeFromSuperview()
+        dragGhost = nil
+        row.alphaValue = 1
+        dragRow = nil
+    }
+
+    /// Move `row` to sit directly beside `sibling` in the stack. The
+    /// target index is resolved AFTER removal (the render loop's proven
+    /// remove/insert dance), so targets past the removed slot land
+    /// beside — not past — the sibling. Redundant placements are
+    /// skipped so idle drag events cause no layout churn.
+    private func place(_ row: NSView, in stack: NSStackView, beside sibling: NSView, below: Bool) {
+        let arranged = stack.arrangedSubviews
+        guard let si = arranged.firstIndex(of: sibling) else { return }
+        let slot = below ? si + 1 : si
+        if slot < arranged.count, arranged[slot] === row { return }
+        if arranged.contains(row) { stack.removeArrangedSubview(row) }
+        let target = stack.arrangedSubviews.firstIndex(of: sibling) ?? 0
+        stack.insertArrangedSubview(row, at: below ? target + 1 : target)
+    }
+
+    /// The array move that reproduces a dragged visual order:
+    /// `visualOrder` = the section's tab indexes in current (live-moved)
+    /// stack order. Anchor on the tab directly ABOVE (insert right
+    /// after it in the array); for the top slot, insert right BEFORE
+    /// the tab below. Within a section the sidebar order is array
+    /// order, so this one move lands the tab exactly where it was
+    /// dropped. nil = no move (single-member section).
+    static func reorderMove(visualOrder: [Int], moved: Int) -> (from: Int, to: Int)? {
+        guard let p = visualOrder.firstIndex(of: moved), visualOrder.count > 1 else { return nil }
+        if p > 0 {
+            let anchor = visualOrder[p - 1]
+            return (moved, anchor < moved ? anchor + 1 : anchor)
+        }
+        let below = visualOrder[1]
+        return (moved, below < moved ? below : below - 1)
+    }
 
     private lazy var wsHeader: SectionHeaderView = sectionHeader("Servers",
                                                      plus: { [weak self] anchor in
@@ -472,6 +615,7 @@ final class SidebarView: NSView {
                         onCommitName: ((String) -> Void)? = nil,
                         onReconnect: (() -> Void)? = nil,
                         onDisconnect: (() -> Void)? = nil,
+                        onUpgradeDaemon: (() -> Void)? = nil,
                         onSetIcon: ((String?) -> Void)? = nil,
                         onDeleteWorkspace: ((Bool) -> Void)? = nil,
                         select: @escaping () -> Void) {
@@ -482,7 +626,7 @@ final class SidebarView: NSView {
                       tabIndex: tabIndex,
                       onClose: onClose, onRename: onRename, onSetColor: onSetColor,
                       onCommitName: onCommitName, onReconnect: onReconnect,
-                      onDisconnect: onDisconnect,
+                      onDisconnect: onDisconnect, onUpgradeDaemon: onUpgradeDaemon,
                       onSetIcon: onSetIcon, onDeleteWorkspace: onDeleteWorkspace)
         pin(row, to: stack)
     }
@@ -555,6 +699,10 @@ final class SidebarView: NSView {
         if tabsStack.arrangedSubviews.contains(where: { ($0 as? SidebarRowView)?.isRenaming == true }) {
             return
         }
+        // Same rule for an in-flight drag-reorder: the store still
+        // holds the pre-drag order until the drop commits, so a
+        // mid-drag data pass would snap the rows back.
+        if dragRow != nil { return }
         // Everything the rows below depend on, folded into one string:
         // identity (id/cwd/icon/color/userTitle), resolved display name,
         // selection, status, and the git line. Equal signature = equal
@@ -603,7 +751,12 @@ final class SidebarView: NSView {
             var sectionViews: [NSView] = []   // this section's foldable members
             let dir = workspace.tabs[section.tabIndexs[0]].panes.first?.cwd
                 .map { spaceRoot?($0) ?? $0 }
-            if let name = section.name {
+            // Fold key = the section's directory ROOT, not the display
+            // name — tail names grow on collision ("goty"
+            // → "ai_project/goty"), which would silently drop folds.
+            // Also the rows' spaceKey: drag-reorder never crosses it.
+            let foldKey = section.name != nil ? (dir ?? section.name!) : nil
+            if let name = section.name, let foldKey {
                 if !desired.isEmpty {
                     // Plain spacing tile — no identity, no interaction;
                     // recreating it is invisible. NEVER folds: a
@@ -623,10 +776,6 @@ final class SidebarView: NSView {
                 // flag tracks the store without SidebarView holding
                 // another closure.
                 let isGit = dir.flatMap { gitFor?($0) } != nil
-                // Fold key = the section's directory ROOT, not the
-                // display name — tail names grow on collision ("goty"
-                // → "ai_project/goty"), which would silently drop folds.
-                let foldKey = dir ?? name
                 let header: SectionHeaderView
                 if let reused = spaceHeaders[name] {
                     header = reused
@@ -685,6 +834,9 @@ final class SidebarView: NSView {
                     row = reused
                 } else {
                     row = SidebarRowView(click: {})
+                    row.dragHandler = { [weak self] row, event in
+                        self?.handleTabDrag(row, event)
+                    }
                     pin(row, to: tabsStack)
                 }
                 // Index-targeted actions rebind per pass: closing a tab
@@ -696,6 +848,7 @@ final class SidebarView: NSView {
                               tagColor: tagColor, meta: meta,
                               avatar: avatar, git: git, status: status, brandImage: brand,
                               tabIndex: idx,
+                              spaceKey: foldKey,
                               onClose: { [weak self] in self?.onCloseTab?(idx) },
                               onRename: { [weak self] in self?.onRenameTab?(idx) },
                               onSetColor: { [weak self] hex in self?.onTabColor?(idx, hex) },
@@ -734,9 +887,11 @@ final class SidebarView: NSView {
         }
     }
     func renderWorkspaces(_ workspaces: [WorkspaceState], focusedIndex: Int,
-                          states: [UUID: WorkspaceCoordinator.WsState] = [:]) {
+                          states: [UUID: WorkspaceCoordinator.WsState] = [:],
+                          daemonUpgradable: Set<UUID> = []) {
         let signature = "theme=\(themeGeneration)#" + workspaces.map { ws in
             "\(ws.id):\(ws.name):\(states[ws.id].map(String.init(describing:)) ?? "?")"
+                + (daemonUpgradable.contains(ws.id) ? "+up" : "")
         }.joined(separator: "|") + "#\(focusedIndex)"
         guard signature != workspacesSignature else { return }
         workspacesSignature = signature
@@ -759,6 +914,9 @@ final class SidebarView: NSView {
                    onDisconnect: ws.isRemote && state == .connected ? { [weak self] in
                        self?.onDisconnectWorkspace?(idx)
                    } : nil,
+                   onUpgradeDaemon: daemonUpgradable.contains(ws.id) ? { [weak self] in
+                       self?.onUpgradeDaemonWorkspace?(idx)
+                   } : nil,
                    onDeleteWorkspace: { [weak self] destructive in
                        self?.onDeleteWorkspace?(idx, destructive)
                    }) { [weak self] in
@@ -779,6 +937,9 @@ final class SidebarView: NSView {
                 } : nil,
                 onDisconnect: ws.isRemote && state == .connected ? { [weak self] in
                     self?.onDisconnectWorkspace?(idx)
+                } : nil,
+                onUpgradeDaemon: daemonUpgradable.contains(ws.id) ? { [weak self] in
+                    self?.onUpgradeDaemonWorkspace?(idx)
                 } : nil,
                 onDeleteWorkspace: { [weak self] destructive in
                     self?.onDeleteWorkspace?(idx, destructive)

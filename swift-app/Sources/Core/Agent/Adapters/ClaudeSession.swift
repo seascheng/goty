@@ -215,7 +215,7 @@ final class ClaudeSession: AgentSessioning {
         completion?(true)
     }
 
-    func send(_ text: String) {
+    func send(_ text: String, images: [AgentImage]) {
         guard !isWorking else { return }
         isWorking = true
         // --print may have ended the process at the last result: a
@@ -231,9 +231,17 @@ final class ClaudeSession: AgentSessioning {
         // project jsonl does) — emit the asking side locally so the live
         // transcript matches the replayed one.
         emit([.userMessage(text)])
+        // stream-json user content blocks: text + base64 images
+        // ({type:"image", source:{type:"base64", media_type, data}}).
+        var content: [[String: Any]] = [["type": "text", "text": text]]
+        for image in images {
+            content.append(["type": "image",
+                            "source": ["type": "base64",
+                                       "media_type": image.mimeType,
+                                       "data": image.data] as [String: Any]])
+        }
         channel.send(["type": "user",
-                      "message": ["role": "user",
-                                  "content": [["type": "text", "text": text]]]])
+                      "message": ["role": "user", "content": content]])
     }
 
     func cancel() {
@@ -395,19 +403,20 @@ final class ClaudeSession: AgentSessioning {
         }
     }
 
-    /// Mid-turn input queue. claude's stream-json has no steer/followUp
-    /// path — the protocol defaults no-op, so a mid-turn Enter was
-    /// DROPPED silently. Park every mid-turn text and send it when the
-    /// turn settles (flushMidTurnQueue at the turnEnded branch).
-    private var pendingMidTurn: [String] = []
+    /// Mid-turn steering. claude's stream-json has no steer path — the
+    /// protocol default no-ops, so a mid-turn Enter was DROPPED
+    /// silently. Park every steered text and send it when the turn
+    /// settles (flushMidTurnQueue at the turnEnded branch). Follow-ups
+    /// no longer route here: the pane's outbox owns queuing.
+    private var pendingMidTurn: [(text: String, images: [AgentImage])] = []
 
-    func steer(_ text: String) { enqueueMidTurn(text) }
+    func steer(_ text: String, images: [AgentImage]) {
+        enqueueMidTurn(text, images: images)
+    }
 
-    func followUp(_ text: String) { enqueueMidTurn(text) }
-
-    private func enqueueMidTurn(_ text: String) {
-        guard isWorking else { return send(text) }
-        pendingMidTurn.append(text)
+    private func enqueueMidTurn(_ text: String, images: [AgentImage]) {
+        guard isWorking else { return send(text, images: images) }
+        pendingMidTurn.append((text, images))
         emit([.notice("⟳ 消息已排队，本轮结束后发送")])
     }
 
@@ -415,7 +424,7 @@ final class ClaudeSession: AgentSessioning {
         guard !pendingMidTurn.isEmpty else { return }
         let queued = pendingMidTurn
         pendingMidTurn = []
-        for text in queued { send(text) }
+        for item in queued { send(item.text, images: item.images) }
     }
     private func handleFrame(_ frame: [String: Any], replay: Bool) {
         let events = mapper.map(frame)

@@ -680,8 +680,28 @@ enum AgentTest {
               && PiSession.isBuiltinCommand("/x", commandNames: []) == false,
               "unknown or empty-directory /text steers instead of deferring")
 
+        // Image attachments: the composer's {mimeType, data: base64}
+        // becomes the pi-mono RPC ImageContent verbatim; malformed
+        // entries drop rather than poison the frame.
+        let img = AgentImage(["mimeType": "image/png", "data": "aGk="])
+        check(img?.piWire["type"] as? String == "image"
+              && img?.piWire["mimeType"] as? String == "image/png"
+              && img?.piWire["data"] as? String == "aGk=",
+              "AgentImage carries the pi-mono ImageContent shape")
+        check(AgentImage(["mimeType": "image/png"]) == nil
+              && AgentImage(["data": "aGk="]) == nil
+              && AgentImage(["type": "image", "mimeType": "image/png",
+                             "data": "aGk="]) != nil,
+              "AgentImage rejects missing fields, ignores extras")
+
         print("— pi adapter —")
         check(AgentRegistry.descriptor(for: "pi")?.binary == "pi", "pi descriptor present")
+        // get_commands only lists EXTENSION commands (probed 0.84.3:
+        // 79 entries, no compact) — the builtin supplement must carry
+        // pi's own registry, deduped against whatever the RPC reports.
+        check(PiLegacySession.builtinCommands.count == 23
+              && PiLegacySession.builtinCommands.contains { $0.name == "compact" },
+              "pi builtin directory carries /compact (get_commands omits builtins)")
         check(AgentRegistry.descriptors.map(\.key) == ["omp", "claude", "codex", "pi"],
               "registry order omp, claude, codex, pi")
         let piFixture = (CommandLine.arguments.count > 1

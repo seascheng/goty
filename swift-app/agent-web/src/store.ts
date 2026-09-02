@@ -97,6 +97,10 @@ export type AgentCommand = z.infer<typeof AgentCommandSchema>;
 const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("userMessage"), text: z.string() }),
   z.object({ type: z.literal("queueMessage"), text: z.string() }),
+  /// Pane-owned outbox actions (Swift is the queue authority; the
+  /// pendingQueue here is a pure mirror driven by these events).
+  z.object({ type: z.literal("queueRemoved"), text: z.string() }),
+  z.object({ type: z.literal("queueDelivered"), text: z.string() }),
   z.object({ type: z.literal("userChunk"), text: z.string() }),
   z.object({ type: z.literal("agentChunk"), text: z.string() }),
   z.object({ type: z.literal("thoughtChunk"), text: z.string() }),
@@ -454,6 +458,24 @@ class Store {
     switch (event.type) {
       case "userMessage": this.push({ kind: "user", text: event.text }); break;
       case "queueMessage": this.pendingQueue.push(event.text); break;
+      // Outbox row actions (Swift-side). Text-keyed removal keeps the
+      // mirror aligned without index bookkeeping; a missing text (already
+      // delivered) is a harmless no-op.
+      case "queueRemoved": {
+        const idx = this.pendingQueue.indexOf(event.text);
+        if (idx >= 0) this.pendingQueue.splice(idx, 1);
+        break;
+      }
+      case "queueDelivered": {
+        // The queued text leaves the dock and lands in the transcript as
+        // a user block — the host sends it through send()/steer() as it
+        // pushes this, so the block IS the delivery echo (harnesses
+        // suppress their own live echo for sends).
+        const idx = this.pendingQueue.indexOf(event.text);
+        if (idx >= 0) this.pendingQueue.splice(idx, 1);
+        this.push({ kind: "user", text: event.text });
+        break;
+      }
       case "userChunk":
         this.userTail(event.text); break;
       case "agentChunk":
@@ -567,12 +589,9 @@ class Store {
         // into this turn's tail block (tail() only breaks on intervening
         // blocks; a turn can end with none pushed).
         this.tailSealed = true;
-        // Queued follow-ups flush HERE, in order, at the bottom — omp
-        // delivers them right after settle; this is the true processing
-        // order (matching the store replay after a restart).
-        for (const text of this.pendingQueue) {
-          this.push({ kind: "user", text });
-        }
+        // Queued follow-ups NO LONGER flush here: the pane owns the
+        // outbox and delivers strictly one per turnEnded via
+        // queueDelivered (true processing order, one block per settle).
         this.retry = null;
         break;
       }

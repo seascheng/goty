@@ -6,7 +6,8 @@
 export type HostCommand =
   | { type: "ready" }
   | { type: "pageError"; text: string }
-  | { type: "send"; text: string; mode: "normal" | "steer" | "followUp" }
+  | { type: "send"; text: string; mode: "normal" | "steer" | "followUp";
+      images?: { mimeType: string; data: string }[] }
   | { type: "stop" }
   | { type: "setConfig"; configId: string; value: string }
   | { type: "setFast"; enabled: boolean }
@@ -21,6 +22,8 @@ export type HostCommand =
   | { type: "export" }
   | { type: "login" }
   | { type: "startLogin"; providerId: string }
+  | { type: "queueRemove"; text: string }
+  | { type: "queueSendNow"; text: string }
   | { type: "stats" };
 
 declare global {

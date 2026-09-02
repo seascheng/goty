@@ -6,7 +6,8 @@ import WebKit
 /// pane's entire UI (transcript, cards, composer), served from the
 /// bundled assets under `goty://`; Swift is the backend: AgentSession
 /// drives the ACP agent, the bridge shuttles commands and events.
-final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefreshable {
+final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
+                            ThemeRefreshable, WKUIDelegate, WKNavigationDelegate {
     let hostKey: HostKey
 
     /// `@gui omp <prompt>` queued prompt: sent once the session is up.
@@ -32,6 +33,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     /// session(_:didEmit:) — adapters stay dialect-shaped, the host owns
     /// the machine (paseo's rule: one derivation serves live and replay).
     private(set) var turnState: AgentTurnState = .starting
+    /// Tools currently pending/in_progress in this pane's stream (main
+    /// agent AND subagents). The turn phase is 执行中 while ANY tool is
+    /// open — a single scalar flipped per-event flapped 执行中/思考中
+    /// when concurrent subagent streams interleaved (2026-09-01).
+    private var openToolIds: Set<String> = []
+
     /// Sidebar 状态接线（由 AppDelegate 桥到 coordinator）。Every turn
     /// transition funnels through here — the sidebar badge, the composer
     /// chips and the dock attention are all downstream of one source.
@@ -61,8 +68,6 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     /// re-pushed to the page after the handshake.
     var initialQueuedOutbox: [String] = []
     var onQueuedOutboxChange: (([String]) -> Void)?
-    private var queuedOutbox: [String] = []
-    private var lastQueueCount = 0
     /// True while a worktree fork (throwaway process) is booting —
     /// both the Swift handler and every BranchButton respect it.
     private var forkInFlight = false
@@ -214,6 +219,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
     private func scheduleReconnect() {
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
+            // Clear up front (same rule as the manual 重试): the
+            // rebuild streams during the reconnect, never after ok.
+            self.bridge.push(["type": "clearTranscript"])
             self.session.reconnect { [weak self] ok in
                 DispatchQueue.main.async {
                     guard let self else { return }
@@ -224,9 +232,6 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     self.reconnectAttempt = 0
                     self.isReconnecting = false
                     self.bridge.push(["type": "reconnecting", "value": false])
-                    // Replay rebuilds the transcript; the page must start
-                    // empty or the ring would duplicate every block.
-                    self.bridge.push(["type": "clearTranscript"])
                     self.setTurnState(.idle)
                 }
             }
@@ -270,13 +275,16 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         // Ephemeral store: asset caches must never outlive a build.
         config.websiteDataStore = WKWebsiteDataStore.nonPersistent()
         webView = WKWebView(frame: .zero, configuration: config)
-        // The page paints its own themed background; without this the
+        // File inputs (<input type="file">) hand their open panel to the
+        // UI delegate and NEVER fall back — assigned after super.init
+        // below ('self' pre-super is illegal); see runOpenPanelWith.
         // pane flashes white until first paint.
         webView.setValue(false, forKey: "drawsBackground")
         webView.underPageBackgroundColor = .clear
         bridge = AgentWebBridge(webView: webView)
 
         super.init(frame: .zero)
+        webView.uiDelegate = self
         wantsLayer = true
         // Themed placeholder behind the transparent webview — OPAQUE,
         // the terminal pane's pre-paint convention (PaneHost). The
@@ -333,14 +341,17 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                 }
             }
         }
-        bridge.onSend = { [weak self] text, mode in
+        bridge.onSend = { [weak self] text, mode, images in
             guard let self else { return }
             switch mode {
             case "steer":
-                self.session.steer(text)
+                self.session.steer(text, images: images)
             case "followUp":
-                self.session.followUp(text)
-                self.recordQueued(text)
+                // THE PANE owns the follow-up queue (no harness exposes
+                // queue removal/edit; omp's count-only mirror died with
+                // the reconcile below) — park it here, drainOutbox
+                // re-sends through send() at turn settle.
+                self.enqueueOutbox(text, images: images)
             default:
                 // Stale-idle composer (UI thought idle, the session is
                 // actually working): omp tags these Enters "steer" too —
@@ -348,11 +359,11 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                 // the message can never evaporate in send()'s isWorking
                 // guard (omp input-controller's race coverage).
                 if self.session.isWorking {
-                    self.session.steer(text)
+                    self.session.steer(text, images: images)
                     return
                 }
                 self.setTurnState(.thinking)
-                self.session.send(text)
+                self.session.send(text, images: images)
                 // An adapter with no live session id (attach replay rotated
                 // past the handshake) refuses send() — never leave the
                 // composer stuck "working".
@@ -360,6 +371,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     self.setTurnState(.errored("未关联到 agent 会话 — 请点重试"))
                 }
             }
+        }
+        bridge.onQueueRemove = { [weak self] text in
+            self?.removeOutbox(text)
+        }
+        bridge.onQueueSendNow = { [weak self] text in
+            self?.deliverOutboxNow(text)
         }
 
         bridge.onSetFast = { [weak self] enabled in
@@ -477,12 +494,15 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         bridge.onReconnect = { [weak self] in
             guard let self, !self.isReconnecting else { return }
             // User-invoked (重试 after an errored pane): run the same
-            // attach-or-respawn path the automatic loop uses.
+            // attach-or-respawn path the automatic loop uses. Clear
+            // BEFORE the reconnect — the rebuild streams DURING it, so
+            // clearing after ok wiped everything the rebuild had
+            // already rendered (the blank-after-retry report).
+            self.bridge.push(["type": "clearTranscript"])
             self.session.reconnect { [weak self] ok in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     if ok {
-                        self.bridge.push(["type": "clearTranscript"])
                         self.setTurnState(.idle)
                     } else {
                         self.setTurnState(.errored("重连失败"))
@@ -532,6 +552,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             self.setTurnState(.executing)
         }
 
+        webView.navigationDelegate = self
         webView.load(URLRequest(url: URL(string: "goty://app/index.html")!))
         // Phase 1 — starting: the bridge queues pushes until the page
         // is ready, so this lands as the first chip the composer shows;
@@ -551,7 +572,11 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         }
         // Seed the persisted queue mirror BEFORE connect: the handshake's
         // .ready restores these rows to the page (see didEmit .ready).
-        queuedOutbox = initialQueuedOutbox
+        // Restart persistence carries display TEXTS only — a re-seeded
+        // image-only row loses its images (delivery sends the text).
+        queuedOutbox = initialQueuedOutbox.map {
+            OutboxItem(text: $0, message: $0, images: [])
+        }
         // GUI-side tools the agent may call (omp set_host_tools):
         // attention, reveal-in-Finder, open-URL. Registered before
         // connect so the handshake's registration sees them.
@@ -793,12 +818,77 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         }
     }
 
-    /// Mirror a queued follow-up for restart persistence (see
-    /// initialQueuedOutbox). The page keeps its own pendingQueue; this
-    /// copy exists only so a GUI restart can rebuild the dock rows.
-    private func recordQueued(_ text: String) {
-        queuedOutbox.append(text)
-        onQueuedOutboxChange?(queuedOutbox)
+    /// The follow-up outbox. THE PANE owns this queue: no harness
+    /// exposes queue removal/edit (omp reports only a count), so
+    /// follow-ups park here and drainOutbox() re-sends the oldest
+    /// through send() at turn settle. Mirrored to onQueuedOutboxChange
+    /// (display texts only — images survive within one GUI life) and to
+    /// the page's pendingQueue via queueMessage/queueDelivered/
+    /// queueRemoved pushes — the page is a pure mirror, never the
+    /// authority.
+    private struct OutboxItem {
+        /// Dock/display key — also the page's removal key (🖼 ×N for
+        /// image-only sends, matching the composer echo).
+        let text: String
+        /// Raw message for send()/steer() delivery.
+        let message: String
+        let images: [AgentImage]
+    }
+    private var queuedOutbox: [OutboxItem] = []
+
+    private func enqueueOutbox(_ text: String, images: [AgentImage]) {
+        let display = text.isEmpty && !images.isEmpty
+            ? "🖼 ×\(images.count)" : text
+        queuedOutbox.append(OutboxItem(text: display, message: text, images: images))
+        onQueuedOutboxChange?(queuedOutbox.map(\.text))
+        bridge.push(["type": "queueMessage", "text": display])
+    }
+
+    /// Dock-row ✕ (and ✎, which re-fills the composer after): drop a
+    /// queued text without delivering it. Text-keyed so the page's
+    /// mirror index can never drift against this array.
+    private func removeOutbox(_ text: String) {
+        guard let idx = queuedOutbox.firstIndex(where: { $0.text == text })
+        else { return }
+        queuedOutbox.remove(at: idx)
+        onQueuedOutboxChange?(queuedOutbox.map(\.text))
+        bridge.push(["type": "queueRemoved", "text": text])
+    }
+
+    /// Dock-row ↑: deliver one queued text NOW as an interrupting
+    /// steer; the rest of the queue keeps its order.
+    private func deliverOutboxNow(_ text: String) {
+        guard let idx = queuedOutbox.firstIndex(where: { $0.text == text })
+        else { return }
+        let item = queuedOutbox.remove(at: idx)
+        onQueuedOutboxChange?(queuedOutbox.map(\.text))
+        bridge.push(["type": "queueDelivered", "text": item.text])
+        if session.isWorking {
+            session.steer(item.message, images: item.images)
+        } else {
+            setTurnState(.thinking)
+            session.send(item.message, images: item.images)
+        }
+    }
+
+    /// Turn settle (and post-ready reattach): fire the OLDEST queued
+    /// follow-up as a fresh normal turn. Each delivery re-arms through
+    /// the next .turnEnded — the queue drains strictly one-by-one,
+    /// omp's FIFO settle semantics without harness-side queuing.
+    private func drainOutbox() {
+        guard !queuedOutbox.isEmpty, !session.isWorking,
+              pendingPrompt == nil, !isReconnecting
+        else { return }
+        let item = queuedOutbox.removeFirst()
+        onQueuedOutboxChange?(queuedOutbox.map(\.text))
+        bridge.push(["type": "queueDelivered", "text": item.text])
+        setTurnState(.thinking)
+        session.send(item.message, images: item.images)
+        // Same refusal guard as the send path: an adapter with no live
+        // session id must not leave the pane stuck "thinking".
+        if !session.isWorking {
+            setTurnState(.errored("未关联到 agent 会话 — 请点重试"))
+        }
     }
 
     /// Turn-state derivation — the ONE place wire events become lifecycle.
@@ -856,67 +946,61 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
                     } else {
                         self.setTurnState(.idle)
                     }
-                    // Restore the queued-outbox dock rows: omp reports
-                    // only a count, so the persisted texts re-seed the
-                    // page's pendingQueue. Delivered-while-closed texts
-                    // (count 0) drop here — they are in the replay.
-                    if self.lastQueueCount == 0 {
-                        if !self.queuedOutbox.isEmpty {
-                            self.queuedOutbox = []
-                            self.onQueuedOutboxChange?([])
-                        }
-                    } else if !self.queuedOutbox.isEmpty {
-                        // FIFO delivery ate the oldest; keep the suffix.
-                        if self.queuedOutbox.count > self.lastQueueCount {
-                            self.queuedOutbox = Array(
-                                self.queuedOutbox.suffix(self.lastQueueCount))
-                            self.onQueuedOutboxChange?(self.queuedOutbox)
-                        }
-                        for text in self.queuedOutbox {
-                            self.bridge.push(["type": "queueMessage", "text": text])
-                        }
+                    // Restore the queued-outbox dock rows: the page
+                    // rebuilt from scratch, so re-seed its pendingQueue
+                    // mirror. A queue parked while the GUI was closed is
+                    // still HERE (the pane owns it) — resume draining.
+                    for item in self.queuedOutbox {
+                        self.bridge.push(["type": "queueMessage", "text": item.text])
                     }
+                    self.drainOutbox()
                     // Handshake settled the session id — new sessions have
                     // no title yet, adopted ones (reattach) may.
                     self.onSessionId?(self.session.sessionId)
                     self.lastSessionTitle = nil
                     self.liveTitleLocked = false
+                    self.openToolIds.removeAll()
                     self.refreshSessionTitle()
-                case .runtimeStatus(let status):
-                    // Queue-count reconciliation: omp delivers FIFO, so a
-                    // shrinking count retires the OLDEST mirrored texts;
-                    // zero clears the mirror. Keeps persisted state true
-                    // across turns (and GUI restarts).
-                    let count = status.queuedMessages ?? 0
-                    defer { self.lastQueueCount = count }
-                    guard count != self.queuedOutbox.count else { break }
-                    if count == 0 {
-                        self.queuedOutbox = []
-                    } else if count < self.queuedOutbox.count {
-                        self.queuedOutbox = Array(
-                            self.queuedOutbox.suffix(count))
-                    } else { break }
-                    self.onQueuedOutboxChange?(self.queuedOutbox)
+                case .runtimeStatus:
+                    // Queue-count reconciliation REMOVED: the pane owns
+                    // the outbox; omp's harness-side count no longer
+                    // reflects it (follow-ups never reach the harness
+                    // queue). The event still forwards to the page below.
+                    break
                 case .messageChunk, .thoughtChunk, .chunkBoundary:
                     // Replay/history chunks also arrive as these events
                     // (ring reattach, session load). Only a LIVE turn
                     // (the adapter's isWorking) means 思考中 — history
                     // must leave the pane idle, never stuck thinking.
+                    // Chunks NEVER downgrade to 思考中 while a tool is
+                    // open: with concurrent subagents, one stream's
+                    // chunks flapped the phase against another stream's
+                    // tool updates (执行中/思考中 flicker, 2026-09-01).
                     if self.session.isWorking {
-                        self.setTurnState(.thinking)
+                        self.setTurnState(
+                            self.openToolIds.isEmpty ? .thinking : .executing)
                     }
-                case .toolCallUpdate(_, _, _, let status, _, _, _, _):
+                case .toolCallUpdate(let id, _, _, let status, _, _, _, _):
                     // Same replay rule as the chunk cases above: a
                     // settled replayed tool (ring reattach) used to flip
-                    // the pane back to thinking forever.
+                    // the pane back to thinking forever. Phase follows
+                    // the SET of open tools — one tool settling must not
+                    // read as "model thinking" while others still run.
                     guard self.session.isWorking else { break }
-                    // pending/in_progress = a tool runs; a settled tool
-                    // hands the floor back to the model (until turn end).
+                    if status == "pending" || status == "in_progress" {
+                        self.openToolIds.insert(id)
+                    } else {
+                        self.openToolIds.remove(id)
+                    }
                     self.setTurnState(
-                        (status == "pending" || status == "in_progress")
-                        ? .executing : .thinking)
+                        self.openToolIds.isEmpty ? .thinking : .executing)
                 case .turnEnded:
+                    self.openToolIds.removeAll()
                     self.setTurnState(.idle)
+                    // The pane-owned outbox resumes here: the oldest
+                    // queued follow-up fires as a fresh turn (each
+                    // later one waits for ITS turnEnded — strict FIFO).
+                    self.drainOutbox()
                     self.onSessionId?(self.session.sessionId)
                     // omp's title-generator lands the name seconds after
                     // the turn; query now and once more past the delay.
@@ -946,6 +1030,37 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
         }
     }
 
+    /// WebContent recycles hidden webviews (memory pressure, process
+    /// suspension) and a recycled page reboots with an EMPTY store —
+    /// nothing re-pushed commands/config/transcript, leaving a dead
+    /// pane (the reload-then-blank report). didFinish after the first
+    /// load = a reload: re-seed what the handshake originally pushed,
+    /// then rebuild the transcript through the reconnect path.
+    private var webLoadedOnce = false
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webLoadedOnce else {
+            webLoadedOnce = true   // initial load: bridge queue covers it
+            return
+        }
+        if !session.commands.isEmpty {
+            bridge.push(AgentSessionEvent.commandsChanged(session.commands).jsRepresentation)
+        }
+        if !session.configOptions.isEmpty {
+            bridge.push(AgentSessionEvent.configChanged(session.configOptions).jsRepresentation)
+        }
+        pushMeta()
+        refreshSessionTitle()
+        handshakeDone = true
+        session.reconnect { _ in }   // transcript rebuild via the replay gate
+    }
+
+    /// WebKit does not always auto-reload after terminating the web
+    /// process — do it ourselves; didFinish then re-syncs the state.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        webView.reload()
+    }
+
     func sessionDidFail(_ session: AgentSessioning, reason: String) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -955,5 +1070,24 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate, ThemeRefre
             guard !self.isReconnecting else { return }
             self.setTurnState(.errored(reason))
         }
+    }
+
+    /// WKUIDelegate: WebKit hands <input type="file"> open panels to the
+    /// host and NEVER shows one itself — the 📎 attach button depends on
+    /// this entirely. Image-only to match the composer's ingest contract.
+    func webView(_ webView: WKWebView,
+                 runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping ([URL]?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.allowedContentTypes = [.image]
+        panel.message = "选择图片附件"
+        // Cancel answers nil (the optional-array contract); an empty
+        // array would read as "chose nothing" and leave the panel logic
+        // waiting in some WebKit builds.
+        completionHandler(panel.runModal() == .OK ? panel.urls : nil)
     }
 }

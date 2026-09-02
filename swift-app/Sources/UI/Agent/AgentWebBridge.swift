@@ -6,9 +6,13 @@ import WebKit
 /// transport: `send`, `stop`, `permission`, `setConfig`, session
 /// listing/loading, and `@` file references.
 final class AgentWebBridge: WebBridge {
-    /// mode: "normal" (idle send) | "steer" (interrupt) | "followUp"
-    /// (queue behind the running turn).
-    var onSend: ((String, String) -> Void)?
+    /// mode: "normal" | "steer" | "followUp"; images = composer
+    /// attachments ({mimeType, data: base64}), empty for pure text.
+    var onSend: ((String, String, [AgentImage]) -> Void)?
+    /// Queue-management actions from the dock outbox rows: remove a
+    /// queued text, or deliver it immediately as a steer.
+    var onQueueRemove: ((String) -> Void)?
+    var onQueueSendNow: ((String) -> Void)?
     var onStop: (() -> Void)?
     var onSetConfig: ((String, String) -> Void)?
     var onSetFast: ((Bool) -> Void)?
@@ -33,8 +37,11 @@ final class AgentWebBridge: WebBridge {
         guard let type = message["type"] as? String else { return }
         switch type {
         case "send":
-            if let text = message["text"] as? String, !text.isEmpty {
-                onSend?(text, (message["mode"] as? String) ?? "normal")
+            if let text = message["text"] as? String,
+               !text.isEmpty || message["images"] != nil {
+                let images = (message["images"] as? [[String: Any]] ?? [])
+                    .compactMap(AgentImage.init)
+                onSend?(text, (message["mode"] as? String) ?? "normal", images)
             }
         case "stop":
             onStop?()
@@ -81,6 +88,14 @@ final class AgentWebBridge: WebBridge {
         case "startLogin":
             if let providerId = message["providerId"] as? String {
                 onStartLogin?(providerId)
+            }
+        case "queueRemove":
+            if let text = message["text"] as? String, !text.isEmpty {
+                onQueueRemove?(text)
+            }
+        case "queueSendNow":
+            if let text = message["text"] as? String, !text.isEmpty {
+                onQueueSendNow?(text)
             }
         case "stats":
             onStats?()

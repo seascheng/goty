@@ -26,7 +26,7 @@ Grab the DMG from [**Releases**](https://github.com/seascheng/goty/releases/late
 
 <sub>macOS 13+ · Apple Silicon (arm64)</sub>
 
-**Agent GUI Session** requires `omp` ≥ 18.0.8 (ACP mode) on the target machine's PATH — remote SSH hosts need it too, plus a CAPABILITY-4 `goty-sessiond` there.
+**Agent GUI Session** ships with four adapters — `omp` (RPC mode, ≥ 18.0.11 recommended), `pi`, Claude Code, and Codex — whichever is on the target machine's PATH. Remote SSH hosts need the same, plus a CAPABILITY-4 `goty-sessiond` there.
 
 <sub>Ad-hoc signed for now: on first open, right-click the app → **Open** (once). Updates check automatically — or Goty ▸ <b>Check for Updates…</b></sub>
 
@@ -38,6 +38,7 @@ Grab the DMG from [**Releases**](https://github.com/seascheng/goty/releases/late
 - **Servers, not tabs-in-tabs** — every SSH host from `~/.ssh/config` becomes a server with its own remote daemon; reconnect and the panes are still there.
 - **Agent-aware** — Claude Code, Codex & co. are detected per pane: brand icons, live status, git branch context.
 - **`@ai` in the terminal** — type `@ai <request>` in any pane; a card opens over the grid with streaming answers, markdown, and executable proposals.
+- **`@omp`, `@pi`, `@claude`, `@codex` in any pane** — the agent opens in its own GUI space: streaming transcript, plan dock, model picker, session history. Add a prompt (`@omp fix the flaky test`) and it starts typing for you.
 
 ## Build
 
@@ -63,6 +64,7 @@ swift-app/restart-app.sh    # anchored restart (never pkill — it matches sessi
 | **Right panel** | Files (local + remote over ssh) · Info · Git: branch, staged/unstaged, inline commit box, worktrees |
 | **Editor** | built-in overlay editor with syntax highlighting, markdown preview, gutter |
 | **AI** | `@ai` inline trigger · streaming markdown card · bash / write / edit proposals with confirm · OpenAI-compatible endpoints |
+| **Agents** | `@omp` / `@pi` / `@claude` / `@codex` in any pane opens an Agent GUI space (bare `@omp` just opens it) · streaming transcript with tool cards and plans · model & thinking pickers · session history |
 | **Settings** | everything Ghostty-configurable, searchable, applies live to open terminals |
 
 <div align="center">

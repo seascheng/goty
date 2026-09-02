@@ -850,6 +850,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sidebar.onRenameTabTo = { [weak self] idx, name in
             self?.coordinator.renameTab(index: idx, name: name)
         }
+        sidebar.onReorderTab = { [weak self] from, to in
+            self?.coordinator.moveTab(from: from, to: to)
+        }
         sidebar.onTabColor = { [weak self] idx, hex in
             self?.coordinator.setTabColor(index: idx, hex: hex)
         }
@@ -866,6 +869,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, let store = self.coordinator.store,
                   store.workspaces.indices.contains(idx) else { return }
             self.reconnectRemote(wsId: store.workspaces[idx].id)
+        }
+        sidebar.onUpgradeDaemonWorkspace = { [weak self] idx in
+            guard let self, let store = self.coordinator.store,
+                  store.workspaces.indices.contains(idx),
+                  store.workspaces[idx].isRemote else { return }
+            let ws = store.workspaces[idx]
+            guard let link = self.remoteLinks[ws.id], link.daemon != nil else { return }
+            let sessions = ws.tabs.count
+            let host = ws.displayName
+            if Dialog.confirm(
+                title: "升级 \(host) 上的 Goty daemon？",
+                detail: "该主机仍在运行旧版 goty-sessiond（会话跨 GUI 重启存活，所以一直没被替换）。"
+                    + "升级后 agent 标识、实时状态与历史记录读取才会生效。"
+                    + "重启它会结束该主机上正在运行的 \(sessions) 个会话。",
+                action: "重启 Daemon") {
+                link.upgradeDaemon()
+            }
         }
         sidebar.onDisconnectWorkspace = { [weak self] idx in
             self?.disconnectWorkspace(at: idx)

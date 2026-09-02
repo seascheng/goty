@@ -78,7 +78,8 @@ extension AppDelegate {
         renderTabSurfaces(ws: ws, offline: state0 == .disconnected)
         updateRightPanel()
         wc.sidebar.renderWorkspaces(store.workspaces, focusedIndex: store.focusedIndex,
-                                  states: coordinator.wsStates)
+                                  states: coordinator.wsStates,
+                                  daemonUpgradable: upgradableDaemonSet())
 
 
         // Server status page: a remote workspace that isn't connected
@@ -159,7 +160,8 @@ extension AppDelegate {
         guard let store = coordinator.store, let ws = store.focused else { return }
         let state = coordinator.wsStates[ws.id] ?? .connecting
         wc.sidebar.renderWorkspaces(store.workspaces, focusedIndex: store.focusedIndex,
-                                    states: coordinator.wsStates)
+                                    states: coordinator.wsStates,
+                                    daemonUpgradable: upgradableDaemonSet())
         if ws.isRemote, state != .connected {
             // Swap our own cover (unreachable → connecting on a manual
             if !wc.terminalArea.isShowingOverlay || wc.terminalArea.overlayKind == .offline {
@@ -245,5 +247,17 @@ extension AppDelegate {
         // never-opened tabs) show the daemon-relayed extension report —
         // see effectiveBadgeActivity.
         return SpaceStatus(activity: activity, seen: status.seen, spinner: spinner)
+    }
+
+    /// Workspaces whose remote daemon reports below the store
+    /// capability — the server menu shows the upgrade item for these.
+    func upgradableDaemonSet() -> Set<UUID> {
+        var out: Set<UUID> = []
+        for (id, link) in remoteLinks where link.daemon != nil {
+            if (link.reportedCapability ?? 0) < SessionDaemon.storeCapability {
+                out.insert(id)
+            }
+        }
+        return out
     }
 }

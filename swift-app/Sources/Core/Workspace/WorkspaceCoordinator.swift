@@ -1024,6 +1024,27 @@ final class WorkspaceCoordinator {
         runtime[store.workspaces[index].id, default: Runtime()].activePaneId = pane.id
     }
 
+    /// Sidebar drag-reorder: move a tab within the tabs array. The
+    /// sidebar's within-section order IS array order (SpaceGrouping),
+    /// so one array move reproduces the dragged position; the focused
+    /// tab stays focused (its index is re-resolved by id).
+    func moveTab(from: Int, to: Int) {
+        guard let store, store.workspaces.indices.contains(store.focusedIndex) else { return }
+        let wi = store.focusedIndex
+        let ws = store.workspaces[wi]
+        guard ws.tabs.indices.contains(from), ws.tabs.indices.contains(to),
+              from != to else { return }
+        let focusedId = ws.focusedTab?.id
+        let tab = store.workspaces[wi].tabs.remove(at: from)
+        store.workspaces[wi].tabs.insert(tab, at: to)
+        if let focusedId,
+           let fi = store.workspaces[wi].tabs.firstIndex(where: { $0.id == focusedId }) {
+            store.workspaces[wi].focusedTabIndex = fi
+        }
+        store.save()
+        delegate?.coordinatorDidChange(.structure)
+    }
+
     /// Rename sets the USER title (ghostty rule): it outranks the
     /// program's OSC title until cleared. Empty string = clear, back to
     /// the program's own title. `name` stays the default counter.
