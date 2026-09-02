@@ -881,7 +881,13 @@ const streamdownProps = {
 /// collapse blank runs, trim the edges — the card reads as a compact
 /// reasoning trace, not a blog post.
 function compactThought(text: string): string {
-  return text
+  // Reasoning often carries literal "\n" escapes AS TEXT (the model
+  // wrote them inside code-ish thinking — the stream replays them
+  // verbatim): un-escape first, or the card shows "\n\n" walls with no
+  // line breaks at all. Display-only layer; the answer's faithful
+  // contract is untouched.
+  const unescaped = text.replace(/\\r\\n?/g, "\n").replace(/\\n/g, "\n").replace(/\\t/g, " ");
+  return unescaped
     .split("\n")
     .filter((line) => !/^\s*[-*•]\s*$/.test(line) && !/^\s*\d+[.)]\s*$/.test(line))
     .join("\n")
