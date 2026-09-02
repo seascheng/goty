@@ -1,8 +1,8 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { Streamdown } from "streamdown";
 import rehypeHighlight from "rehype-highlight";
 import { store, fmtTokens, type Block, type ConfigChoice, type PlanEntry, type ToolCall } from "./store";
+import { Popover, type PopoverAnchor } from "./ui/Popover";
 import { postToHost } from "./bridge";
 
 /* ——— omp-TUI-style line diff (renderDiff design: ±N gutter, dim context,
@@ -124,27 +124,147 @@ function DiffBody({ rows }: { rows: DiffRow[] }) {
   return <>{out}</>;
 }
 
-const editKinds = new Set(["edit", "write", "multiedit", "apply_patch", "patch"]);
+const EDIT_KINDS: Record<string, true> = {
+  edit: true, write: true, multiedit: true, apply_patch: true, patch: true,
+};
+
+type DiffHunk = { oldText: string; newText: string };
+
+/// Normalize edit-like rawInput across every adapter shape into diff
+/// hunks: classic `{path, oldText, newText}` (local executors), Claude
+/// `{file_path, old_string, new_string}`, omp/pi `{path, edits:[…]}`
+/// arrays, bare `{path, content}` whole-file writes. null when nothing
+/// is diffable — a diff-shaped tool with unrecognized args used to
+/// render an EMPTY card (remote adapters never set oldText; 2026-09-02
+/// report: "edit 面板没有内容").
+type DiffSpec = {
+  path: string | null;
+  hunks?: DiffHunk[];
+  /// Pre-parsed rows (git patch blocks) — skips the lineDiff DP.
+  rows?: DiffRow[];
+  adds?: number;
+  dels?: number;
+};
+
+/// Git-patch text → diff rows (monocode parseGitPatch parity). Numbers
+/// come from the @@ hunk headers; leading unchanged context is trimmed
+/// to one line before the first change.
+function parseGitPatch(text: string, pathHint: string | null): DiffSpec {
+  const plus = text.match(/^\+\+\+\s+(?:b\/)?(.+)$/m);
+  const git = text.match(/^diff --git\s+\S+\s+(\S+)/m);
+  let path = (plus?.[1] ?? git?.[1])?.replace(/^b\//, "").trim() ?? null;
+  if (path === "/dev/null") path = null;
+  const rows: DiffRow[] = [];
+  let adds = 0;
+  let dels = 0;
+  let oldNum = 0;
+  let newNum = 0;
+  for (const line of text.replace(/\r\n/g, "\n").split("\n")) {
+    const header = line.match(/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)/);
+    if (header) { oldNum = Number(header[1]); newNum = Number(header[2]); continue; }
+    if (/^(diff |index |--- |\+\+\+ )/.test(line)) continue;
+    if (line.startsWith("+")) { adds += 1; rows.push({ type: "add", newNum: newNum++, text: line.slice(1) }); }
+    else if (line.startsWith("-")) { dels += 1; rows.push({ type: "del", oldNum: oldNum++, text: line.slice(1) }); }
+    else if (line.startsWith("\\")) continue;
+    else {
+      const body = line.startsWith(" ") ? line.slice(1) : line;
+      rows.push({ type: "ctx", oldNum: oldNum++, newNum: newNum++, text: body });
+    }
+  }
+  const first = rows.findIndex((r) => r.type !== "ctx");
+  const start = Math.max(0, (first === -1 ? rows.length : first) - 1);
+  return { path: path ?? pathHint, rows: rows.slice(start, start + DIFF_ROW_CAP), adds, dels };
+}
+
+/// omp's own diff line format (tool result details.diff): ` NN| ctx`,
+/// `+NN| add`, `-NN| del` — line numbers straight from the agent.
+/// Blank lines are folded-out unchanged regions; skip them.
+function parseOmpDiff(text: string, pathHint: string | null): DiffSpec {
+  const rows: DiffRow[] = [];
+  let adds = 0;
+  let dels = 0;
+  for (const line of text.replace(/\r\n/g, "\n").split("\n")) {
+    const m = line.match(/^([ +-])(\d+)\| ?(.*)$/);
+    if (!m) continue;
+    const num = Number(m[2]);
+    if (m[1] === "+") { adds += 1; rows.push({ type: "add", newNum: num, text: m[3] }); }
+    else if (m[1] === "-") { dels += 1; rows.push({ type: "del", oldNum: num, text: m[3] }); }
+    else { rows.push({ type: "ctx", oldNum: num, newNum: num, text: m[3] }); }
+  }
+  return { path: pathHint, rows: rows.slice(0, DIFF_ROW_CAP), adds, dels };
+}
+
+function diffHunks(call: ToolCall): DiffSpec | null {
+  // PROTOCOL DIFF BLOCKS FIRST (monocode extractDiff parity): the
+  // agent ships {type:"diff"} content itself. Swift used to drop
+  // oldText/newText/patch on the floor — the reason edit cards were
+  // empty here while monocode showed diffs for the same events.
+  const str = (v: unknown): string | null =>
+    typeof v === "string" && v.length > 0 ? v : null;
+  for (const c of call.content) {
+    if ((c.type ?? "").toLowerCase() !== "diff") continue;
+    const patchText = str(c.patch);
+    if (patchText && /^(diff --git|@@ )/.test(patchText.trim())) {
+      return parseGitPatch(patchText, c.path ?? null);
+    }
+    // omp details.diff rides the block's `text` field (its own line
+    // format) — line numbers come from the agent, no DP needed.
+    const ompText = str(c.text);
+    if (ompText && /^[ +-]\d+\|/m.test(ompText)) {
+      return parseOmpDiff(ompText, c.path ?? null);
+    }
+    const o = str(c.oldText);
+    const n = str(c.newText);
+    if (o != null || n != null) {
+      return { path: c.path ?? null, hunks: [{ oldText: o ?? "", newText: n ?? "" }] };
+    }
+  }
+  const raw = call.rawInput ?? {};
+  const collect = (arr: unknown): DiffHunk[] => {
+    if (!Array.isArray(arr)) return [];
+    const out: DiffHunk[] = [];
+    for (const e of arr) {
+      if (typeof e !== "object" || e == null) continue;
+      const o = str(e.oldText) ?? str(e.old_string) ?? str(e.search) ?? str(e.before);
+      const n = str(e.newText) ?? str(e.new_string) ?? str(e.replace) ?? str(e.content) ?? str(e.after);
+      if (o == null && n == null) continue;
+      out.push({ oldText: o ?? "", newText: n ?? "" });
+    }
+    return out;
+  };
+  const path = str(raw.path) ?? str(raw.file_path);
+  const hunks = collect(raw.edits).concat(collect(raw.replacements), collect(raw.hunks));
+  if (hunks.length > 0) return { path, hunks };
+  if (path == null) return null;
+  const newText = str(raw.content) ?? str(raw.newText) ?? str(raw.new_string) ?? str(raw.replace);
+  if (newText != null) {
+    const oldText = str(call.oldText) ?? str(raw.oldText) ?? str(raw.old_string) ?? str(raw.search);
+    return { path, hunks: [{ oldText: oldText ?? "", newText }] };
+  }
+  return null;
+}
 
 function DiffView({ call }: { call: ToolCall }) {
-  const raw = call.rawInput ?? {};
-  const path = typeof raw.path === "string" ? raw.path : null;
-  const newText = typeof raw.content === "string" ? raw.content
-    : typeof raw.newText === "string" ? raw.newText : null;
-  const oldText = call.oldText ?? "";
+  const spec = diffHunks(call);
+  // Each hunk contributes its own old→new span; joining them lets one
+  // DP pass render the whole edit sequence — shared context between
+  const oldAll = spec?.hunks?.map((h) => h.oldText).join("\n") ?? "";
+  const newAll = spec?.hunks?.map((h) => h.newText).join("\n") ?? "";
+  const path = spec?.path ?? null;
   // The DP is O(n·m) — memo it or every parent re-render (streaming
   // chunks bump the revision constantly) re-runs the whole matrix.
-  // newGuaranteed: the early return below never precedes the hooks.
-  const newGuaranteed = newText ?? "";
-  const rows = useMemo(() => lineDiff(oldText, newGuaranteed),
-                       [oldText, newGuaranteed]);
-  const adds = useMemo(() => rows.filter((r) => r.type === "add").length, [rows]);
-  const dels = useMemo(() => rows.filter((r) => r.type === "del").length, [rows]);
-  if (path == null || newText == null) return null;
+  // Patch blocks ship pre-parsed rows and skip the DP entirely.
+  // (spec == null guard never precedes the hooks.)
+  const parsed = spec?.rows;
+  const rows = useMemo(() => parsed ?? lineDiff(oldAll, newAll),
+                       [parsed, oldAll, newAll]);
+  const adds = parsed ? (spec?.adds ?? 0) : rows.filter((r) => r.type === "add").length;
+  const dels = parsed ? (spec?.dels ?? 0) : rows.filter((r) => r.type === "del").length;
+  if (spec == null) return null;
   return (
     <div className="diff">
       <div className="diff-head">
-        <span className="diff-path">{path}</span>
+        {path && <span className="diff-path">{path}</span>}
         <span className="diff-stats"><span className="stat-add">+{adds}</span> <span className="stat-del">−{dels}</span></span>
       </div>
       <div className="diff-body"><DiffBody rows={rows} /></div>
@@ -178,7 +298,7 @@ function ToolGlyph({ kind }: { kind: string }) {
 
 function ToolCard({ id }: { id: string }) {
   const call = store.tools.get(id)!;
-  const isDiff = call.kind != null && editKinds.has(call.kind);
+  const isDiff = call.kind != null && EDIT_KINDS[call.kind];
   // Tools stay folded by default (the header carries status + glyph);
   // a card the user opened while running folds on clean completion.
   const [open, setOpen] = useState(false);
@@ -197,7 +317,10 @@ function ToolCard({ id }: { id: string }) {
     : call.status === "pending" ? "等待"
     : call.status === "error" ? "出错"
     : (call.status ?? "");
-  const showDiff = isDiff || (call.rawInput?.content != null);
+  // Only a REAL old→new pair buys the diff surface; unrecognized args
+  // (remote adapters) fall through to the text/JSON rendering below —
+  // a diff-kind tool must never render an empty card.
+  const showDiff = diffHunks(call) != null;
   const textContent = call.content.filter((c) => c.text).map((c) => c.text).join("\n");
   const kind = call.kind ?? "other";
   return (
@@ -233,20 +356,22 @@ function ToolCard({ id }: { id: string }) {
   );
 }
 
-/// PlanPanel fold state — see the component note. Written on toggle,
-/// read on (re)mount.
-let planDockOpen = true;
 
 /// Dock plan panel: pinned above the composer (TUI model), phase-
-/// grouped, collapsible. Replaces the old inline transcript card —
-/// which the 60-block render window could scroll out of view.
+/// grouped, collapsible. The fold lives in the STORE, persisted to
+/// localStorage: the dock remounts whenever plan/jobs flush to null
+/// and back, and WKWebView can crash-reload the page — component or
+/// module state resurrected the panel the user had folded, and the
+/// taller dock then shoved the transcript (2026-09-02 report).
 function PlanPanel({ entries }: { entries: PlanEntry[] }) {
-  // Fold state is MODULE-scoped: at turn end the dock flickers through
-  // empty (queue flush, plan null) and unmounts — a local useState
-  // re-opened the panel the user had folded, and the taller dock then
-  // shoved the transcript (the auto-expand + scroll-jump report,
-  // 2026-09-02). Module scope survives the remount.
-  const [open, setOpen] = useState(planDockOpen);
+  // LOCAL subscription: togglePlanDock no longer bumps the store
+  // revision, so folding re-renders ONLY this panel — never the whole
+  // transcript (the reported fold jank).
+  const open = useSyncExternalStore(
+    (onChange) => store.subscribe(onChange),
+    () => store.planDockOpen,
+    () => true,
+  );
   const done = entries.filter((e) => e.status === "completed").length;
   const phases: { name: string | null; items: PlanEntry[] }[] = [];
   for (const e of entries) {
@@ -257,7 +382,7 @@ function PlanPanel({ entries }: { entries: PlanEntry[] }) {
   return (
     <div className={"dock-plan" + (open ? "" : " folded")}>
       <button className="dock-head"
-        onClick={() => setOpen((v) => { planDockOpen = !v; return !v; })}
+        onClick={() => store.togglePlanDock()}
         title={open ? "收起计划面板" : "展开计划面板"}>
         <span className="plan-title">计划</span>
         <span className="plan-progress">{done}/{entries.length}</span>
@@ -343,7 +468,7 @@ function SubagentLine({ rows }: { rows: { id: string; state?: string | null;
 /// whole knob list, so this component is stateless about current values.
 /// Minimal 24px stroke icons (lucide-style geometry, no dependency).
 function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking"
-  | "stop" | "send" | "folder" | "branch" }) {
+  | "stop" | "send" | "folder" | "branch" | "copy" | "check" }) {
   const common = { width: 13, height: 13, viewBox: "0 0 24 24", fill: "none",
                    stroke: "currentColor", strokeWidth: 2,
                    strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
@@ -364,6 +489,10 @@ function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking"
       return <svg {...common}><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg>;
     case "branch":
       return <svg {...common}><line x1="6" x2="6" y1="3" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></svg>;
+    case "copy":
+      return <svg {...common}><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>;
+    case "check":
+      return <svg {...common}><path d="M20 6 9 17l-5-5" /></svg>;
   }
 }
 
@@ -385,9 +514,13 @@ function toolArgSummary(raw: Record<string, unknown> | null | undefined): string
   }
   const cmd = s(raw.command);
   if (cmd) return cmd.split("\n")[0];
-  const pat = s(raw.pattern) ?? s(raw.query) ?? s(raw.name)
-    ?? s(raw.prompt) ?? s(raw.description);
-  if (pat) return pat;
+  // Multi-hunk edit args may carry no top-level path — read it off the
+  // first hunk, else summarize the hunk count so the row is never bare.
+  if (Array.isArray(raw.edits) && raw.edits.length > 0) {
+    const first = raw.edits[0] as Record<string, unknown> | null | undefined;
+    const p = first ? s(first.path) ?? s(first.file_path) : null;
+    return p ? `${p} · ${raw.edits.length} 处修改` : `${raw.edits.length} 处修改`;
+  }
   for (const v of Object.values(raw)) {
     const str = s(v);
     if (str) return str;
@@ -403,7 +536,10 @@ function toolDisplayTitle(call: ToolCall): string {
     : call.kind === "edit" || call.kind === "write" ? "Edit"
     : call.kind === "execute" || call.kind === "bash" ? "Bash"
     : call.kind;
-  const arg = toolArgSummary(call.rawInput);
+  // rawInput args first; protocol diff blocks carry the path when the
+  // agent ships {type:"diff"} content instead of arguments.
+  const arg = toolArgSummary(call.rawInput)
+    ?? call.content.find((c) => c.type === "diff" && c.path)?.path ?? null;
   if (arg) {
     const label = kindLabel ?? call.title ?? "Tool";
     const full = `${label} ${arg}`;
@@ -417,6 +553,10 @@ function toolDisplayTitle(call: ToolCall): string {
   return call.id;
 }
 
+/// Options long enough to warrant the search row (monocode shows it for
+/// big catalogs; thinking/mode knobs stay short and skip it).
+const CONFIG_SEARCH_THRESHOLD = 8;
+
 function ConfigChip({ option, icon, open, onToggle, onPick }: {
   option: { id: string; name: string; currentValue?: string | null;
             options: ConfigChoice[] };
@@ -424,27 +564,153 @@ function ConfigChip({ option, icon, open, onToggle, onPick }: {
   open: boolean; onToggle: () => void; onPick: (value: string) => void;
 }) {
   const current = option.options.find((o) => o.value === option.currentValue);
+  const wrap = useRef<HTMLSpanElement>(null);
   return (
-    <div className="chip-wrap" data-pop={option.id}>
-      <button className={"chip" + (open ? " open" : "")} onClick={onToggle} title={option.name}>
+    <span ref={wrap} className="chip-wrap">
+      <button className={"chip" + (open ? " open" : "")} onClick={onToggle}
+        onMouseDown={(e) => e.preventDefault()} title={option.name}>
         {icon}
         <span className="chip-value">{current?.name ?? option.currentValue ?? "—"}</span>
         <span className="chip-caret">▾</span>
       </button>
       {open && (
-        <div className="chip-pop">
-          {option.options.map((o) => (
-            <button key={o.value}
-              className={"chip-opt" + (o.value === option.currentValue ? " cur" : "")}
-              onClick={() => onPick(o.value)}>
-              <span>{o.name}</span>
-              {o.value === option.currentValue && <span className="chip-check">✓</span>}
-              {o.source && <span className="chip-source">({o.source})</span>}
+        <ConfigPopover anchor={wrap} option={option}
+          onDismiss={onToggle} onPick={onPick} />
+      )}
+    </span>
+  );
+}
+
+/// Popover body for a config knob: search row (long catalogs) +
+/// monocode-ModelPicker-style rows with keyboard navigation. Mounted only
+/// while open, so search/keyboard state resets on every open.
+function ConfigPopover({ anchor, option, onDismiss, onPick }: {
+  anchor: PopoverAnchor;
+  option: { id: string; name: string; currentValue?: string | null;
+            options: ConfigChoice[] };
+  onDismiss: () => void; onPick: (value: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const search = useRef<HTMLInputElement>(null);
+  const activeRow = useRef<HTMLDivElement>(null);
+  const searchable = option.options.length > CONFIG_SEARCH_THRESHOLD;
+  const needle = query.trim().toLowerCase();
+  const visible = useMemo(() => needle
+    ? option.options.filter((o) => `${o.name} ${o.value}`.toLowerCase().includes(needle))
+    : option.options,
+    [option.options, needle]);
+
+  useEffect(() => {
+    const i = visible.findIndex((o) => o.value === option.currentValue);
+    setActive(i >= 0 ? i : 0);
+  }, [visible, option.currentValue]);
+
+  useEffect(() => {
+    if (searchable) search.current?.focus();
+  }, [searchable]);
+
+  useEffect(() => {
+    activeRow.current?.scrollIntoView({ block: "nearest" });
+  }, [active]);
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActive((i) => Math.min(visible.length - 1, i + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive((i) => Math.max(0, i - 1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const item = visible[active];
+      if (item) onPick(item.value);
+    }
+  };
+
+  // Pills size to their content — a 4-option knob must not stretch to
+  // the model list's 300px column.
+  const pillMode = !searchable && option.options.length <= 5;
+  return (
+    <Popover anchor={anchor} side="top"
+      width={pillMode ? undefined : 300}
+      minHeight={pillMode ? undefined : 120} maxHeight={pillMode ? undefined : 340}
+      onDismiss={onDismiss} role="dialog" aria-label={option.name}
+      className="flex flex-col overflow-hidden"
+      // No search row → the surface itself takes the arrow keys.
+      autoFocus={!searchable} tabIndex={searchable ? undefined : -1}
+      onKeyDown={searchable ? undefined : onKey}>
+      {searchable && (
+        <label className="flex items-center gap-2 border-b border-content/10 px-2 py-2.5 text-content/50">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+            strokeLinejoin="round" aria-hidden>
+            <circle cx="11" cy="11" r="7" />
+            <line x1="21" x2="16.5" y1="21" y2="16.5" />
+          </svg>
+          <input ref={search} value={query} placeholder="搜索…"
+            aria-label={`搜索${option.name}`}
+            className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/40"
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={onKey} />
+        </label>
+      )}
+      {!searchable && option.options.length <= 5 ? (
+        // happier's SessionConfigOptionControl: short enums read as
+        // capsule pills — one glance, no rows.
+        <div className="pop-pills" role="listbox" aria-label={option.name}>
+          {visible.map((o, index) => (
+            <button key={o.value} role="option"
+              aria-selected={o.value === option.currentValue}
+              onMouseDown={(e) => e.preventDefault()}
+              onMouseEnter={() => setActive(index)}
+              onClick={() => onPick(o.value)}
+              className={"pop-pill"
+                + (o.value === option.currentValue ? " cur" : "")
+                + (index === active ? " act" : "")}>
+              {o.name}
             </button>
           ))}
         </div>
+      ) : (
+      <div role="listbox" aria-label={option.name}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-none px-1.5 pb-1.5">
+        {visible.length === 0 && (
+          <div className="px-3 py-4 text-[12px] text-content/50">无匹配选项</div>
+        )}
+        {visible.map((o, index) => {
+          const selected = o.value === option.currentValue;
+          const highlighted = index === active;
+          return (
+            <div key={o.value} ref={highlighted ? activeRow : undefined}
+              onMouseEnter={() => setActive(index)}
+              className={"flex w-full items-center gap-1 rounded-lg px-1"
+                + (highlighted || selected ? " bg-content/10" : " hover:bg-content/5")}>
+              <button role="option" aria-selected={selected}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => onPick(o.value)}
+                className="flex min-w-0 flex-1 items-center gap-2 px-1.5 py-1.5 text-left text-content">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[12.5px] font-medium leading-5">{o.name}</span>
+                  {o.source && (
+                    <span className="mt-0.5 block truncate text-[11px] leading-4 text-content/50">{o.source}</span>
+                  )}
+                </span>
+                {selected && (
+                  <svg className="shrink-0 text-accent" width="14" height="14"
+                    viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                )}
+              </button>
+            </div>
+          );
+        })}
+      </div>
       )}
-    </div>
+    </Popover>
   );
 }
 
@@ -464,20 +730,24 @@ function histFallback(s: { updatedAt?: string | null }): string {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/// History = one icon pill. Whole surface is the target (svg has
-/// pointer-events:none) — the old label+caret variant had click dead
-/// zones and stacked popovers with the config knobs.
+/// History = one icon pill opening an anchored popover. Whole surface is
+/// the target (svg has pointer-events:none); the portalled Popover owns
+/// outside-click/Escape dismissal.
 function HistoryChip({ open, onToggle, onSelect }: {
   open: boolean; onToggle: () => void; onSelect: (sessionId: string) => void;
 }) {
+  const wrap = useRef<HTMLSpanElement>(null);
   return (
-    <div className="chip-wrap" data-pop="history">
+    <span ref={wrap} className="chip-wrap">
       <button className={"icon-chip" + (open ? " open" : "")} title="历史会话"
-              aria-label="历史会话" onClick={onToggle}>
+        aria-label="历史会话" aria-haspopup="dialog" aria-expanded={open}
+        onMouseDown={(e) => e.preventDefault()} onClick={onToggle}>
         <Icon kind="history" />
       </button>
       {open && (
-        <div className="chip-pop">
+        <Popover anchor={wrap} side="top" width={320} maxHeight={360}
+          onDismiss={onToggle} role="dialog" aria-label="历史会话"
+          className="overflow-y-auto overscroll-none py-1">
           {store.sessions.length === 0 && <div className="slash-desc">无会话记录</div>}
           {store.sessions.map((s) => (
             <button key={s.sessionId} className="chip-opt hist"
@@ -489,20 +759,6 @@ function HistoryChip({ open, onToggle, onSelect }: {
               </span>
             </button>
           ))}
-          <div className="hist-footer">
-            <button className="chip-opt hist-act"
-              onClick={() => postToHost({ type: "export" })}>
-              ⇪ 导出 HTML
-            </button>
-            <button className="chip-opt hist-act"
-              onClick={() => postToHost({ type: "stats" })}>
-              Σ 统计
-            </button>
-            <button className="chip-opt hist-act"
-              onClick={() => postToHost({ type: "login" })}>
-              ⚿ 登录
-            </button>
-          </div>
           {store.loginProviders.length > 0 && (
             <div className="hist-providers">
               {store.loginProviders.map((p) => (
@@ -515,6 +771,140 @@ function HistoryChip({ open, onToggle, onSelect }: {
               ))}
             </div>
           )}
+        </Popover>
+      )}
+    </span>
+  );
+}
+
+/// happier's three-state submit, CSS-morphed in one circle: send
+/// (idle+text) · steer (working+text — same arrow, click interrupts and
+/// injects) · stop (working+empty, destructive square). The two icons
+/// crossfade/scale in place; surface color morphs underneath.
+function SubmitButton({ working, hasValue, awaiting, action }: {
+  working: boolean; hasValue: boolean; awaiting: boolean;
+  action: () => void;
+}) {
+  const stopMode = working && !hasValue;
+  return (
+    <button type="button"
+      aria-label={stopMode ? "停止" : "发送"}
+      className={"submit-btn " + (stopMode ? "stop" : "send")
+        + (awaiting ? " awaiting" : "")}
+      disabled={!working && !hasValue}
+      title={stopMode ? "停止 (Esc)"
+        : working ? "插话发送 (Enter，中断当前 turn)"
+        : "发送 (Enter)"}
+      onClick={action}>
+      <span className={"ic" + (stopMode ? " off" : "")} aria-hidden><Icon kind="send" /></span>
+      <span className={"ic" + (stopMode ? "" : " off")} aria-hidden><Icon kind="stop" /></span>
+    </button>
+  );
+}
+
+function codeTextOf(node: React.ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(codeTextOf).join("");
+  if (typeof node === "object" && "props" in node) {
+    return codeTextOf((node as React.ReactElement).props.children);
+  }
+  return "";
+}
+
+function execCommandCopy(text: string): void {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand("copy");
+  ta.remove();
+}
+
+function copyText(text: string): void {
+  // goty:// is not a secure context — navigator.clipboard can be absent
+  // in WKWebView; degrade to the execCommand path.
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).catch(() => execCommandCopy(text));
+  } else {
+    execCommandCopy(text);
+  }
+}
+
+/// Code-block frame for agent markdown (monocode/happier pattern):
+/// language header + copy (1.2s check) around the hljs body — the
+/// highlighting stays rehype-highlight so every token keeps coming from
+/// the Ghostty-bridged palette.
+function AgentCodeBlock({ children, ...rest }: React.ComponentPropsWithoutRef<"pre">) {
+  const [copied, setCopied] = useState(false);
+  const child = Array.isArray(children) ? children[0] : children;
+  const cls = child != null && typeof child === "object" && "props" in child
+    ? String((child as React.ReactElement).props.className ?? "") : "";
+  const lang = /language-([\w+#-]+)/.exec(cls)?.[1] ?? "";
+  return (
+    <div className="code-block">
+      <div className="code-head">
+        <span className="code-lang">{lang || "text"}</span>
+        <button type="button" className="code-copy"
+          onClick={() => {
+            copyText(codeTextOf(children));
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+          }}>
+          {copied ? "✓ 已复制" : "复制"}
+        </button>
+      </div>
+      <pre {...rest}>{children}</pre>
+    </div>
+  );
+}
+
+const streamdownProps = {
+  mode: "streaming" as const,
+  rehypePlugins: [rehypeHighlight],
+  components: { pre: AgentCodeBlock },
+};
+
+/// Thinking renders as a collapsible dim card (happier timeline row):
+/// OPEN while the model is actively thinking, folded once the turn
+/// moves on — the reasoning stays one click away, not sprawled between
+/// the answer's paragraphs.
+/// Thinking streams are chatty: models emit double-blank-line breaks
+/// between every volley, which markdown renders as full paragraph gaps.
+/// Collapse runs of blank lines to one and trim the edges — the card
+/// reads as a compact reasoning trace, not a blog post.
+function compactThought(text: string): string {
+  return text.replace(/\n{3,}/g, "\n\n").replace(/^\n+|\n+$/g, "");
+}
+
+function ThoughtView({ text, isTail }: { text: string; isTail: boolean }) {
+  // Liveness is POSITIONAL, not global: the model streams sequentially,
+  // so only the LAST transcript block can still be thinking — every
+  // earlier thought card is already settled history (the 2026-09-02
+  // report: all cards pulsed "思考中…" in lockstep). The phase itself is
+  // subscribed here because BlockView's memo ignores phase flips.
+  const thinking = useSyncExternalStore(
+    (onChange) => store.subscribe(onChange),
+    () => store.working && store.phase === "thinking",
+    () => false,
+  );
+  const live = isTail && thinking;
+  const [open, setOpen] = useState(live);
+  useEffect(() => {
+    if (!live) setOpen(false);
+  }, [live]);
+  return (
+    <div className={"thought-card" + (open ? " open" : "")}>
+      <button className="thought-head" onClick={() => setOpen(!open)}>
+        <span className={"thought-dot" + (live ? " live" : "")} aria-hidden />
+        <span className="thought-label">{live ? "思考中…" : "思考过程"}</span>
+        <span className={"chevron" + (open ? " up" : "")} aria-hidden>▸</span>
+      </button>
+      {open && (
+        <div className="thought agent-reasoning agent-markdown">
+          <Streamdown {...streamdownProps}>{compactThought(text)}</Streamdown>
         </div>
       )}
     </div>
@@ -549,6 +939,9 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
     setText(draft.text);
     ref.current?.focus();
   }, [draft]);
+  // File-drag affordance: enter/leave depth so crossing children doesn't
+  // flicker the overlay (monocode's Drop files to attach).
+  const [dragDepth, setDragDepth] = useState(0);
   const [openPop, setOpenPop] = useState<string | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const [atIndex, setAtIndex] = useState(0);
@@ -640,22 +1033,13 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
     }
   }, [atOpen]);
 
-  // Any mousedown closes the open popover UNLESS it landed inside the
-  // popover-owning chip itself (data-pop marks the owner). Clicking a
-  // DIFFERENT chip closes the first, then its own click reopens — the
-  // old early-return-on-any-chip let two popovers stack (the report:
-  // history stayed open). A mousedown outside the composer additionally
-  // dismisses the @// popups (typing re-arms them).
+  // Config/history popovers are portalled to <body> and own their
+  // outside-click dismissal (Popover.tsx), so this handler only has one
+  // job left: a mousedown outside the composer dismisses the @// inline
+  // popups (typing re-arms them).
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
       const target = e.target as Element;
-      const owner = target.closest("[data-pop]");
-      if (owner) {
-        const id = owner.getAttribute("data-pop");
-        setOpenPop((cur) => (id === cur ? cur : null));
-        return;
-      }
-      setOpenPop(null);
       if (boxRef.current == null || !boxRef.current.contains(target)) {
         setDismissed(true);
       }
@@ -663,6 +1047,7 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, []);
+
 
   /// mode: normal (idle) · steer (interrupt the running turn — the
   /// working-Enter default, omp TUI parity: Enter steers, the
@@ -808,15 +1193,40 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
   return (
     <div className="composer">
       <div
-        className="composer-box"
+        className={"composer-box" + (dragDepth > 0 ? " dragging" : "")}
         ref={boxRef}
         onDragOver={(e) => { e.preventDefault(); }}
+        onDragEnter={(e) => {
+          if (e.dataTransfer?.types?.includes("Files")) {
+            setDragDepth((d) => d + 1);
+          }
+        }}
+        onDragLeave={() => setDragDepth((d) => Math.max(0, d - 1))}
         onDrop={(e) => {
+          setDragDepth(0);
           if (e.dataTransfer?.files?.length) {
             e.preventDefault();
             void ingestFiles([...e.dataTransfer.files]);
           }
         }}>
+        {(store.meta?.workspace || store.meta?.directory || store.meta?.branch) && (
+        <div className="composer-meta">
+          {(store.meta?.workspace || store.meta?.directory) && (
+            <span className="composer-meta-item"
+              title={[store.meta.workspace, store.meta.directory].filter(Boolean).join("/")}>
+              <Icon kind="folder" />
+              <span>{[store.meta.workspace, store.meta.directory].filter(Boolean).join("/")}</span>
+            </span>
+          )}
+          {store.meta?.branch && (
+            <span className="composer-meta-item" title={`分支 ${store.meta.branch}`}>
+              <Icon kind="branch" />
+              <span>{store.meta.branch}</span>
+            </span>
+          )}
+        </div>
+        )}
+        {dragDepth > 0 && <div className="composer-drag">松开以添加图片附件</div>}
         {(store.reconnecting || store.starting || store.error != null || store.retry != null
           || store.flash != null) && (
         <div className="composer-status">
@@ -931,11 +1341,6 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
             <img className="pane-agent-icon" src={store.meta.icon}
                  alt="" draggable={false} />
           )}
-          {store.sessionTitle && (
-            <span className="pane-session-title" title={store.sessionTitle}>
-              {store.sessionTitle}
-            </span>
-          )}
           <HistoryChip open={openPop === "history"}
             onToggle={() => {
               const next = openPop !== "history";
@@ -970,22 +1375,6 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
             ))}
           </div>
         <div className="toolbar-right">
-          {(store.meta?.directory || store.meta?.workspace) && (
-            <span className="pane-meta"
-              title={[store.meta.workspace, store.meta.directory]
-                .filter(Boolean).join("/")
-                + (store.meta.branch ? ` · ${store.meta.branch}` : "")}>
-              <Icon kind="folder" />
-              <span>{[store.meta.workspace, store.meta.directory]
-                .filter(Boolean).join("/")}</span>
-            </span>
-          )}
-          {store.meta?.branch && (
-            <span className="pane-meta" title={`分支 ${store.meta.branch}`}>
-              <Icon kind="branch" />
-              <span>{store.meta.branch}</span>
-            </span>
-          )}
           {(() => {
             const u = store.usage;
             const rt = store.runtime;
@@ -1030,17 +1419,14 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
               ⇥
             </button>
           )}
-          <button
-            className={"action-btn " + (working ? "stop" : "send")
-              + (phase === "awaitingPermission" ? " awaiting" : "")}
-            disabled={working ? false : (!text.trim() && attach.length === 0)}
-            title={working ? "插话发送 (Enter，中断当前 turn) / 停止 (空文本或 Esc)" : "发送 (Enter)"}
-            onClick={() => working
+          <SubmitButton
+            working={working}
+            hasValue={!!text.trim() || attach.length > 0}
+            awaiting={phase === "awaitingPermission"}
+            action={() => working
               ? ((text.trim() || attach.length > 0) ? submit("steer")
                 : postToHost({ type: "stop" }))
-              : submit()}>
-            <Icon kind={working ? "stop" : "send"} />
-          </button>
+              : submit()} />
         </div>
       </div>
       </div>
@@ -1055,43 +1441,55 @@ const WINDOW_PAGE = 150;
 /// returning to the bottom trims back to this.
 const MAX_WINDOW = INITIAL_WINDOW + WINDOW_PAGE;
 
-/// Branch affordance. The fork runs in a throwaway process server-side
-/// (worktree semantics) — it is safe while a turn streams, so the only
-/// gate is the entry id itself (stamped by store replay).
-const BranchButton = React.memo(
-  function BranchButton({ entryId, label, className }: {
-    entryId: string | null; label: string; className?: string }) {
-    // Shared pane-level busy flag: the fork is a pure file operation
-    // (~10ms) with a process fallback; EVERY branch button shows
-    // 分支中… and refuses clicks until it lands, so rapid clicks
-    // cannot spawn N tabs.
-    const busy = useSyncExternalStore(
-      (onChange) => store.subscribe(onChange),
-      () => store.branchBusy,
-      () => false,
-    );
-    const disabled = !entryId || busy;
-    const title = !entryId
-      ? "该消息还没有会话条目 id（重开窗格或加载历史后可从此处分支）"
-      : busy ? "分支创建中……"
-      : "从此处分叉到新标签页继续（原会话与原窗口保留不动；turn 进行中同样可用）";
-    return (
-      <button
-        className={(className ?? "branch-btn") + (disabled ? " dim" : "")}
-        disabled={disabled} title={title}
+/// End-of-turn affordances (monocode pattern): quiet icon buttons —
+/// copy the turn's raw markdown, fork the session at this entry. The
+/// fork runs in a throwaway process server-side.
+/// The shared pane-level busy flag makes every branch button refuse
+/// clicks until the fork lands (~10ms file operation), so rapid
+/// clicks cannot spawn N tabs.
+function TurnActions({ text, entryId }: { text: string; entryId: string | null | undefined }) {
+  const [copied, setCopied] = useState(false);
+  const busy = useSyncExternalStore(
+    (onChange) => store.subscribe(onChange),
+    () => store.branchBusy,
+    () => false,
+  );
+  const branchDisabled = !entryId || busy;
+  return (
+    <div className="turn-actions">
+      <button type="button" className="turn-action"
+        title="复制本条回答"
+        aria-label="复制本条回答"
+        onClick={() => {
+          copyText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        }}>
+        <Icon kind={copied ? "check" : "copy"} />
+      </button>
+      <button type="button" className="turn-action"
+        disabled={branchDisabled}
+        title={!entryId
+          ? "该消息还没有会话条目 id（重开窗格或加载历史后可从此处分支）"
+          : busy ? "分支创建中……"
+          : "从此处分叉到新标签页继续（原会话与原窗口保留不动；turn 进行中同样可用）"}
+        aria-label="分支到新标签页"
         onClick={() => {
           if (!entryId || busy) return;
           postToHost({ type: "branchNewPane", entryId });
-        }}>{busy ? "⎿ 分支中…" : label}</button>
-    );
-  });
+        }}>
+        <Icon kind="branch" />
+      </button>
+    </div>
+  );
+}
 
 /// One transcript row. Memoized: during replay only the newest blocks
 /// change identity, so scroll-up pagination re-renders just the newly
 /// revealed rows and streaming re-renders only the tail block.
 const BlockView = React.memo(
-  function BlockView({ block, showBranch = false }:
-      { block: Block; showBranch?: boolean }) {
+  function BlockView({ block, showBranch = false, isTail = false }:
+      { block: Block; showBranch?: boolean; isTail?: boolean }) {
     switch (block.kind) {
       case "user": return (
         <div className="user-row">
@@ -1099,15 +1497,13 @@ const BlockView = React.memo(
         </div>
       );
       case "agent": return block.text ? (
-        <div className="agent">
-          <Markdown remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown>
-          {showBranch && block.entryId ? (
-            <BranchButton entryId={block.entryId} label="⎿ 分支到新标签页"
-              className="branch-btn agent-branch" />
+        <div className="agent agent-markdown">
+          <Streamdown {...streamdownProps}>{block.text}</Streamdown>
+          {showBranch ? (
+            <TurnActions text={block.text} entryId={block.entryId} />
           ) : null}
         </div>) : null;
-      case "thought": return <div className="thought"><Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{block.text}</Markdown></div>;
+      case "thought": return <ThoughtView text={block.text} isTail={isTail} />;
       case "tool": return <ToolCard id={block.call.id} />;
       case "turnStats": return <div className="turn-stats">{block.text}</div>;
       case "error": return <div className="block-error">Error: {block.text}</div>;
@@ -1121,6 +1517,7 @@ const BlockView = React.memo(
   (a, b) => {
     if (a.block !== b.block) return false;
     if (a.showBranch !== b.showBranch) return false;
+    if (a.isTail !== b.isTail) return false;
     if (a.block.kind === "tool" && b.block.kind === "tool") return a.block.call === b.block.call;
     return true;
   },
@@ -1373,17 +1770,30 @@ export function App() {
 
   return (
     <div className="pane">
+        <div className="pane-head">
+          {store.meta?.icon && (
+            <img className="pane-head-icon" src={store.meta.icon} alt="" draggable={false} />
+          )}
+          <span className="pane-head-title" title={store.sessionTitle ?? ""}>
+            {store.sessionTitle || "Agent"}
+          </span>
+          {store.working && <span className="pane-head-state" aria-hidden />}
+        </div>
       <div className="transcript" ref={scroller} onScroll={onScroll}>
         {(begin > 0 || store.hasOlder) && (
           <div className="history-more" ref={sentinelRef}>加载更早消息…</div>
         )}
         {visible.map((block, i) => (
           <BlockView key={block.id} block={block}
-            // The branch affordance belongs at the END of a turn's LLM
+            // Tail flag feeds the thought card's liveness (only the
+            // LAST block can still be thinking — streaming is ordered).
+            isTail={i + 1 >= visible.length}
+            // The turn-action row belongs at the END of a turn's LLM
             // output, not on every entryId-stamped fragment before it
             // (thought/tool interleaving splits one message into many
-            // agent blocks). Last content block of the turn only.
-            showBranch={block.kind === "agent" && block.entryId != null
+            // agent blocks). Last content block of the turn only — copy
+            // works even before an entry id lands; branch gates itself.
+            showBranch={block.kind === "agent"
               && (i + 1 >= visible.length
                   || (visible[i + 1].kind !== "agent"
                       && visible[i + 1].kind !== "thought"
@@ -1404,7 +1814,7 @@ export function App() {
           {store.pendingQueue.length > 0 && (
             <div className="dock-outbox" title="排队中的消息：turn 结束后按序送达">
               {store.pendingQueue.map((text, i) => (
-                <div className="outbox-row" key={i}>
+                  <div className="outbox-row" key={i}>
                   <span className="outbox-mark">⇥</span>
                   <span className="outbox-text">{text}</span>
                   <span className="outbox-actions">

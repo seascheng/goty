@@ -37,9 +37,14 @@ enum ACPContentNormalizer {
     }
 
     private static func flatten(_ item: [String: Any], into out: inout [AgentContent]) {
-        // Leaf first: anything carrying text/path is a leaf regardless of
-        // its `type` tag; wrappers recurse into their `content` field.
-        if item["text"] is String || item["path"] is String, let leaf = AgentContent(item) {
+        // Leaf first: anything carrying text/path (or a diff payload —
+        // {type:"diff"} blocks carry oldText/newText/patch instead of
+        // text) is a leaf regardless of its `type` tag; wrappers
+        // recurse into their `content` field.
+        if item["text"] is String || item["path"] is String
+            || item["oldText"] is String || item["old_text"] is String
+            || item["newText"] is String || item["new_text"] is String
+            || item["patch"] != nil, let leaf = AgentContent(item) {
             out.append(leaf)
             return
         }

@@ -3,7 +3,10 @@ import { z } from "zod";
 /// Swift → JS events (AgentWebBridge). Schema-parsed once at this
 /// boundary; Swift fills absent optionals with NSNull(), so absent string
 /// fields arrive as `null` and stay nullable through the view layer.
-export type ToolContent = { type: string; text?: string | null; path?: string | null };
+export type ToolContent = { type: string; text?: string | null; path?: string | null;
+  /// `{type:"diff"}` blocks (monocode harness parity): the agent ships
+  /// pre/post edit text or a raw git patch with its tool call.
+  oldText?: string | null; newText?: string | null; patch?: string | null };
 export type ToolCall = {
   id: string; title?: string | null; kind?: string | null; status?: string | null;
   content: ToolContent[];
@@ -50,6 +53,9 @@ const ToolContentSchema = z.object({
   type: z.string(),
   text: z.string().nullish(),
   path: z.string().nullish(),
+  oldText: z.string().nullish(),
+  newText: z.string().nullish(),
+  patch: z.string().nullish(),
 });
 const PlanEntrySchema = z.object({
   content: z.string(),
@@ -272,13 +278,39 @@ class Store {
   /// True while a worktree fork (throwaway process) is booting — every
   /// BranchButton disables on it; the Swift handler holds the same flag.
   branchBusy = false;
+  /// Set when the agent clears the plan at turn settle; the stale plan
+  /// keeps the dock mounted (scroll-jump guard) until the next turn.
+  private planCleared = false;
+  /// Plan-dock fold. Lives in the STORE (not component state) and is
+  /// persisted: the dock remounts whenever plan/jobs flush to null and
+  /// back, and WKWebView can crash-reload the page — both used to
+  /// resurrect the panel the user had folded.
+  planDockOpen = (() => {
+    try { return localStorage.getItem("goty.planDock.open") !== "0"; } catch { return true; }
+  })();
   /// Set at turnEnded: the next agent/thought chunk opens a fresh block
   /// instead of merging into the closed turn's tail.
   private tailSealed = false;
   /// chunkBoundary sealed the current content-block run: the next
   /// chunk opens a fresh block (faithful stream order).
   private chunkSealed = false;
-  /// Older history exists BEYOND what blocks hold (tail-first load).
+  togglePlanDock(): void {
+    this.planDockOpen = !this.planDockOpen;
+    // LOCAL-ONLY update: no revision bump. Folding used to re-render
+    // the ENTIRE App (revision snapshot) — during a turn that means
+    // contending with per-chunk renders, which is the reported fold
+    // jank. PlanPanel subscribes to planDockOpen itself; App's
+    // revision snapshot is unchanged so React bails out there.
+    this.emit();
+    // Persist OFF the click path: synchronous localStorage writes
+    // inside the event handler stall the fold in WKWebView.
+    clearTimeout(this.planDockPersistTimer);
+    this.planDockPersistTimer = setTimeout(() => {
+      this.planDockPersistTimer = undefined;
+      try { localStorage.setItem("goty.planDock.open", this.planDockOpen ? "1" : "0"); } catch { /* private mode */ }
+    }, 250);
+  }
+  private planDockPersistTimer: number | undefined;
   hasOlder = false;
   /// Blocks the LAST transcriptPrepend added in front (consumed by the
   /// App to shift its render window + restore the viewport), and an
@@ -468,7 +500,12 @@ class Store {
     // permanent contradictory spinner.
     if (STARTING_TERMINATORS[event.type]) this.starting = null;
     switch (event.type) {
-      case "userMessage": this.push({ kind: "user", text: event.text }); break;
+      case "userMessage":
+        // A settled plan hides HERE (not at the turn-end null): the
+        // dock then unmounts while the user is looking at the composer,
+        // never as a mid-read scroll jump.
+        if (this.planCleared) { this.plan = null; this.planCleared = false; }
+        this.push({ kind: "user", text: event.text }); break;
       case "queueMessage": this.pendingQueue.push(event.text); break;
       // Outbox row actions (Swift-side), text-keyed so the mirror never
       // drifts; a missing text (already delivered) is a harmless no-op.
@@ -565,8 +602,19 @@ class Store {
         break;
       }
       case "plan":
-        this.plan = (event.entries ?? []).length > 0
-          ? { entries: event.entries as PlanEntry[] } : null;
+        // An EMPTY plan (turn settled) does not clear the dock: plan
+        // lives BELOW a bottom-pinned transcript, and unmounting it
+        // grows the viewport mid-read — the browser clamps scrollTop
+        // and the whole conversation jumps up by the dock's height
+        // (the turn-end flash + scroll jump, reported many times).
+        // The last plan stays visible; it hides when the next turn
+        // starts (planCleared → userMessage/working).
+        if ((event.entries ?? []).length > 0) {
+          this.plan = { entries: event.entries as PlanEntry[] };
+          this.planCleared = false;
+        } else {
+          this.planCleared = this.plan != null;
+        }
         break;
       case "permission": this.permission = event; break;
       case "permissionResolved": this.permission = null; break;
