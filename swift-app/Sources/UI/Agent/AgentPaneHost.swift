@@ -318,6 +318,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
             coverView.trailingAnchor.constraint(equalTo: trailingAnchor),
             coverView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
+        // App-wide agent zoom: apply the persisted factor now (pageZoom
+        // sticks across loads) and follow later changes from any pane.
+        applyPageZoom()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(agentZoomChanged(_:)),
+            name: AgentPaneHost.zoomChangedNote, object: nil)
         session.delegate = self
         // Theme first: the page's palette lands before any queued
         // transcript events (push order is preserved).
@@ -763,6 +769,46 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
         coverView.layer?.backgroundColor = PaneHost.backdropPlaceholder().cgColor
         pushTheme()
         pushMeta()   // the icon tint is theme-derived
+    }
+
+
+    /// One zoom for every agent pane (per-pane sizes would read as a
+    /// bug); persisted in AppPreferences.
+    static let zoomChangedNote = Notification.Name("goty.agent.pageZoom")
+
+    private func applyPageZoom() {
+        webView.pageZoom = CGFloat(AppPreferences.shared.agentPageZoom)
+    }
+
+    @objc private func agentZoomChanged(_ note: Notification) {
+        applyPageZoom()
+    }
+
+    /// ⌘+ / ⌘- / ⌘0 zoom the whole page via WKWebView's native
+    /// pageZoom — the transcript/composer px ladder scales together,
+    /// matching the files-web editor's zoom chords. The WKWebView has
+    /// no ⌘+ action of its own, so the event climbs the responder
+    /// chain to here even while it is first responder.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags == .command,
+              let key = event.charactersIgnoringModifiers else {
+            return super.performKeyEquivalent(with: event)
+        }
+        let prefs = AppPreferences.shared
+        switch key {
+        case "=", "+":
+            prefs.agentPageZoom = min(2.0, prefs.agentPageZoom + 0.1)
+        case "-":
+            prefs.agentPageZoom = max(0.6, prefs.agentPageZoom - 0.1)
+        case "0":
+            prefs.agentPageZoom = 1.0
+        default:
+            return super.performKeyEquivalent(with: event)
+        }
+        applyPageZoom()
+        NotificationCenter.default.post(name: Self.zoomChangedNote, object: nil)
+        return true
     }
 
     required init?(coder: NSCoder) { fatalError("unsupported") }

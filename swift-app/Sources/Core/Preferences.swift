@@ -19,6 +19,7 @@ final class AppPreferences {
         static let sidebarCollapsed = "sidebarCollapsed"
         static let serversCollapsed = "serversCollapsed"
         static let foldedSpaces = "foldedSpaces"
+        static let agentPageZoom = "agentPageZoom"
         static let editorFontSize = "editorFontSize"
         static let sidebarWidth = "sidebarWidth"
         static let rightPanelVisible = "rightPanelVisible"
@@ -43,6 +44,8 @@ final class AppPreferences {
         sidebarWidth = defaults.double(forKey: Key.sidebarWidth) >= 160
             ? defaults.double(forKey: Key.sidebarWidth) : 200
         rightPanelVisible = defaults.bool(forKey: Key.rightPanelVisible)
+        let az = defaults.double(forKey: Key.agentPageZoom)
+        agentPageZoom = (0.5...2.5).contains(az) ? az : 1.0
         let ef = defaults.double(forKey: Key.editorFontSize)
         editorFontSize = (9...24).contains(ef) ? ef : 12.5
         let pw = defaults.double(forKey: Key.rightPanelWidth)
@@ -91,6 +94,12 @@ final class AppPreferences {
     /// Editor mono size (⌘+ / ⌘- / ⌘0 in the editor; clamped 9…24).
     var editorFontSize: Double {
         didSet { defaults.set(editorFontSize, forKey: Key.editorFontSize) }
+    }
+
+    /// Agent GUI page zoom (⌘+ / ⌘- / ⌘0 in an agent pane; clamped
+    /// 0.6…2.0 by the host, shared by every agent pane).
+    var agentPageZoom: Double {
+        didSet { defaults.set(agentPageZoom, forKey: Key.agentPageZoom) }
     }
 
     var rightPanelTab: RightPanelTab {
