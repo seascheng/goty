@@ -5,6 +5,18 @@
     <description>Most recent changes to Goty.</description>
     <language>en</language>
   <item>
+    <title>Version 0.2.0 (Build 3)</title>
+    <pubDate>Wed, 02 Sep 2026 04:25:08 +0000</pubDate>
+    <sparkle:version>3</sparkle:version>
+    <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+    <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+    <description><![CDATA[<ul><li>Agent GUI spaces: @omp / @pi / @claude / @codex open per-agent sessions — streaming transcript, tool cards, plans, model &amp; thinking pickers, session history.</li><li>Live steering, omp TUI-style: Enter interrupts the running turn, Cmd+Enter queues a follow-up; queued rows can be sent immediately, edited back into the composer, or removed.</li><li>Fork any turn into a worktree branch and continue in a new tab — the live session keeps running.</li><li>Remote agents: history, resume and status read the remote daemon&#x27;s own store; explicit remote-daemon upgrade path.</li><li>Perf: tail-first history with prepend pagination, native transcript virtualization, live context-usage meter and tokens/sec.</li><li>Fixes: reconnect replays land complete and in order; permission cards survive reattach; rate-limit retries count down live; composer drafts survive GUI restarts.</li></ul>]]></description>
+    <enclosure url="https://github.com/seascheng/goty/releases/download/v0.2.0/Goty-0.2.0-arm64.dmg"
+               type="application/octet-stream"
+               sparkle:edSignature="OPBAklIGYNYzNoofuqiaNLac3eIETX4v0z7u/b7vsEY2MQo2v6xTpzcNLtin7vEApcx8C2rHNF0uUz6OvNnMDQ=="
+               length="14409380" />
+  </item>
+  <item>
     <title>Version 0.1.1 (Build 2)</title>
     <pubDate>Fri, 28 Aug 2026 08:11:49 +0000</pubDate>
     <sparkle:version>2</sparkle:version>
