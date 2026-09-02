@@ -306,6 +306,14 @@ body {
   overflow-wrap: anywhere;
 }
 .thought p { margin: 0 0 4px; }
+/* Lists: UA defaults (1em vertical, 40px indent) aired reasoning
+   bullets into paragraph-sized gaps — no tailwind ships here to tame
+   streamdown's utility classes, so the compact ladder is ours. */
+.agent-markdown ul, .agent-markdown ol { margin: 4px 0; padding-left: 20px; }
+.agent-markdown li { margin: 1px 0; }
+.agent-markdown li > ul, .agent-markdown li > ol { margin: 2px 0; }
+.thought ul, .thought ol { margin: 2px 0 3px; padding-left: 18px; }
+.thought li { margin: 0; }
 .thought > *:first-child { margin-top: 0; }
 .thought > *:last-child { margin-bottom: 0; }
 
