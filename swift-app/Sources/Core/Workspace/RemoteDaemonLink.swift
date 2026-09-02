@@ -40,6 +40,14 @@ final class RemoteDaemonLink {
     /// Capability the remote daemon reported at handshake. Owners use
     /// it to remember per-host upgrade declines (one nag per build).
     private(set) var reportedCapability: Int?
+    /// True between upgradeDaemon() and the boot() that answers it —
+    /// onUpgradeResult fires exactly once per attempt.
+    private var upgradePending = false
+    /// One upgrade attempt's verdict: the capability the daemon reports
+    /// AFTER the kill-and-reboot. Owners surface success/failure from
+    /// here — an upgrade that silently no-ops is indistinguishable
+    /// from success without it.
+    var onUpgradeResult: ((Int) -> Void)?
     /// Remote paths boot() resolved — `upgradeDaemon()` needs the exact
     /// content-hashed binary path to target the stale instance.
     private var remoteBinPath: String?
@@ -153,6 +161,16 @@ final class RemoteDaemonLink {
             return
         }
         reportedCapability = capability
+        // An upgrade attempt just got its verdict: report it once,
+        // whatever it is (the silent-accept path must not swallow a
+        // failed upgrade — the user asked for it explicitly).
+        if upgradePending {
+            upgradePending = false
+            let verdict = capability
+            DispatchQueue.main.async { [weak self] in
+                self?.onUpgradeResult?(verdict)
+            }
+        }
         // Old daemon instance still serving (fixed socket path +
         // singleton, so an upgrade never replaces a running one):
         // panes work, agent identity/status silently don't. Park in
@@ -337,18 +355,21 @@ final class RemoteDaemonLink {
                   self.state == .outdated || self.state == .ready else { return }
             self.state = .connecting
             self.daemon = nil
-            if let binPath = self.remoteBinPath {
-                // [g]oty-…: the regex matches the process argv, but THIS
-                // command's own argv (which contains the literal bracket
-                // form) never matches — pkill does not kill its own
-                // shell, so the kill sequence always completes.
-                let name = (binPath as NSString).lastPathComponent
-                let stem = "[" + name.prefix(1) + "]" + name.dropFirst(1)
-                _ = self.ssh("pkill -f '\(stem)'; for i in 1 2 3 4 5 6 7 8"
-                    + " 9 10; do pgrep -f '\(stem)' >/dev/null || break;"
-                    + " [ $i -lt 8 ] || pkill -9 -f '\(stem)'; sleep 0.3;"
-                    + " done; true")
+            // Kill ANY historical build, not this build's hash: the
+            // running daemon is by definition an OLDER content hash
+            // than the binPath boot() just resolved, so a hash-specific
+            // pattern never matched it — the upgrade silently no-oped
+            // (2026-09-02, host 5090: dialog closed, daemon untouched).
+            // '[g]oty-sessiond' matches every hash-suffixed name while
+            // this command's own argv (the literal bracket form) never
+            // matches, so pkill cannot kill its own shell.
+            if self.remoteBinPath != nil {
+                _ = self.ssh("pkill -f '[g]oty-sessiond'; i=0;"
+                    + " while pgrep -f '[g]oty-sessiond' >/dev/null && [ $i -lt 20 ]; do"
+                    + " i=$((i+1)); [ $i -ge 16 ] && pkill -9 -f '[g]oty-sessiond';"
+                    + " sleep 0.3; done; true")
             }
+            self.upgradePending = true
             self.teardownForward()
             self.retryDelay = 1
             self.booting = true

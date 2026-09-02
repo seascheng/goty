@@ -151,6 +151,25 @@ extension AppDelegate {
         // double-start) must not orphan the old forward ssh.
         remoteLinks[workspace.id]?.stop()
         let link = RemoteDaemonLink(host: host)
+        // One upgrade attempt, one verdict: the user asked explicitly,
+        // so silence is a bug (the 2026-09-02 no-op upgrade).
+        link.onUpgradeResult = { [weak self] capability in
+            guard let self else { return }
+            let hostName = workspace.displayName
+            if capability >= SessionDaemon.storeCapability {
+                let ok = NSAlert()
+                ok.messageText = "\(hostName) daemon 已升级（能力 \(capability)）"
+                ok.informativeText = "远端历史记录、resume 与状态读取现在可用。"
+                ok.runModal()
+                self.refresh()
+            } else {
+                let fail = NSAlert()
+                fail.messageText = "\(hostName) daemon 升级未生效"
+                fail.informativeText = "重启后 daemon 仍报告能力 \(capability)。"
+                    + "可再次尝试升级；若持续失败，请检查该主机 ~/.local/share/goty/sessiond.log。"
+                fail.runModal()
+            }
+        }
         link.onStateChange = { [weak self] state in
             DispatchQueue.main.async {
                 guard let self else { return }

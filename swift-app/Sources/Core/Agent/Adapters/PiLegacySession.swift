@@ -32,7 +32,16 @@ final class PiLegacySession: PiSession {
     /// Every completed handshake (attach, reconnect, resume respawn)
     /// rebuilds the transcript through the replay gate: history
     /// first, live frames after — omp's store rebuild ordering.
+    /// Mid-turn parity with omp: isStreaming adopts as working state
+    /// and reattachedMidTurn triggers the settle rebuild — get_messages
+    /// does NOT include the in-flight message (probed 2026-09-02:
+    /// mid-turn it returns only completed messages), so the
+    /// in-flight message's pre-attach deltas heal through the
+    /// full-history rebuild at the turn's end.
     override func adoptAttachedState(_ state: [String: Any]) {
+        let streaming = state["isStreaming"] as? Bool ?? false
+        isWorking = streaming
+        reattachedMidTurn = streaming
         if let sid = state["sessionId"] as? String, !sid.isEmpty {
             DispatchQueue.main.async { [weak self] in
                 self?.beginReplayGate(sessionId: sid)

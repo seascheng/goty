@@ -84,7 +84,16 @@ enum AgentRegistry {
             binary: "pi",
             storeListKey: "pi",
             spawn: AgentSpawn(command: "pi", args: ["--mode", "rpc"],
-                              ringBytes: 16_777_216),
+                              // pi suppresses ring replay entirely (its
+                              // transcript rebuilds from get_messages),
+                              // so the ring is pure pumping waste: a 1MB
+                              // tail keeps diagnostics alive while the
+                              // attach snapshot streams 16× less. omp
+                              // KEEPS its big ring — ready-frame and
+                              // available_commands_update mining from a
+                              // long-lived pane's boot frames is what
+                              // makes ITS attach instant.
+                              ringBytes: 1_048_576),
             make: { params in PiLegacySession(params: params) }),
     ]
 
