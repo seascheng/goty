@@ -224,8 +224,14 @@ enum OmpSessionStore {
                 case "toolResult":
                     if let toolCallId = message["toolCallId"] as? String {
                         openToolIds.remove(toolCallId)
-                        let content = ACPContentNormalizer.flatten(
+                        var content = ACPContentNormalizer.flatten(
                             message["content"] as? [[String: Any]])
+                        // omp ships edit diffs as details.diff — promote
+                        // to a leading diff block so replayed history
+                        // renders the real diff, not a bare "edit".
+                        if let block = PiFrameMapper.diffBlock(from: message) {
+                            content.insert(block, at: 0)
+                        }
                         events.append(.toolCallUpdate(
                             id: toolCallId,
                             title: message["toolName"] as? String,

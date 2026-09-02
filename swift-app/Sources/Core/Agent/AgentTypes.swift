@@ -33,27 +33,50 @@ struct AgentContent {
     let type: String
     let text: String?
     let path: String?
+    /// `{type:"diff"}` tool content blocks (monocode preview.ts parity):
+    /// the agent itself ships pre/post edit text, or a raw git patch.
+    /// Dropping these fields is why edit cards rendered empty here while
+    /// monocode showed real diffs for the same events.
+    let oldText: String?
+    let newText: String?
+    let patch: String?
 
     init?(_ raw: [String: Any]) {
         guard let type = raw["type"] as? String else { return nil }
         self.type = type
         self.text = raw["text"] as? String
         self.path = raw["path"] as? String
+        self.oldText = raw["oldText"] as? String ?? raw["old_text"] as? String
+        self.newText = raw["newText"] as? String ?? raw["new_text"] as? String
+        if let p = raw["patch"] as? String {
+            self.patch = p
+        } else if let p = raw["patch"] as? [String: Any] {
+            self.patch = p["text"] as? String
+        } else {
+            self.patch = nil
+        }
     }
 
     /// Explicit memberwise: defining the failable wire init suppresses
     /// the synthesized one, and the normalizer synthesizes leaf items.
-    init(type: String, text: String?, path: String?) {
+    /// Diff fields default nil so existing call sites stay unchanged.
+    init(type: String, text: String?, path: String?,
+         oldText: String? = nil, newText: String? = nil, patch: String? = nil) {
         self.type = type
         self.text = text
         self.path = path
+        self.oldText = oldText
+        self.newText = newText
+        self.patch = patch
     }
 }
 
 extension AgentContent {
     /// Exact JS leaf shape (store.ts ToolContentSchema).
     var jsRepresentation: [String: Any] {
-        ["type": type, "text": text ?? NSNull(), "path": path ?? NSNull()]
+        ["type": type, "text": text ?? NSNull(), "path": path ?? NSNull(),
+         "oldText": oldText ?? NSNull(), "newText": newText ?? NSNull(),
+         "patch": patch ?? NSNull()]
     }
 }
 

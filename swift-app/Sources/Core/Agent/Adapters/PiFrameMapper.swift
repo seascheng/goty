@@ -339,7 +339,8 @@ final class PiFrameMapper {
             id: id, title: name,
             kind: pending.map { PiFrameMapper.toolKind($0.name) },
             status: isError ? "failed" : "completed",
-            content: pending.map { PiFrameMapper.headline(name: $0.name, arguments: $0.arguments) } ?? [],
+            content: (PiFrameMapper.diffBlock(from: result).map { [$0] } ?? [])
+                + (pending.map { PiFrameMapper.headline(name: $0.name, arguments: $0.arguments) } ?? []),
             output: PiFrameMapper.resultContent(result?["content"]),
             rawInput: pending?.arguments, oldText: nil)]
     }
@@ -398,9 +399,27 @@ final class PiFrameMapper {
             id: callId, title: name,
             kind: pending.map { PiFrameMapper.toolKind($0.name) },
             status: isError ? "failed" : "completed",
-            content: pending.map { PiFrameMapper.headline(name: $0.name, arguments: $0.arguments) } ?? [],
+            content: (PiFrameMapper.diffBlock(from: message).map { [$0] } ?? [])
+                + (pending.map { PiFrameMapper.headline(name: $0.name, arguments: $0.arguments) } ?? []),
             output: PiFrameMapper.resultContent(message["content"]),
             rawInput: pending?.arguments, oldText: nil)]
+    }
+
+    /// omp edit results ship the file diff as `details.diff` — the
+    /// agent's own line format (` NN| ctx`, `+NN| add`, `-NN| del`)
+    /// plus `path`, sometimes oldText/newText. Promote it to a LEADING
+    /// {type:"diff"} content block so the UI renders the real diff
+    /// (monocode parity): the block used to be dropped entirely, which
+    /// is why history edit cards rendered as a bare "edit" with no body.
+    static func diffBlock(from result: [String: Any]?) -> AgentContent? {
+        guard let details = result?["details"] as? [String: Any],
+              let diffText = details["diff"] as? String, !diffText.isEmpty else { return nil }
+        return AgentContent(
+            type: "diff",
+            text: diffText,
+            path: details["path"] as? String,
+            oldText: details["oldText"] as? String,
+            newText: details["newText"] as? String)
     }
 
     /// pi toolResult content: string, [{type:text,text}], or a raw value.
