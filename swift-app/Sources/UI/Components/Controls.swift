@@ -261,6 +261,14 @@ final class ChromePopup: NSView, ThemeRefreshable {
         }
     }
 
+    /// External keyboard driver (page-level ↑/↓ routing): clamp,
+    /// apply, take focus — the accent border shows what arrows steer.
+    func step(_ delta: Int) {
+        let next = min(max(selected + delta, 0), options.count - 1)
+        if next != selected { select(next) }
+        window?.makeFirstResponder(self)
+    }
+
     override func mouseEntered(with event: NSEvent) { hovered = true; applyTheme() }
     override func mouseExited(with event: NSEvent) { hovered = false; applyTheme() }
 
