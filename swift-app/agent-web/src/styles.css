@@ -471,7 +471,6 @@ body {
 .cstat { display: inline-flex; gap: 6px; align-items: center; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cstat.warn { color: var(--accent-bright); }
 .cstat.awaiting { color: var(--accent-bright); animation: pulse 1.2s ease-in-out infinite; }
-.cstat.done { color: var(--accent-bright); }
 .cstat.error { color: var(--destructive); }
 .cstat.error .chip-retry { margin-left: 4px; }
 
@@ -703,6 +702,7 @@ body {
    the badge count alone hid what the user typed */
 .dock-outbox { border-top: 1px solid var(--border); }
 .outbox-row {
+  display: flex; gap: 8px; align-items: baseline;
   padding: 3px 12px; font-size: 12px; color: var(--fg-muted);
 }
 .outbox-mark { color: var(--accent-bright); flex: none; font-size: 11px; }
