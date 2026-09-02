@@ -250,7 +250,10 @@ final class SettingsRootView: NSView, ThemeRefreshable {
         sectionRows.forEach { $0.retheme() }
         if suppressRebuild {
             // Recolor only — see commit(): rebuilding here swaps the
-            // slider mid-drag on our own writes.
+            // slider mid-drag on our own writes. The mounted page's
+            // themed controls (popup, …) re-bake via the subtree walk;
+            // a stale non-rebuilt popup kept old-theme colors.
+            currentPage?.rethemeSubtree()
         } else {
             rebuildPage()
         }
@@ -630,7 +633,7 @@ final class SettingsRootView: NSView, ThemeRefreshable {
                 }
                 return root.popup("theme", options: options,
                                   current: doc.value("theme"), page: page,
-                                  swatches: swatches)
+                                  swatches: swatches, recolorOnly: true)
             },
             SettingSpec(label: "Font", detail: "Family name as Ghostty resolves it.",
                         key: "font-family") { root, page in
@@ -745,13 +748,27 @@ final class SettingsRootView: NSView, ThemeRefreshable {
 
     // MARK: Control builders (the themed control layer — never native)
 
+    /// - recolorOnly: for keys whose WRITE repaints but doesn't change
+    ///   the option list (theme): a suppressed rebuild keeps the popup
+    ///   mounted — and keeps KEY FOCUS on it, so ↑/↓ stepping works
+    ///   across changes instead of dying at the first rebuild.
     private func popup(_ key: String, options: [(label: String, value: String?)],
                        current: String?, page: SettingsFormPage,
-                       swatches: [String: NSImage]? = nil) -> ChromePopup {
+                       swatches: [String: NSImage]? = nil,
+                       recolorOnly: Bool = false) -> ChromePopup {
         let p = ChromePopup.make()
         p.load(options: options, current: current)
         p.swatches = swatches
-        p.onChange = { [weak self] value in self?.apply(key, value) }
+        p.onChange = { [weak self] value in
+            guard let self else { return }
+            if recolorOnly {
+                self.beginSuppressedRebuild()
+                self.apply(key, value)
+                self.endSuppressedRebuild()
+            } else {
+                self.apply(key, value)
+            }
+        }
         return p
     }
 

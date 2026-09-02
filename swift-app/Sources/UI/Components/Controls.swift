@@ -159,7 +159,7 @@ final class ChromeButton: ClosureButton, ThemeRefreshable {
 /// the SYSTEM appearance; this chrome follows Chrome.theme). Menus
 /// themselves are native everywhere in this app, so the dropdown list
 /// stays consistent; the collapsed control is ours.
-final class ChromePopup: NSView {
+final class ChromePopup: NSView, ThemeRefreshable {
     var onChange: ((String?) -> Void)?
     /// All options: label + written value (nil = ghostty default).
     private(set) var options: [(label: String, value: String?)] = []
@@ -168,6 +168,10 @@ final class ChromePopup: NSView {
     private let valueLabel = NSTextField(labelWithString: "")
     private let chevron = NSImageView()
     private var hovered = false
+    /// Key-focus state (self-painted accent border — plain NSView, no
+    /// system focus ring). Focused popups answer ↑/↓ directly: the
+    /// settings theme-picker ask.
+    private var focused = false
     private var ownTracking: NSTrackingArea?
 
     static func make(width: CGFloat = 210) -> ChromePopup {
@@ -221,16 +225,53 @@ final class ChromePopup: NSView {
     }
 
     private func applyTheme() {
-        layer?.borderColor = (hovered ? Chrome.theme.hoverFill : Chrome.theme.hairline).cgColor
+        layer?.borderColor = (focused ? Chrome.theme.accent
+                              : hovered ? Chrome.theme.hoverFill
+                              : Chrome.theme.hairline).cgColor
         layer?.backgroundColor = hovered ? Chrome.theme.hoverFill.cgColor : nil
         valueLabel.textColor = hovered ? Chrome.theme.foreground : Chrome.theme.foreground.withAlphaComponent(0.9)
         chevron.contentTintColor = Chrome.theme.secondaryText
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+    override func becomeFirstResponder() -> Bool {
+        focused = true
+        applyTheme()
+        return true
+    }
+    override func resignFirstResponder() -> Bool {
+        focused = false
+        applyTheme()
+        return true
+    }
+
+    /// Keyboard: ↑/↓ on the COLLAPSED control steps through options
+    /// directly (no menu round-trip — the theme-picker ask); Return /
+    /// Space opens the menu ON the current item, where native menu
+    /// navigation (↑↓ + Return) takes over.
+    override func keyDown(with event: NSEvent) {
+        if event.specialKey == .downArrow, selected < options.count - 1 {
+            select(selected + 1)
+        } else if event.specialKey == .upArrow, selected > 0 {
+            select(selected - 1)
+        } else if event.specialKey == .carriageReturn || event.charactersIgnoringModifiers == " " {
+            openMenu()
+        } else {
+            super.keyDown(with: event)
+        }
     }
 
     override func mouseEntered(with event: NSEvent) { hovered = true; applyTheme() }
     override func mouseExited(with event: NSEvent) { hovered = false; applyTheme() }
 
     override func mouseDown(with event: NSEvent) {
+        // Park focus here: after the menu closes the control keeps it,
+        // so ↑/↓ immediately steps options without a re-click.
+        window?.makeFirstResponder(self)
+        openMenu()
+    }
+
+    private func openMenu() {
         let menu = NSMenu()
         for (i, option) in options.enumerated() {
             let item = NSMenuItem(title: option.label, action: #selector(pick(_:)),
@@ -241,17 +282,29 @@ final class ChromePopup: NSView {
             item.image = swatches?[option.label]
             menu.addItem(item)
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height + 4), in: self)
+        // Position ON the current item: the menu opens with it
+        // highlighted, so the first ↓ is already meaningful.
+        let current = options.indices.contains(selected) ? menu.items[selected] : nil
+        menu.popUp(positioning: current, at: NSPoint(x: 0, y: bounds.height + 4), in: self)
     }
 
     @objc private func pick(_ sender: NSMenuItem) {
         guard let i = sender.representedObject as? Int, options.indices.contains(i)
         else { return }
+        select(i)
+    }
+
+    private func select(_ i: Int) {
+        guard options.indices.contains(i), i != selected else { return }
         selected = i
         valueLabel.stringValue = options[i].label
         applyTheme()
         onChange?(options[i].value)
     }
+
+    /// Theme flips while suppressed-rebuild keeps this popup mounted
+    /// (recolorOnly writes): re-bake the border/text/chevron colors.
+    func retheme() { applyTheme() }
 
     /// Per-label menu images (theme swatches), by label.
     var swatches: [String: NSImage]?
