@@ -45,8 +45,19 @@ struct ChromeTheme: Equatable {
     /// the config's `theme` key — terminal surfaces keep the config
     /// one. nil = the pre-split behavior (follow the terminal).
     static func from(_ cfg: Ghostty.Config?, override: String? = nil) -> ChromeTheme {
-        let overrideName = override?.trimmingCharacters(in: .whitespaces)
-        let themed = Self.themeFileColors(cfg, override: overrideName)
+        let overrideName = override.map { $0.trimmingCharacters(in: .whitespaces) }
+        // "" = the ghostty-default sentinel (Settings ▸ Interface
+        // Theme ▸ Ghostty Default): no theme file, fallback palette —
+        // NOT the same as nil (legacy follow-the-terminal).
+        let gui: Bool
+        let themed: [String: NSColor]
+        if let o = overrideName, o.isEmpty {
+            gui = true
+            themed = [:]
+        } else {
+            gui = overrideName != nil
+            themed = Self.themeFileColors(cfg, override: overrideName)
+        }
         // With a GUI override the OVERRIDE's palette wins OUTRIGHT. A
         // resolved-config `background` is the TERMINAL theme's color —
         // ghostty merges theme keys into the resolved config, so
@@ -55,7 +66,6 @@ struct ChromeTheme: Equatable {
         // color short-circuit the override every time (the "interface
         // theme does nothing" report, THEME-line-probed: new=0.97 with
         // guiTheme=Adwaita Dark).
-        let gui = overrideName != nil
         if let handle = cfg?.config {
             func color(_ key: String) -> NSColor? {
                 guard !gui else { return nil }

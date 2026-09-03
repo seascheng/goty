@@ -287,7 +287,11 @@ final class SettingsRootView: NSView, ThemeRefreshable {
     /// (settings-wide ↑/↓ theme stepping): the mounted page's theme
     /// popup, if this page shows one.
     var currentThemePopup: ChromePopup? {
-        (currentPage as? SettingsFormPage)?.controlsByKey["theme"] as? ChromePopup
+        let page = currentPage as? SettingsFormPage
+        // Interface is the PRIMARY picker now; fall back to the
+        // terminal row on pages without one (search results).
+        return (page?.controlsByKey["guiTheme"] as? ChromePopup)
+            ?? (page?.controlsByKey["theme"] as? ChromePopup)
     }
 
     // MARK: Apply pipeline
@@ -626,29 +630,14 @@ final class SettingsRootView: NSView, ThemeRefreshable {
     private func appearanceSpecs() -> [SettingSpec] {
         let doc = store.load()
         return [
-            SettingSpec(label: "Terminal Theme", detail: "Color scheme for terminal surfaces.",
-                        key: "theme") { root, page in
-                // A list key; the FILE is the source of truth (Chrome
-                // reads it from there too), so no resolved fallback.
-                var options: [(label: String, value: String?)] = [("Ghostty Default", nil)]
-                for theme in Self.availableThemes { options.append((theme, theme)) }
-                var swatches: [String: NSImage] = [:]
-                for (label, value) in options {
-                    if let name = value, let (bg, fg) = Self.themeColors(name) {
-                        swatches[label] = Self.swatchImage(bg: bg, fg: fg)
-                    }
-                }
-                return root.popup("theme", options: options,
-                                  current: doc.value("theme"), page: page,
-                                  swatches: swatches, recolorOnly: true)
-            },
-            SettingSpec(label: "Interface Theme", detail: "App + agent GUI. Follows the terminal theme by default.",
-                        key: nil) { [weak self] root, page in
+            SettingSpec(label: "Interface Theme", detail: "App + agent GUI.",
+                        key: "guiTheme") { [weak self] _, _ in
                 // NOT a config key: the GUI override lives in
                 // AppPreferences (a custom ghostty key would surface as
-                // a config error). The option list reuses the theme
-                // catalog; "" is the follow-terminal sentinel.
-                var options: [(label: String, value: String?)] = [("Follow Terminal Theme", "")]
+                // a config error). "" is the ghostty-default sentinel
+                // (fallback palette); the registered key feeds the
+                // arrow-key monitor (primary picker).
+                var options: [(label: String, value: String?)] = [("Ghostty Default", "")]
                 for theme in Self.availableThemes { options.append((theme, theme)) }
                 var swatches: [String: NSImage] = [:]
                 for (label, value) in options where value?.isEmpty == false {
@@ -657,18 +646,53 @@ final class SettingsRootView: NSView, ThemeRefreshable {
                     }
                 }
                 let p = ChromePopup.make()
-                p.load(options: options, current: AppPreferences.shared.guiTheme ?? "")
+                p.load(options: options,
+                       current: AppPreferences.shared.guiTheme ?? "")
                 p.swatches = swatches
                 p.onChange = { [weak self] value in
-                    AppPreferences.shared.guiTheme = (value?.isEmpty == false) ? value : nil
+                    AppPreferences.shared.guiTheme = value ?? ""
+                    // Terminal rides the interface while "Follow
+                    // Interface Theme" is picked: keep the config's
+                    // `theme` key fed (libghostty is its only input).
+                    self?.syncTerminalFollowsInterface()
                     // Reuse the config-change fan-out: recompute the
-                    // candidate with the new override (same cfg) and
-                    // retheme chrome + appearance + agent web.
+                    // candidate with the new override and retheme
+                    // chrome + appearance + agent web.
                     if let cfg = self?.app?.config {
                         NotificationCenter.default.post(
                             name: .ghosttyConfigDidChange, object: nil,
                             userInfo: [Notification.Name.GhosttyConfigChangeKey: cfg])
                     }
+                }
+                return p
+            },
+            SettingSpec(label: "Terminal Theme", detail: "Terminal surfaces.",
+                        key: "theme") { [weak self] _, _ in
+                var options: [(label: String, value: String?)] =
+                    [(Self.followInterfaceLabel, Self.followInterfaceSentinel),
+                     ("Ghostty Default", nil)]
+                for theme in Self.availableThemes { options.append((theme, theme)) }
+                var swatches: [String: NSImage] = [:]
+                for (label, value) in options where value != Self.followInterfaceSentinel {
+                    if let name = value, let (bg, fg) = Self.themeColors(name) {
+                        swatches[label] = Self.swatchImage(bg: bg, fg: fg)
+                    }
+                }
+                let p = ChromePopup.make()
+                p.load(options: options,
+                       current: AppPreferences.shared.terminalFollowsInterface
+                           ? Self.followInterfaceSentinel
+                           : doc.value("theme") ?? "")
+                p.swatches = swatches
+                p.onChange = { [weak self] value in
+                    guard let self else { return }
+                    if value == Self.followInterfaceSentinel {
+                        AppPreferences.shared.terminalFollowsInterface = true
+                        self.syncTerminalFollowsInterface()
+                        return
+                    }
+                    AppPreferences.shared.terminalFollowsInterface = false
+                    self.apply("theme", value?.isEmpty == false ? value : nil)
                 }
                 return p
             },
@@ -702,6 +726,20 @@ final class SettingsRootView: NSView, ThemeRefreshable {
                             write: { $0 < 0.5 ? nil : String(Int($0)) }, page: page)
             },
         ]
+    }
+
+    /// Terminal Theme's follow option: the config `theme` key mirrors
+    /// the interface theme while this is picked (libghostty reads only
+    /// the config — the follow itself can't live there, unknown keys
+    /// error).
+    static let followInterfaceSentinel = "__follow_interface__"
+    static let followInterfaceLabel = "Follow Interface Theme"
+
+    private func syncTerminalFollowsInterface() {
+        guard AppPreferences.shared.terminalFollowsInterface else { return }
+        // "" (ghostty default) or nil (legacy follow) both clear the key.
+        let iface = AppPreferences.shared.guiTheme ?? ""
+        apply("theme", iface.isEmpty ? nil : iface)
     }
 
     private func terminalSpecs() -> [SettingSpec] {

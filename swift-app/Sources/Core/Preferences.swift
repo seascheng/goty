@@ -31,6 +31,7 @@ final class AppPreferences {
         static let aiModel = "aiModel"
         static let aiApiType = "aiApiType"
         static let guiTheme = "guiTheme"
+        static let terminalFollowsInterface = "terminalFollowsInterface"
     }
 
     private let defaults: UserDefaults
@@ -63,6 +64,7 @@ final class AppPreferences {
         aiModel = defaults.string(forKey: Key.aiModel) ?? ""
         aiApiType = defaults.string(forKey: Key.aiApiType) ?? "openai"
         guiTheme = defaults.string(forKey: Key.guiTheme)
+        terminalFollowsInterface = defaults.bool(forKey: Key.terminalFollowsInterface)
     }
 
     var sidebarCollapsed: Bool {
@@ -141,17 +143,23 @@ final class AppPreferences {
         daemonDeclines[key] == capability
     }
 
-    /// GUI theme override — the app/agent chrome follows THIS ghostty
-    /// theme name instead of the terminal `theme` key (nil = follow
-    /// the terminal theme, the pre-split behavior). Terminal surfaces
-    /// never see it.
+    /// Interface theme (Settings ▸ Interface Theme): nil = legacy
+    /// follow-the-terminal (pre-split installs, never offered in the
+    /// UI anymore); "" = Ghostty Default palette; a name = that
+    /// ghostty theme. Terminal surfaces never see it — the config
+    /// `theme` key is mirrored by syncTerminalFollowsInterface().
     var guiTheme: String? {
         didSet {
-            if let guiTheme, !guiTheme.isEmpty {
-                defaults.set(guiTheme, forKey: Key.guiTheme)
-            } else {
-                defaults.removeObject(forKey: Key.guiTheme)
-            }
+            if let guiTheme { defaults.set(guiTheme, forKey: Key.guiTheme) }
+            else { defaults.removeObject(forKey: Key.guiTheme) }
         }
+    }
+
+    /// Terminal Theme = "Follow Interface Theme": every interface
+    /// change rewrites the config `theme` key to match (libghostty
+    /// reads only the config).
+    var terminalFollowsInterface: Bool {
+        didSet { defaults.set(terminalFollowsInterface,
+                              forKey: Key.terminalFollowsInterface) }
     }
 }
