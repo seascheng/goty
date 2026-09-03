@@ -210,7 +210,8 @@ extension AppDelegate {
         let candidate = ChromeTheme.from(cfg, override: AppPreferences.shared.guiTheme)
         if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
             let name = ChromeTheme.configuredThemeName(cfg) ?? "nil"
-            FileHandle.standardError.write("THEME change old=\(Chrome.theme.background.usingColorSpace(.deviceRGB).map { String(format: "%.2f", $0.redComponent) } ?? "?") new=\(candidate.background.usingColorSpace(.deviceRGB).map { String(format: "%.2f", $0.redComponent) } ?? "?") theme=\(name)\n".data(using: .utf8)!)
+            let ov = AppPreferences.shared.guiTheme ?? "nil"
+            FileHandle.standardError.write("THEME change old=\(Chrome.theme.background.usingColorSpace(.deviceRGB).map { String(format: "%.2f", $0.redComponent) } ?? "?") new=\(candidate.background.usingColorSpace(.deviceRGB).map { String(format: "%.2f", $0.redComponent) } ?? "?") theme=\(name) override=\(ov) bundle=\(Bundle.main.bundleIdentifier ?? "?")\n".data(using: .utf8)!)
         }
         wc?.applyChromeTheme(cfg: cfg)
 

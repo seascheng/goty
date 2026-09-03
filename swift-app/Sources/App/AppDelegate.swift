@@ -125,8 +125,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ghostty = app
         // The chrome follows the resolved config from the very first
         // frame — before this, launch ran on .fallback until some
-        // config-change event happened to fire.
-        Chrome.theme = .from(app.config)
+        // config-change event happened to fire. The INTERFACE override
+        // applies here too: without it every launch painted the
+        // terminal theme (no reload ever followed, so the override
+        // path in ghosttyConfigChanged never ran — the "interface
+        // theme does nothing on open" report).
+        let initialTheme = ChromeTheme.from(app.config,
+                                            override: AppPreferences.shared.guiTheme)
+        Chrome.theme = initialTheme
+        if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
+            FileHandle.standardError.write("THEME launch bg=\(initialTheme.background.usingColorSpace(.deviceRGB).map { String(format: "%.2f", $0.redComponent) } ?? "?") override=\(AppPreferences.shared.guiTheme ?? "nil")\n".data(using: .utf8)!)
+        }
         // Prewarm App.wakeup's dispatch path on the main thread before any
         // surface exists: ghostty invokes wakeup from renderer/IO threads,
         // and its first lazy Swift/objc metadata instantiation there —

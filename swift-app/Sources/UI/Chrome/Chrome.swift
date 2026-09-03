@@ -47,8 +47,18 @@ struct ChromeTheme: Equatable {
     static func from(_ cfg: Ghostty.Config?, override: String? = nil) -> ChromeTheme {
         let overrideName = override?.trimmingCharacters(in: .whitespaces)
         let themed = Self.themeFileColors(cfg, override: overrideName)
+        // With a GUI override the OVERRIDE's palette wins OUTRIGHT. A
+        // resolved-config `background` is the TERMINAL theme's color —
+        // ghostty merges theme keys into the resolved config, so
+        // color("background") returns Dayfox's while the interface
+        // follows Adwaita Dark; the old `??` order let the terminal
+        // color short-circuit the override every time (the "interface
+        // theme does nothing" report, THEME-line-probed: new=0.97 with
+        // guiTheme=Adwaita Dark).
+        let gui = overrideName != nil
         if let handle = cfg?.config {
             func color(_ key: String) -> NSColor? {
+                guard !gui else { return nil }
                 var v = ghostty_config_color_s()
                 guard ghostty_config_get(handle, &v, key, UInt(key.utf8.count)) else { return nil }
                 return themeColor(red: CGFloat(v.r) / 255, green: CGFloat(v.g) / 255,
