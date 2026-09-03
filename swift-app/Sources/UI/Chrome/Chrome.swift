@@ -88,6 +88,7 @@ struct ChromeTheme: Equatable {
         let candidates = [
             ProcessInfo.processInfo.environment["GHOSTTY_RESOURCES_DIR"]
                 .map { $0 + "/themes/\(trimmed)" },
+            home + "/Library/Application Support/goty/ghostty/themes/\(trimmed)",
             home + "/Library/Application Support/com.mitchellh.ghostty/themes/\(trimmed)",
             home + "/.config/ghostty/themes/\(trimmed)",
             "/Applications/Ghostty.app/Contents/Resources/ghostty/themes/\(trimmed)",
