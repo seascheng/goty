@@ -283,32 +283,11 @@ final class SettingsRootView: NSView, ThemeRefreshable {
         currentPage = page
     }
 
-    // MARK: Keyboard
-
-    /// The window's first responder starts as the WINDOW (not any
-    /// view), so ↑/↓ would never enter the view chain — show() parks
-    /// initial focus here. Plain NSView: focusable only for routing.
-    override var acceptsFirstResponder: Bool { true }
-
-    /// Page-level arrow routing (the theme-picker ask): with neutral
-    /// focus, ↑/↓ drives the current page's theme popup directly — no
-    /// click, no menu round-trip. Focus inside a TEXT field never
-    /// reaches here (the field editor consumes arrows first), so
-    /// search/inputs keep normal editing.
-    override func keyDown(with event: NSEvent) {
-        if event.specialKey == .downArrow || event.specialKey == .upArrow,
-           let popup = (currentPage as? SettingsFormPage)?.controlsByKey["theme"] as? ChromePopup {
-            popup.step(event.specialKey == .downArrow ? 1 : -1)
-            return
-        }
-        super.keyDown(with: event)
-    }
-
-    /// Park initial focus on the root so keyDown routing is live from
-    /// the moment the window opens (NSWindow's default first responder
-    /// is the window itself — views never see keys).
-    func takeInitialFocus() {
-        window?.makeFirstResponder(self)
+    /// Arrow-key target for the window controller's local key monitor
+    /// (settings-wide ↑/↓ theme stepping): the mounted page's theme
+    /// popup, if this page shows one.
+    var currentThemePopup: ChromePopup? {
+        (currentPage as? SettingsFormPage)?.controlsByKey["theme"] as? ChromePopup
     }
 
     // MARK: Apply pipeline
@@ -972,9 +951,30 @@ final class SettingsWindowController: NSObject {
             window.center()
         }
         window.makeKeyAndOrderFront(nil)
-        // Focus the ROOT, not the window: NSWindow's default first
-        // responder is itself — page-level ↑/↓ routing (theme picker)
-        // would never see a key.
-        root.takeInitialFocus()
+        installArrowMonitor()
+    }
+
+    // MARK: Arrow-key theme stepping
+
+    /// Local key monitor: ↑/↓ steps the theme from ANY focus while
+    /// this window is key. Two first-responder approaches shipped
+    /// before and never fired — the monitor sits at DISPATCH level
+    /// (NSApp.sendEvent consults it before any responder routing), so
+    /// no view-chain assumption remains. Text inputs keep their
+    /// arrows: a field editor is first responder exactly while text
+    /// editing owns the window.
+    private var arrowMonitor: Any?
+    private func installArrowMonitor() {
+        guard arrowMonitor == nil else { return }
+        arrowMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+            [weak self] event in
+            guard let self, NSApp.keyWindow === self.window else { return event }
+            if let fr = self.window.firstResponder, fr is NSTextView { return event }
+            guard event.specialKey == .downArrow || event.specialKey == .upArrow,
+                  let popup = self.root.currentThemePopup
+            else { return event }
+            popup.step(event.specialKey == .downArrow ? 1 : -1)
+            return nil
+        }
     }
 }
