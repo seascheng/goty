@@ -73,11 +73,7 @@ extension AppDelegate {
         let titleText = "Goty — \(ws.displayName)"
         window?.title = titleText
         wc.setChromeTitle(titleText)
-        // Toolbar context (theme split): the band follows the focused
-        // tab's kind — terminal palette for terminal tabs, interface
-        // palette for agent tabs. Cheap (one layer write) and runs on
-        // every structure change, covering tab switches and closes.
-        wc.titlebar.followsTerminalTab = coordinator.focusedPaneIsTerminal
+        // Assigning .title resets titleVisibility on this macOS build —
         let state0 = coordinator.wsStates[ws.id] ?? .connecting
         renderTabSurfaces(ws: ws, offline: state0 == .disconnected)
         updateRightPanel()

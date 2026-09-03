@@ -208,7 +208,6 @@ extension AppDelegate {
                   as? Ghostty.Config
         else { return }
         let candidate = ChromeTheme.from(cfg, override: AppPreferences.shared.guiTheme)
-        let terminalCandidate = ChromeTheme.from(cfg)
         if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
             let name = ChromeTheme.configuredThemeName(cfg) ?? "nil"
             let ov = AppPreferences.shared.guiTheme ?? "nil"
@@ -224,11 +223,7 @@ extension AppDelegate {
         // through; the settings page rebuilds WITHOUT rebuilding its
         // page when IT wrote the change (the rebuild swaps the slider
         // mid-drag — the thumb-snap report).
-        guard candidate != Chrome.theme else {
-            if Chrome.terminalTheme != terminalCandidate { Chrome.terminalTheme = terminalCandidate }
-            return
-        }
-        Chrome.terminalTheme = terminalCandidate
+        guard candidate != Chrome.theme else { return }
         Chrome.theme = candidate
         // OUR chrome follows the terminal theme too (the tty7 rule): the
         // render paths rebuild rows/headers with fresh colors — the

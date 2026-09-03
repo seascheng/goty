@@ -32,10 +32,6 @@ final class IconLabel: NSImageView, ThemeRefreshable {
 /// per-window attributed strings drifted into three different looks
 /// that followed the theme three different ways.
 final class ChromeTitleLabel: NSTextField, ThemeRefreshable {
-    /// Owner-managed color (the toolbar's split context): when set, the
-    /// theme fan-out defers to it instead of the global interface theme.
-    var secondaryTextProvider: (() -> NSColor)?
-
     init(_ title: String) {
         super.init(frame: .zero)
         isEditable = false
@@ -54,7 +50,8 @@ final class ChromeTitleLabel: NSTextField, ThemeRefreshable {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
-    func retheme() { textColor = secondaryTextProvider?() ?? Chrome.theme.secondaryText }
+
+    func retheme() { textColor = Chrome.theme.secondaryText }
 }
 
 /// Menu-item icon: palette-tinted SF Symbol at menu scale (crisp).

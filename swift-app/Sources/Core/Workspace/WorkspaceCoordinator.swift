@@ -539,15 +539,6 @@ final class WorkspaceCoordinator {
         return workspace.focusedTab?.panes.first
     }
 
-    /// Toolbar context (the theme split): true while the focused tab's
-    /// first pane is a TERMINAL pane — the app toolbar follows the
-    /// terminal palette then, the interface palette otherwise.
-    var focusedPaneIsTerminal: Bool {
-        guard let pane = store?.focused?.focusedTab?.panes.first else { return true }
-        if case .agent = pane.kind { return false }
-        return true
-    }
-
 
     // Internal (not private): same test seam as applyForegrounds — the
     // headless suite seeds cwd reports straight in.

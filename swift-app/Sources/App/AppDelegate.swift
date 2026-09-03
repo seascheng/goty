@@ -129,12 +129,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // applies here too: without it every launch painted the
         // terminal theme (no reload ever followed, so the override
         // path in ghosttyConfigChanged never ran — the "interface
-        // theme does nothing on open" report). Both palettes are
-        // seeded: `theme` (interface) and `terminalTheme` (config
-        // `theme` key) — the toolbar picks per focused tab.
+        // theme does nothing on open" report).
         let initialTheme = ChromeTheme.from(app.config,
                                             override: AppPreferences.shared.guiTheme)
-        Chrome.terminalTheme = ChromeTheme.from(app.config)
         Chrome.theme = initialTheme
         if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
             FileHandle.standardError.write("THEME launch bg=\(initialTheme.background.usingColorSpace(.deviceRGB).map { String(format: "%.2f", $0.redComponent) } ?? "?") override=\(AppPreferences.shared.guiTheme ?? "nil")\n".data(using: .utf8)!)

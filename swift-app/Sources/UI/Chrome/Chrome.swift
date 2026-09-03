@@ -390,15 +390,6 @@ enum Chrome {
     static var theme: ChromeTheme = .fallback {
         didSet { NotificationCenter.default.post(name: themeDidChange, object: nil) }
     }
-
-    /// The TERMINAL palette (config `theme` key, no interface override).
-    /// Kept beside `theme` so context-sensitive chrome (the app toolbar
-    /// follows the focused tab: terminal tab → terminal theme, agent
-    /// tab → interface theme) can pick per surface without re-parsing.
-    /// Both are replaced together; the shared notification covers it.
-    static var terminalTheme: ChromeTheme = .fallback {
-        didSet { NotificationCenter.default.post(name: themeDidChange, object: nil) }
-    }
 }
 
 /// Views that bake theme colors at build time re-bake on demand.
