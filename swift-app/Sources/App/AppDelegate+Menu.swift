@@ -207,7 +207,7 @@ extension AppDelegate {
               let cfg = note.userInfo?[Notification.Name.GhosttyConfigChangeKey]
                   as? Ghostty.Config
         else { return }
-        let candidate = ChromeTheme.from(cfg)
+        let candidate = ChromeTheme.from(cfg, override: AppPreferences.shared.guiTheme)
         if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
             let name = ChromeTheme.configuredThemeName(cfg) ?? "nil"
             FileHandle.standardError.write("THEME change old=\(Chrome.theme.background.usingColorSpace(.deviceRGB).map { String(format: "%.2f", $0.redComponent) } ?? "?") new=\(candidate.background.usingColorSpace(.deviceRGB).map { String(format: "%.2f", $0.redComponent) } ?? "?") theme=\(name)\n".data(using: .utf8)!)

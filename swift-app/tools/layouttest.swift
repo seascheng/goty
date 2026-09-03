@@ -1889,6 +1889,32 @@ func run() {
     check(!Shell.isShellPromptCommand("vim")
               && !Shell.isShellPromptCommand("/usr/local/bin/node"),
           "foreground programs do not")
+
+    // Theme split: the GUI override resolves independently of the
+    // terminal `theme` key (Settings ▸ Interface Theme). nil override
+    // must stay byte-identical to the pre-split path.
+    check(ChromeTheme.from(nil) == .fallback,
+          "no override keeps the fallback (pre-split behavior)")
+    if let sample = SettingsRootView.availableThemes.first,
+       let (bg, _) = SettingsRootView.themeColors(sample) {
+        let overridden = ChromeTheme.from(nil, override: sample)
+        check(overridden != .fallback && overridden.background != ChromeTheme.fallback.background,
+              "interface-theme override resolves its own palette (\(sample))")
+        _ = bg
+        let cleared = { () -> ChromeTheme in
+            let saved = AppPreferences.shared.guiTheme
+            AppPreferences.shared.guiTheme = sample
+            let withPref = AppPreferences.shared.guiTheme == sample
+            AppPreferences.shared.guiTheme = nil
+            let clearedPref = AppPreferences.shared.guiTheme == nil
+            AppPreferences.shared.guiTheme = saved
+            return withPref && clearedPref ? overridden : .fallback
+        }()
+        check(cleared == overridden,
+              "guiTheme preference roundtrips set → nil")
+    } else {
+        check(false, "theme catalog available for the split test")
+    }
     try? FileManager.default.removeItem(atPath: auxURL.path)
 
     panel.removeFromSuperview()

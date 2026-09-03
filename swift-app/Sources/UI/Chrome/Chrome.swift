@@ -40,27 +40,40 @@ struct ChromeTheme: Equatable {
         foreground: themeColor(red: 221.0 / 255.0, green: 238.0 / 255.0, blue: 221.0 / 255.0),
         accent: themeColor(red: 77.0 / 255.0, green: 77.0 / 255.0, blue: 77.0 / 255.0))
 
-    static func from(_ cfg: Ghostty.Config?) -> ChromeTheme {
-        guard let handle = cfg?.config else { return .fallback }
-        func color(_ key: String) -> NSColor? {
-            var v = ghostty_config_color_s()
-            guard ghostty_config_get(handle, &v, key, UInt(key.utf8.count)) else { return nil }
-            return themeColor(red: CGFloat(v.r) / 255, green: CGFloat(v.g) / 255,
-                              blue: CGFloat(v.b) / 255)
-        }
-        // Explicit config colors win; a theme-only config (theme = Arthur)
-        // never surfaces its palette through ghostty_config_get — the
-        // theme's own file is the source. Same key syntax as the config.
-        let themed = Self.themeFileColors(cfg)
-        var t = ChromeTheme(
-            background: color("background") ?? themed["background"] ?? fallback.background,
-            foreground: color("foreground") ?? themed["foreground"] ?? fallback.foreground,
-            accent: color("selection-background") ?? themed["selection-background"] ?? fallback.accent)
+    /// `override`: a GUI theme name (Settings ▸ Interface Theme). When
+    /// set, the chrome palette resolves from THAT theme file instead of
+    /// the config's `theme` key — terminal surfaces keep the config
+    /// one. nil = the pre-split behavior (follow the terminal).
+    static func from(_ cfg: Ghostty.Config?, override: String? = nil) -> ChromeTheme {
+        let overrideName = override?.trimmingCharacters(in: .whitespaces)
+        let themed = Self.themeFileColors(cfg, override: overrideName)
         if let handle = cfg?.config {
+            func color(_ key: String) -> NSColor? {
+                var v = ghostty_config_color_s()
+                guard ghostty_config_get(handle, &v, key, UInt(key.utf8.count)) else { return nil }
+                return themeColor(red: CGFloat(v.r) / 255, green: CGFloat(v.g) / 255,
+                                  blue: CGFloat(v.b) / 255)
+            }
+            // Explicit config colors win; a theme-only config (theme = Arthur)
+            // never surfaces its palette through ghostty_config_get — the
+            // theme's own file is the source. Same key syntax as the config.
+            var t = ChromeTheme(
+                background: color("background") ?? themed["background"] ?? fallback.background,
+                foreground: color("foreground") ?? themed["foreground"] ?? fallback.foreground,
+                accent: color("selection-background") ?? themed["selection-background"] ?? fallback.accent)
             var v: Double = 1
             _ = ghostty_config_get(handle, &v, "background-opacity", 18)
             t.backgroundOpacity = CGFloat(max(0.1, min(1, v)))
+            t.foreground = t.legibleForeground()
+            return t
         }
+        // No live config (headless tests): an override still paints from
+        // its theme file; otherwise the seeded fallback.
+        guard overrideName != nil, !themed.isEmpty else { return .fallback }
+        var t = ChromeTheme(
+            background: themed["background"] ?? fallback.background,
+            foreground: themed["foreground"] ?? fallback.foreground,
+            accent: themed["selection-background"] ?? fallback.accent)
         t.foreground = t.legibleForeground()
         return t
     }
@@ -68,8 +81,9 @@ struct ChromeTheme: Equatable {
     /// `background`/`foreground`/`selection-background` from the theme file
     /// the config names, searched where ghostty looks for themes. One small
     /// file read at startup — the chrome must match the terminal exactly.
-    static func themeFileColors(_ cfg: Ghostty.Config?) -> [String: NSColor] {
-        guard let trimmed = configuredThemeName(cfg) else { return [:] }
+    static func themeFileColors(_ cfg: Ghostty.Config?, override: String? = nil) -> [String: NSColor] {
+        let name = (override?.isEmpty == false) ? override : nil
+        guard let trimmed = name ?? configuredThemeName(cfg) else { return [:] }
         let home = NSHomeDirectory()
         let candidates = [
             ProcessInfo.processInfo.environment["GHOSTTY_RESOURCES_DIR"]

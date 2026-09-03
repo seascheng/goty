@@ -626,7 +626,7 @@ final class SettingsRootView: NSView, ThemeRefreshable {
     private func appearanceSpecs() -> [SettingSpec] {
         let doc = store.load()
         return [
-            SettingSpec(label: "Theme", detail: "Color scheme for every terminal.",
+            SettingSpec(label: "Terminal Theme", detail: "Color scheme for terminal surfaces.",
                         key: "theme") { root, page in
                 // A list key; the FILE is the source of truth (Chrome
                 // reads it from there too), so no resolved fallback.
@@ -641,6 +641,36 @@ final class SettingsRootView: NSView, ThemeRefreshable {
                 return root.popup("theme", options: options,
                                   current: doc.value("theme"), page: page,
                                   swatches: swatches, recolorOnly: true)
+            },
+            SettingSpec(label: "Interface Theme", detail: "App + agent GUI. Follows the terminal theme by default.",
+                        key: nil) { [weak self] root, page in
+                // NOT a config key: the GUI override lives in
+                // AppPreferences (a custom ghostty key would surface as
+                // a config error). The option list reuses the theme
+                // catalog; "" is the follow-terminal sentinel.
+                var options: [(label: String, value: String?)] = [("Follow Terminal Theme", "")]
+                for theme in Self.availableThemes { options.append((theme, theme)) }
+                var swatches: [String: NSImage] = [:]
+                for (label, value) in options where value?.isEmpty == false {
+                    if let (bg, fg) = Self.themeColors(value!) {
+                        swatches[label] = Self.swatchImage(bg: bg, fg: fg)
+                    }
+                }
+                let p = ChromePopup.make()
+                p.load(options: options, current: AppPreferences.shared.guiTheme ?? "")
+                p.swatches = swatches
+                p.onChange = { [weak self] value in
+                    AppPreferences.shared.guiTheme = (value?.isEmpty == false) ? value : nil
+                    // Reuse the config-change fan-out: recompute the
+                    // candidate with the new override (same cfg) and
+                    // retheme chrome + appearance + agent web.
+                    if let cfg = self?.app?.config {
+                        NotificationCenter.default.post(
+                            name: .ghosttyConfigDidChange, object: nil,
+                            userInfo: [Notification.Name.GhosttyConfigChangeKey: cfg])
+                    }
+                }
+                return p
             },
             SettingSpec(label: "Font", detail: "Family name as Ghostty resolves it.",
                         key: "font-family") { root, page in

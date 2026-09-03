@@ -30,6 +30,7 @@ final class AppPreferences {
         static let aiBaseUrl = "aiBaseUrl"
         static let aiModel = "aiModel"
         static let aiApiType = "aiApiType"
+        static let guiTheme = "guiTheme"
     }
 
     private let defaults: UserDefaults
@@ -61,6 +62,7 @@ final class AppPreferences {
         aiBaseUrl = defaults.string(forKey: Key.aiBaseUrl) ?? ""
         aiModel = defaults.string(forKey: Key.aiModel) ?? ""
         aiApiType = defaults.string(forKey: Key.aiApiType) ?? "openai"
+        guiTheme = defaults.string(forKey: Key.guiTheme)
     }
 
     var sidebarCollapsed: Bool {
@@ -137,5 +139,19 @@ final class AppPreferences {
     /// True when this exact daemon was already declined — stay silent.
     func daemonUpgradeDeclined(key: String, capability: Int) -> Bool {
         daemonDeclines[key] == capability
+    }
+
+    /// GUI theme override — the app/agent chrome follows THIS ghostty
+    /// theme name instead of the terminal `theme` key (nil = follow
+    /// the terminal theme, the pre-split behavior). Terminal surfaces
+    /// never see it.
+    var guiTheme: String? {
+        didSet {
+            if let guiTheme, !guiTheme.isEmpty {
+                defaults.set(guiTheme, forKey: Key.guiTheme)
+            } else {
+                defaults.removeObject(forKey: Key.guiTheme)
+            }
+        }
     }
 }
