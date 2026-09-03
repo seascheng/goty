@@ -105,8 +105,36 @@ final class TitleBarView: NSView, ThemeRefreshable {
         ])
     }
 
+    /// Toolbar context (the theme split): true while the focused tab is
+    /// a TERMINAL tab — the band follows the terminal palette; agent
+    /// tabs (and anything else) use the interface theme. Owned by the
+    /// coordinator via refresh(); retheme() re-applies on both theme
+    /// flips and tab switches.
+    var followsTerminalTab = false {
+        didSet {
+            guard followsTerminalTab != oldValue else { return }
+            applyTheme()
+        }
+    }
+
+    private var bandTheme: ChromeTheme {
+        followsTerminalTab ? Chrome.terminalTheme : Chrome.theme
+    }
+
     private func applyTheme() {
-        layer?.backgroundColor = chromeSurface(Chrome.theme.background).cgColor
+        let t = bandTheme
+        layer?.backgroundColor = chromeSurface(t.background).cgColor
+        // Children bake from the SAME source here — the subtree fan-out
+        // (themeDidChange) repaints them with the interface theme via
+        // their own retheme(), so both carry a provider/tint override.
+        titleLabel.secondaryTextProvider = { [weak self] in
+            self?.bandTheme.secondaryText ?? Chrome.theme.secondaryText
+        }
+        titleLabel.retheme()
+        for b in [sidebarToggle, settingsButton, rightToggle] {
+            b.usesThemeTint = false
+            b.tint = t.iconTint
+        }
         // The label must FIGHT for its text width: with only the two
         // spacing inequalities a lazy solve gives it zero width and the
         // band reads empty (the "no title" report).
