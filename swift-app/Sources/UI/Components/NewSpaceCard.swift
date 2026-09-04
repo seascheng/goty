@@ -40,7 +40,6 @@ final class NewSpaceCard: DialogCard {
 
         // Local: a system directory picker beside the input. Remote
         // paths are typed — the exec validation below is the check.
-        var previous: NSView = field
         if host == nil {
             let browse = ChromeButton.make("浏览…", style: .ghost) { [weak self] in
                 self?.browse()
@@ -51,7 +50,6 @@ final class NewSpaceCard: DialogCard {
                 browse.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
             ])
             field.trailingAnchor.constraint(equalTo: browse.leadingAnchor, constant: -8).isActive = true
-            previous = field
         }
 
         let cancel = ChromeButton.make("Cancel", style: .ghost) { [weak self] in
