@@ -798,7 +798,7 @@ function MessagesChip({ open, onToggle, onJump }: {
     .reverse();
   return (
     <span ref={wrap} className="chip-wrap">
-      <button className={"icon-chip" + (open ? " open" : "")} title="本会话消息"
+      <button className={"msg-chip" + (open ? " open" : "")} title="本会话消息"
         aria-label="本会话消息" aria-haspopup="dialog" aria-expanded={open}
         onMouseDown={(e) => e.preventDefault()} onClick={onToggle}>
         <Icon kind="messages" />
@@ -1849,18 +1849,18 @@ export function App() {
   return (
     <div className="pane">
         <div className="pane-head">
-          {/* Session outline lives in the header, ahead of the logo —
-              the breathing dot owns the right edge. */}
-          <MessagesChip open={msgPop}
-            onToggle={() => setMsgPop(!msgPop)}
-            onJump={jumpToUser} />
+          {/* Breathing dot leads the header (left of the logo); the
+              session-outline chip closes it from the right edge. */}
+          {store.working && <span className="pane-head-state" aria-hidden />}
           {store.meta?.icon && (
             <img className="pane-head-icon" src={store.meta.icon} alt="" draggable={false} />
           )}
           <span className="pane-head-title" title={store.sessionTitle ?? ""}>
             {store.sessionTitle || "Agent"}
           </span>
-          {store.working && <span className="pane-head-state" aria-hidden />}
+          <MessagesChip open={msgPop}
+            onToggle={() => setMsgPop(!msgPop)}
+            onJump={jumpToUser} />
         </div>
       <div className="transcript" ref={scroller} onScroll={onScroll}>
         {(begin > 0 || store.hasOlder) && (

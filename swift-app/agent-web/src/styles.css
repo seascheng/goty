@@ -213,12 +213,24 @@ body {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .pane-head-state {
-  width: 7px; height: 7px; border-radius: 50%; flex: none; margin-left: auto;
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
   background: var(--working); animation: pulse 1.2s ease-in-out infinite;
 }
 
-/* Session-outline rows (pane-head messages popover): single line,
-   newest first — whitespace-collapsed text with an ellipsis tail. */
+/* Session-outline trigger: header-sized quiet square (smaller than the
+   composer's 24px pill icons), pushed to the header's right edge. */
+.pane-head .chip-wrap { margin-left: auto; }
+.msg-chip {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0; border: none; border-radius: 6px;
+  background: transparent; color: var(--fg-muted); cursor: pointer;
+}
+.msg-chip svg { width: 11px; height: 11px; }
+.msg-chip:hover { background: var(--surface2); color: var(--foreground); }
+.msg-chip.open { background: var(--surface2); color: var(--accent-bright); }
+
+/* Session-outline rows: single line, newest first — whitespace-collapsed
+   text with an ellipsis tail. */
 .msg-row {
   display: block; width: 100%; text-align: left; cursor: pointer;
   padding: 5px 12px; font: inherit; font-size: 12px; line-height: 1.5;
