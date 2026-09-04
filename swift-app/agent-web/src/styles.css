@@ -330,7 +330,7 @@ body {
    where the body needs a container. Completed is silent (paseo):
    only running and error earn a marker. */
 .tool {
-  margin: 2px 0; background: none;
+  margin: 1px 0; background: none;
   border: 1px solid transparent; border-radius: 10px;
   overflow: hidden;
 }
