@@ -454,9 +454,13 @@ final class SidebarView: NSView {
     var tabsRowsForTest: [NSView] {
         tabsStack.arrangedSubviews.compactMap { $0 as? SidebarRowView }
     }
+    var tabsVisibleForTest: [NSView] {
+        tabsStack.arrangedSubviews.filter { !$0.isHidden }
+    }
     var contentScrollFrameForTest: NSRect { contentScroll.frame }
     var termHeaderFrameForTest: NSRect { termHeader.frame }
     var wsStackFrameForTest: NSRect { wsStack.frame }
+    var wsStackForTest: NSStackView { wsStack }
     /// Chevron state of a space section (fold key = directory root).
     func spaceHeaderExpandedForTest(_ foldKey: String) -> Bool? {
         spaceFoldHeaders[foldKey]?.isExpandedForTest
@@ -657,7 +661,11 @@ final class SidebarView: NSView {
             contentClip.leadingAnchor.constraint(equalTo: contentScroll.leadingAnchor),
             contentClip.trailingAnchor.constraint(equalTo: contentScroll.trailingAnchor),
             contentClip.topAnchor.constraint(equalTo: contentScroll.topAnchor),
-            contentClip.bottomAnchor.constraint(equalTo: contentScroll.bottomAnchor),
+            // The document view may EXCEED the scroll area (that is
+            // what scrolling IS): == here forced the clip to the
+            // scroll's height and made autolayout inflate the SERVERS
+            // section to find room for the content (334pt stack).
+            contentClip.bottomAnchor.constraint(lessThanOrEqualTo: contentScroll.bottomAnchor),
             termHeader.topAnchor.constraint(equalTo: contentClip.topAnchor, constant: 6),
             termHeader.leadingAnchor.constraint(equalTo: contentClip.leadingAnchor, constant: SidebarRowView.stackInset),
             termHeader.trailingAnchor.constraint(equalTo: contentClip.trailingAnchor, constant: -SidebarRowView.stackInset),

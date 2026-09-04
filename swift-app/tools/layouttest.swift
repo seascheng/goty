@@ -1674,6 +1674,9 @@ func run() {
         // the scroll never pushes the SERVERS section around.
         let sidebarBox = SidebarView()
         sidebarBox.frame = NSRect(x: 0, y: 0, width: 220, height: 600)
+        sidebarBox.renderWorkspaces([
+            WorkspaceState(id: UUID(), name: "Local", tabs: [], focusedTabIndex: 0, sshHost: nil),
+        ], focusedIndex: 0)
         sidebarBox.render(workspace: ws, statusFor: { _ in nil },
                           commandFor: { _ in nil }, titleFor: { _ in "t" })
         sidebarBox.layoutSubtreeIfNeeded()
@@ -1684,11 +1687,11 @@ func run() {
         check(sidebarBox.contentScrollFrameForTest.maxY <= 600,
               "scroll stays inside the sidebar bounds")
         // THE regression this whole pass fixes: the servers stack keeps
-        // its content height (3×24 + 2×1 spacing) — autolayout must
-        // never inflate it to satisfy the scroll's fill floor.
+        // its content height (1×24) — autolayout must never inflate it
+        // to make room for the scroll's content.
         let wsH = sidebarBox.wsStackFrameForTest.height
-        check(abs(wsH - 74) < 1,
-              "servers stack keeps content height (got \(wsH), want 74)")
+        check(abs(wsH - 24) < 1,
+              "servers stack keeps content height (got \(wsH), want 24)")
     }
     check(NewSpaceCard.expanded("~") == NSHomeDirectory()
               && NewSpaceCard.expanded("~/x") == NSHomeDirectory() + "/x"
