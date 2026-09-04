@@ -192,6 +192,9 @@ final class SidebarView: NSView {
     /// Availability for the + menu's agent entries; nil = local PATH.
     var agentAvailable: ((String) -> Bool)?
     /// Cross-section drop (Terminals ⇄ SPACES): (tabIndex, toFree).
+    /// SPACES 标题"+":打开 New Space 面板(选目录建 space)。
+    var onNewSpace: (() -> Void)?
+    /// Cross-section drop (Terminals ⇄ SPACES): (tabIndex, toFree).
     var onCrossSectionDrop: ((Int, Bool) -> Void)?
     /// Per-space "+" → "New Worktree…" — the git-repo-only entry of the
     /// space menu. Fires with the section's directory.
@@ -518,19 +521,17 @@ final class SidebarView: NSView {
         guard let pair = sender.representedObject as? [String], pair.count == 2 else { return }
         onNewAgentSessionInDir?(pair[0], pair[1] == "" ? nil : pair[1])
     }
-
     @objc fileprivate func spacePlusTerminalAction(_ sender: NSMenuItem) {
         onNewTabInDir?(sender.representedObject as? String)
     }
-
     @objc fileprivate func spacePlusWorktreeAction(_ sender: NSMenuItem) {
         onNewWorktreeInDir?(sender.representedObject as? String)
     }
-    private let wsStack = NSStackView()
     private lazy var tabsHeader: NSView = sectionHeader("Spaces",
                                                         plus: { [weak self] _ in
-        self?.onNewTab?()
+        self?.onNewSpace?()
     }, emphasized: true)
+    private let wsStack = NSStackView()
     /// The top-level Terminals section: free terminals live ABOVE
     /// SPACES (directory-independent work). Same emphasized title,
     /// own stack, own divider.

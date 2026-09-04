@@ -1628,7 +1628,13 @@ func run() {
         check(sidebar.termRowsForTest.count == 1,
               "free tab stays in Terminals across cwd drift")
     }
-
+    check(NewSpaceCard.expanded("~") == NSHomeDirectory()
+              && NewSpaceCard.expanded("~/x") == NSHomeDirectory() + "/x"
+              && NewSpaceCard.expanded("/abs") == "/abs",
+          "New Space path ~ expansion")
+    check(NewSpaceCard.validLocal(NewSpaceCard.expanded("~/.."))
+              && !NewSpaceCard.validLocal("/no/such/dir-goty-test"),
+          "New Space local dir validation")
     // Cross-section drop: pure containment + the commit callback.
     check(SidebarView.dropTarget(forGlobal: NSPoint(x: 5, y: 5),
                                  term: NSRect(x: 0, y: 0, width: 10, height: 10),
