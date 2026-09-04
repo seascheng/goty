@@ -778,14 +778,32 @@ body {
 }
 
 /* ——— dock: pinned between transcript and composer (TUI model) ——— */
+/* Presence animates on the wrapper's grid row (0fr↔1fr): a hard
+   mount/unmount snapped the transcript's height — and any pinned
+   viewport — in one frame. */
+.dock-wrap {
+  display: grid; grid-template-rows: 0fr;
+  transition: grid-template-rows 0.22s ease, margin 0.22s ease;
+  margin: 0 20px 0;
+  min-height: 0;
+}
+.dock-wrap.on { grid-template-rows: 1fr; margin: 0 20px 4px; }
+.dock-wrap .dock { min-height: 0; }
 .dock {
   flex: none;
-  margin: 0 20px 4px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: color-mix(in srgb, var(--surface0) 60%, transparent);
   overflow: hidden;
 }
+/* Plan fold: same trick one level down — the body stays mounted and
+   the clip's grid row animates (the old display:none snapped). */
+.plan-clip {
+  display: grid; grid-template-rows: 0fr;
+  transition: grid-template-rows 0.22s ease;
+}
+.dock-plan:not(.folded) .plan-clip { grid-template-rows: 1fr; }
+.plan-clip > .plan-body { min-height: 0; overflow: hidden; }
 .dock-head {
   display: flex; align-items: center; gap: 8px; width: 100%;
   padding: 5px 12px; background: none; border: none; cursor: pointer;
@@ -794,7 +812,6 @@ body {
 .dock-head:hover { background: var(--surface2); }
 .dock-head .chevron { color: var(--fg-extra-muted); font-size: 10px; transition: transform 0.12s; }
 .dock-plan:not(.folded) .dock-head .chevron { transform: rotate(90deg); }
-.dock-plan.folded .plan-phase { display: none; }
 .plan-phase { padding: 0 12px 2px; }
 .plan-phase-name {
   font-size: 10.5px; color: var(--fg-extra-muted);

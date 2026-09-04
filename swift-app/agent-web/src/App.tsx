@@ -389,7 +389,10 @@ function PlanPanel({ entries }: { entries: PlanEntry[] }) {
         <span className="plan-title">计划</span>
         <span className="plan-progress">{done}/{entries.length}</span>
       </button>
-      {open && (
+      {/* The body ALWAYS mounts — folding animates the clip's grid row
+          (0fr↔1fr) instead of unmounting, so the transcript's height
+          change is a transition, not a jump. */}
+      <div className="plan-clip">
         <div className="plan-body">
           {phases.map((phase, i) => (
             <div key={i} className="plan-phase">
@@ -404,7 +407,7 @@ function PlanPanel({ entries }: { entries: PlanEntry[] }) {
             </div>
           ))}
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -1848,11 +1851,64 @@ export function App() {
     });
   };
 
+  // Dock presence + plan fold: both change the transcript's height via
+  // a grid transition — a pinned (follow-mode) viewport must ride the
+  // transition frame-by-frame, or the tail drifts open/shut in a jump.
+  const dockOn = !!(store.plan || store.jobs.length > 0
+    || store.subagents.length > 0 || store.pendingQueue.length > 0);
+  const planOpen = useSyncExternalStore(
+    (onChange) => store.subscribe(onChange),
+    () => store.planDockOpen,
+    () => true,
+  );
+  useEffect(() => {
+    const sc = scroller.current;
+    if (!sc) return;
+    const t0 = performance.now();
+    let raf = 0;
+    const tick = () => {
+      // Readers above the tail are top-anchored: the dock grows from
+      // the bottom edge and never moves what they see.
+      if (parked.current) return;
+      lastWriteAt.current = performance.now();
+      sc.scrollTop = sc.scrollHeight;
+      if (performance.now() - t0 < 320) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [dockOn, planOpen]);
+
   const jumpToBottom = () => {
     // Explicit command: release parking AND revoke input evidence (the
     // user just told us they want the tail — stale intent must not
     // block the landing).
-    parked.current = false;
+  // Dock presence + plan fold: both change the transcript's height via
+  // a grid transition — a pinned (follow-mode) viewport must ride the
+  // transition frame-by-frame, or the tail drifts open/shut in a jump.
+  const dockOn = !!(store.plan || store.jobs.length > 0
+    || store.subagents.length > 0 || store.pendingQueue.length > 0);
+  const planOpen = useSyncExternalStore(
+    (onChange) => store.subscribe(onChange),
+    () => store.planDockOpen,
+    () => true,
+  );
+  useEffect(() => {
+    const sc = scroller.current;
+    if (!sc) return;
+    const t0 = performance.now();
+    let raf = 0;
+    const tick = () => {
+      // Readers above the tail are top-anchored: the dock grows from
+      // the bottom edge and never moves what they see.
+      if (parked.current) return;
+      lastWriteAt.current = performance.now();
+      sc.scrollTop = sc.scrollHeight;
+      if (performance.now() - t0 < 320) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [dockOn, planOpen]);
+
     lastRawInputAt.current = -Infinity;
     const sc = scroller.current;
     if (sc) {
@@ -1904,8 +1960,10 @@ export function App() {
         <button className="jump-bottom" title="回到底部（跟随最新输出）"
           onClick={jumpToBottom}>↓</button>
       )}
-      {(store.plan || store.jobs.length > 0 || store.subagents.length > 0
-        || store.pendingQueue.length > 0) && (
+      {/* Dock presence animates (grid 0fr↔1fr): a hard mount/unmount
+          made the transcript's height — and any pinned viewport — JUMP.
+          The wrapper stays mounted; empty content collapses it. */}
+      <div className={"dock-wrap" + (dockOn ? " on" : "")}>
         <div className="dock">
           {store.plan && <PlanPanel entries={store.plan.entries} />}
           {store.jobs.length > 0 && <JobsLine jobs={store.jobs} />}
@@ -1917,7 +1975,7 @@ export function App() {
                   <span className="outbox-mark">⇥</span>
                   <span className="outbox-text">{text}</span>
                   <span className="outbox-actions">
-                    <button type="button" title="立即插话：中断当前 turn，现在就发送这条"
+                    <button type="button" title="立即插话：中断当前 turn，现在就中断并送达这条"
                       onClick={() => postToHost({ type: "queueSendNow", text })}>↑</button>
                     <button type="button" title="收回编辑：放回输入框"
                       onClick={() => {
@@ -1932,7 +1990,7 @@ export function App() {
             </div>
           )}
         </div>
-      )}
+      </div>
       {store.permission && <PermissionCard permission={store.permission} />}
       <Composer working={store.working} phase={store.phase} scrollerRef={scroller}
         draft={draft}
