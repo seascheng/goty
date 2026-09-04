@@ -329,9 +329,11 @@ function ToolCard({ id }: { id: string }) {
         <span className={"chevron" + (open ? " up" : "")}>▸</span>
         <span className="tool-kind" aria-hidden><ToolGlyph kind={kind} /></span>
         <span className="tool-title">{toolDisplayTitle(call)}</span>
-        <span className={"tool-status st-" + (call.status ?? "")}>
-          <span className="dot" aria-hidden>●</span> {statusLabel}
-        </span>
+        {(running || call.status === "error" || call.status === "pending") && (
+          <span className={"tool-status st-" + (call.status ?? "")}>
+            <span className="dot" aria-hidden>●</span> {statusLabel}
+          </span>
+        )}
       </button>
       {open && (
         <div className="tool-body">

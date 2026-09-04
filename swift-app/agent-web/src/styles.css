@@ -317,37 +317,50 @@ body {
 .thought > *:first-child { margin-top: 0; }
 .thought > *:last-child { margin-bottom: 0; }
 
-/* — tool cards — */
+/* — tool rows (happier activity-feed / paseo badge consensus): the
+   COLLAPSED tool is a process event, not content — no box, muted
+   single line; the box (surface + border) only exists while OPEN,
+   where the body needs a container. Completed is silent (paseo):
+   only running and error earn a marker. */
 .tool {
-  margin: 6px 0; background: var(--surface1);
-  border: 1px solid var(--border); border-radius: 10px;
+  margin: 2px 0; background: none;
+  border: 1px solid transparent; border-radius: 10px;
   overflow: hidden;
+}
+.tool.open {
+  background: var(--surface1);
+  border-color: var(--border);
 }
 .tool-head {
   display: flex; align-items: center; gap: 7px; width: 100%;
   background: none; border: none; color: var(--foreground);
-  padding: 4px 12px; cursor: pointer; font: inherit; text-align: left;
+  padding: 3px 8px; cursor: pointer; font: inherit; text-align: left;
+  border-radius: 6px;
 }
-.tool-head:hover { background: var(--surface2); }
+.tool-head:hover { background: var(--surface1); }
 .chevron { color: var(--fg-extra-muted); font-size: 10px; transition: transform 0.12s; }
 .chevron.up { transform: rotate(90deg); }
 .tool-kind {
   width: 14px; height: 14px; flex: none;
   display: inline-flex; align-items: center; justify-content: center;
-  color: var(--fg-muted);
+  color: var(--fg-extra-muted);
 }
 .tool-kind svg { display: block; }
-.tool-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.tool-title {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11.5px; color: var(--fg-muted);
+}
+.tool.open .tool-title { color: var(--foreground); }
 .tool-status { color: var(--fg-extra-muted); font-size: 10.5px; white-space: nowrap; }
 .tool-status .dot { font-size: 7px; vertical-align: 1px; }
-/* Traffic lights: pending gray · running amber · done green · error red */
+/* Markers: pending gray · running amber (pulsing) · error red.
+   COMPLETED is silent — the row already reads as done by its muted
+   state (paseo's completed-is-nothing rule). */
 .st-pending { color: #94A3B8; }
 .st-in_progress { color: #D97706; }
 .st-in_progress .dot { animation: pulse 1.2s ease-in-out infinite; }
-.st-completed { color: #16A34A; }
 .st-error { color: #DC2626; }
 [data-theme="dark"] .st-in_progress { color: #F5A524; }
-[data-theme="dark"] .st-completed { color: #2FBF71; }
 [data-theme="dark"] .st-error { color: #F25555; }
 .tool-body { border-top: 1px solid var(--border); padding: 8px 12px; }
 .tool-body pre {
@@ -395,7 +408,7 @@ body {
 .diff-stats { font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .stat-add { color: var(--stat-add); }
 .stat-del { color: var(--stat-del); }
-.diff-body { overflow-x: auto; max-height: 420px; overflow-y: auto; }
+.tool.run .tool-title { color: var(--fg-muted); }
 .diff-row { display: flex; font-family: "SF Mono", Menlo, monospace; font-size: 11.5px; line-height: 1.5; }
 .diff-row .ln {
   flex: none; width: calc(2.2em * var(--lnw, 3)); text-align: right; padding-right: 8px;
@@ -404,7 +417,7 @@ body {
 .diff-row.ctx .tx { color: var(--fg-muted); }
 .diff-row.add { background: var(--diff-add-bg); }
 .diff-gap:hover { color: var(--fg-muted); }
-.tool.run { border-color: var(--border-accent); }
+.tool.run .tool-title { color: var(--foreground); }
 
 /* — permission card — */
 .permission {
