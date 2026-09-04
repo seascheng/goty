@@ -191,6 +191,8 @@ final class SidebarView: NSView {
     var onNewAgentSessionInDir: ((String, String?) -> Void)?
     /// Availability for the + menu's agent entries; nil = local PATH.
     var agentAvailable: ((String) -> Bool)?
+    /// Cross-section drop (Terminals ⇄ SPACES): (tabIndex, toFree).
+    var onCrossSectionDrop: ((Int, Bool) -> Void)?
     /// Per-space "+" → "New Worktree…" — the git-repo-only entry of the
     /// space menu. Fires with the section's directory.
     var onNewWorktreeInDir: ((String?) -> Void)?
@@ -223,7 +225,7 @@ final class SidebarView: NSView {
         // it cuts AppKit's drag-event delivery to the mouse-down view
         // (the stuck-lift report: one drag event lands, then no
         // movement and no mouseUp ever arrive).
-        let stack = tabsStack
+        let stack = (row.spaceKey == "terminals") ? termStack : tabsStack
         let siblings = stack.arrangedSubviews.compactMap { $0 as? SidebarRowView }
             .filter { $0 !== row && $0.spaceKey == row.spaceKey
                 && $0.tabIndex != nil && !$0.isHidden }
@@ -242,6 +244,9 @@ final class SidebarView: NSView {
             }
         case .leftMouseUp:
             endDrag()
+            if commitCrossSectionIfNeeded(row: row, locationInWindow: event.locationInWindow) {
+                return
+            }
             let order: [Int] = stack.arrangedSubviews.compactMap { v in
                 guard let r = v as? SidebarRowView, r.spaceKey == row.spaceKey,
                       let idx = r.tabIndex else { return nil }
@@ -256,6 +261,41 @@ final class SidebarView: NSView {
             endDrag()   // cancelled: ghost down, dim off, no commit
         }
     }
+
+    // MARK: - Cross-section drop (Terminals ⇄ SPACES)
+
+    enum DropZone { case terminals, spaces, none }
+
+    /// Pure containment: which section stack a window-space point sits
+    /// over (rects pre-converted to the same coordinate space).
+    static func dropTarget(forGlobal p: NSPoint, term: NSRect, spaces: NSRect) -> DropZone {
+        if term.contains(p) { return .terminals }
+        if spaces.contains(p) { return .spaces }
+        return .none
+    }
+
+    /// A drop landing on the OTHER section's stack moves the tab across:
+    /// directory → Terminals sets freeTerminal, Terminals → SPACES
+    /// clears it. Same-section drops fall through to the reorder path.
+    @discardableResult
+    func commitCrossSectionIfNeeded(row: SidebarRowView, locationInWindow: NSPoint) -> Bool {
+        guard let idx = row.tabIndex else { return false }
+        let termFrame = termStack.convert(termStack.bounds, to: nil)
+        let spacesFrame = tabsStack.convert(tabsStack.bounds, to: nil)
+        let zone = Self.dropTarget(forGlobal: locationInWindow,
+                                   term: termFrame, spaces: spacesFrame)
+        let fromTerm = row.spaceKey == "terminals"
+        if !fromTerm, zone == .terminals {
+            onCrossSectionDrop?(idx, true)
+            return true
+        }
+        if fromTerm, zone == .spaces {
+            onCrossSectionDrop?(idx, false)
+            return true
+        }
+        return false
+    }
+
 
     /// Lift: snapshot the row into a shadowed ghost that tracks the
     /// pointer; the row itself dims in place and becomes the slot.

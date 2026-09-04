@@ -1629,6 +1629,20 @@ func run() {
               "free tab stays in Terminals across cwd drift")
     }
 
+    // Cross-section drop: pure containment + the commit callback.
+    check(SidebarView.dropTarget(forGlobal: NSPoint(x: 5, y: 5),
+                                 term: NSRect(x: 0, y: 0, width: 10, height: 10),
+                                 spaces: NSRect(x: 100, y: 0, width: 10, height: 10)) == .terminals,
+          "point inside the Terminals rect targets terminals")
+    check(SidebarView.dropTarget(forGlobal: NSPoint(x: 105, y: 5),
+                                 term: NSRect(x: 0, y: 0, width: 10, height: 10),
+                                 spaces: NSRect(x: 100, y: 0, width: 10, height: 10)) == .spaces,
+          "point inside the SPACES rect targets spaces")
+    check(SidebarView.dropTarget(forGlobal: NSPoint(x: 50, y: 5),
+                                 term: NSRect(x: 0, y: 0, width: 10, height: 10),
+                                 spaces: NSRect(x: 100, y: 0, width: 10, height: 10)) == .none,
+          "point outside both rects targets none")
+
     // Space identity: one git repo = one space. The resolver collapses
     // subdirs and linked worktrees onto the repo's main root; a
     // non-repo path stays its own space.
