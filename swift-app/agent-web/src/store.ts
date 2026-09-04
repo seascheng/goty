@@ -780,12 +780,20 @@ class Store {
       }
       case "entryMark": {
         const kind = event.role === "user" ? "user" : "agent";
+        // Stamp the NEWEST still-unmarked block of the role. Live
+        // turns learn their entry ids late (a store read ~1.5s after
+        // settle, newest-first — the live wire never carries them),
+        // so a delayed mark must skip blocks that already have one.
+        // A mark whose id already landed is surplus (replay overlap,
+        // windowed-out block): no-op, never re-stamp a second block.
+        if (this.blocks.some(b => b.kind === kind && b.entryId === event.entryId)) {
+          break;
+        }
         for (let i = this.blocks.length - 1; i >= 0; i--) {
           const b = this.blocks[i];
-          if (b.kind === kind) {
-            this.blocks[i] = { ...b, entryId: event.entryId } as typeof b;
-            break;
-          }
+          if (b.kind !== kind || b.entryId) continue;
+          this.blocks[i] = { ...b, entryId: event.entryId } as typeof b;
+          break;
         }
         break;
       }

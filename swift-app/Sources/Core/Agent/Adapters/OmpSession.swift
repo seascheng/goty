@@ -43,6 +43,31 @@ final class OmpSession: PiSession {
     /// in turnSettled(); last pick wins.
     private var pendingModelSelector: String?
 
+    /// Entry ids already on the page (replay marks included): the
+    /// settle-stamp ships only NEW ones. Main-confined — reads happen
+    /// in turnSettled/stampEntryMarks, writes hop through emit().
+    private var markedEntryIds: Set<String> = []
+    /// One store read in flight per settle burst (queued follow-ups
+    /// settle turns back-to-back; a late read covers them all).
+    private var entryStampPending = false
+
+    /// Every mark the page can see flows through emit() (replay-gated
+    /// events included — the gate buffers INSIDE emit). Recording here
+    /// keeps the settle-stamp's known-set exact for every source.
+    override func emit(_ events: [AgentSessionEvent]) {
+        let marks = events.compactMap { event ->
+                String? in
+            if case .entryMark(_, let id) = event { return id }
+            return nil
+        }
+        if !marks.isEmpty {
+            DispatchQueue.main.async { [weak self] in
+                self?.markedEntryIds.formUnion(marks)
+            }
+        }
+        super.emit(events)
+    }
+
 
     init(params: AgentPaneParams) {
         super.init(params: params, mapperTerminalOnAgentEnd: true)
@@ -235,15 +260,7 @@ final class OmpSession: PiSession {
             completion: @escaping (StoredSessionHistory?) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return completion(nil) }
-            var raw = self.daemon.agentStoreFile(sessionId: sid)
-                .flatMap { String(data: $0, encoding: .utf8) }
-            if raw == nil, let path = self.daemonSessionPaths[sid] {
-                raw = try? String(contentsOfFile: path, encoding: .utf8)
-            }
-            if raw == nil, let url = OmpSessionStore.fileURL(sessionId: sid) {
-                raw = try? String(contentsOf: url, encoding: .utf8)
-            }
-            guard let raw else { return completion(nil) }
+            guard let raw = self.storeRaw(sid) else { return completion(nil) }
             var loaded: OmpSessionStore.Loaded
             if raw.utf8.count > Self.tailLoadThresholdBytes {
                 let tail = OmpSessionStore.tailSlice(raw)
@@ -278,15 +295,7 @@ final class OmpSession: PiSession {
             self.olderLoadInFlight = true
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { return }
-                var raw = self.daemon.agentStoreFile(sessionId: sid)
-                    .flatMap { String(data: $0, encoding: .utf8) }
-                if raw == nil, let path = self.daemonSessionPaths[sid] {
-                    raw = try? String(contentsOfFile: path, encoding: .utf8)
-                }
-                if raw == nil, let url = OmpSessionStore.fileURL(sessionId: sid) {
-                    raw = try? String(contentsOf: url, encoding: .utf8)
-                }
-                let events = raw.map {
+                let events = self.storeRaw(sid).map {
                     OmpSessionStore.parseOlder($0, beforeEntryId: anchor).events
                 }
                 DispatchQueue.main.async {
@@ -296,6 +305,23 @@ final class OmpSession: PiSession {
                 }
             }
         }
+    }
+
+    /// The session store's raw bytes: the DAEMON's machine first
+    /// (remote panes — the GUI's local ~/.omp is a different host),
+    /// then the seeded daemon-side path, then the local suffix walk.
+    /// Background-queue only (blocking file/socket I/O).
+    private func storeRaw(_ sid: String) -> String? {
+        if let data = daemon.agentStoreFile(sessionId: sid) {
+            return String(data: data, encoding: .utf8)
+        }
+        if let path = daemonSessionPaths[sid] {
+            return try? String(contentsOfFile: path, encoding: .utf8)
+        }
+        if let url = OmpSessionStore.fileURL(sessionId: sid) {
+            return try? String(contentsOf: url, encoding: .utf8)
+        }
+        return nil
     }
 
 
@@ -582,6 +608,46 @@ final class OmpSession: PiSession {
         if let pending = pendingModelSelector {
             pendingModelSelector = nil
             applyModelSelector(pending)
+        }
+        scheduleEntryStamp()
+    }
+
+    /// Live frames carry no session-tree entry ids (pi-rpc fixture:
+    /// message_end has only the provider's responseId), so the 分支
+    /// buttons would stay dark until a store replay (pane reopen).
+    /// omp writes the turn's tail entries right around settle — the
+    /// same 1.5s grace the mid-turn-reattach rebuild uses — then a
+    /// store read lights up the just-finished turn's buttons.
+    private func scheduleEntryStamp() {
+        guard let sid = sessionId, !sid.isEmpty, !entryStampPending else {
+            return
+        }
+        entryStampPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            self.entryStampPending = false
+            self.stampEntryMarks(sessionId: sid)
+        }
+    }
+
+    /// Ship the store's not-yet-marked entries to the page. Newest
+    /// first (OmpSessionStore.freshEntryMarks) — the page stamps the
+    /// newest still-unmarked block per role, so every mark lands on
+    /// its own block even when several turns settled before this read.
+    private func stampEntryMarks(sessionId sid: String) {
+        // Main-queue pre-check (sessionId is main-written): a session
+        // switch inside the 1.5s window must drop the stale stamp.
+        guard sid == sessionId else { return }
+        let known = markedEntryIds
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self, let raw = self.storeRaw(sid) else { return }
+            let slice = raw.utf8.count > Self.tailLoadThresholdBytes
+                ? OmpSessionStore.tailSlice(raw).slice : raw
+            let fresh = OmpSessionStore
+                .freshEntryMarks(from: OmpSessionStore.parse(slice),
+                                 known: known)
+            guard !fresh.isEmpty else { return }
+            self.emit(fresh)
         }
     }
 

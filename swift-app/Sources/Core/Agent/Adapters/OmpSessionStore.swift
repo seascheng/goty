@@ -281,6 +281,42 @@ enum OmpSessionStore {
                       openTools: openToolIds.count)
     }
 
+    /// Live settle-stamp seam: the entry marks the page has NOT seen
+    /// yet. omp's live frames carry no entry ids (only the store does
+    /// — see the pi-rpc fixture), so after a turn settles the session
+    /// re-reads the store and ships only the NEW marks through here.
+    /// Two orderings matter:
+    ///
+    /// - CONTENT-GATED: an entry that rendered nothing (empty
+    ///   provider-error tails) has no block to stamp — shipping its
+    ///   mark would steal an older block's id;
+    /// - NEWEST-FIRST: the page stamps the newest still-unmarked
+    ///   block of each role, so reverse order lands every mark on its
+    ///   own block even when several turns settled between reads
+    ///   (queued follow-ups fire turns back-to-back).
+    static func freshEntryMarks(from loaded: Loaded,
+                                known: Set<String>) -> [AgentSessionEvent] {
+        var fresh: [AgentSessionEvent] = []
+        var sawUser = false
+        var sawAgent = false
+        for event in loaded.events {
+            switch event {
+            case .userMessage: sawUser = true
+            case .messageChunk: sawAgent = true
+            case .entryMark(let role, let id):
+                if role == "user" {
+                    if sawUser, !known.contains(id) { fresh.append(event) }
+                    sawUser = false
+                } else {
+                    if sawAgent, !known.contains(id) { fresh.append(event) }
+                    sawAgent = false
+                }
+            default: break
+            }
+        }
+        return fresh.reversed()
+    }
+
     /// omp names a session only after a turn completes normally — an
     /// aborted session has an empty title in its store.
     static func sessionTitle(sessionId: String) -> String? {

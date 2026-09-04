@@ -28,10 +28,6 @@ final class SidebarRowView: NSView {
     private let textStack = NSStackView()
     private let dotView = DotView()
     private let badgeView = SpaceStatusView()
-    /// Trailing time-ago for quiet (idle-seen) agent rows — happier's
-    /// muted meta, sharing the badge's right column.
-    private let timeField = NSTextField(labelWithString: "")
-    private var timeUp = false
     /// Unselected row fill while a TUI status badge is up (status wash).
     private var statusRowWash: NSColor?
     /// The row's current meta line (branch name or agent label).
@@ -55,7 +51,23 @@ final class SidebarRowView: NSView {
         private let charField = NSTextField(labelWithString: "")
         private var wash: NSColor = .systemGray
 
-        override var intrinsicContentSize: NSSize { NSSize(width: 26, height: 16) }
+        /// Char-pill font — shared with the quiet-time measurement so
+        /// the intrinsic width always matches what renders.
+        static let charFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+
+        /// Quiet tail (idle+seen): the SAME pill carrying the muted
+        /// time-ago instead of a glyph — finished agents stay quiet
+        /// but style-consistent with the live status badges.
+        var quietTime: String? { didSet { refresh() } }
+
+        override var intrinsicContentSize: NSSize {
+            if let t = quietTime {
+                let w = (t as NSString)
+                    .size(withAttributes: [.font: Self.charFont]).width
+                return NSSize(width: max(26, ceil(w) + 12), height: 16)
+            }
+            return NSSize(width: 26, height: 16)
+        }
 
         var status: SpaceStatus? { didSet { refresh() } }
 
@@ -66,7 +78,7 @@ final class SidebarRowView: NSView {
             iconView.translatesAutoresizingMaskIntoConstraints = false
             addSubview(iconView)
 
-            charField.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+            charField.font = Self.charFont
             charField.textColor = .white
             charField.alignment = .center
             charField.translatesAutoresizingMaskIntoConstraints = false
@@ -122,9 +134,25 @@ final class SidebarRowView: NSView {
 
 
         private func refresh() {
+            invalidateIntrinsicContentSize()
+            // Quiet time-ago pill: text on the idle wash, no glyph, no
+            // spinner — the trailing column never changes shape, only
+            // what the pill carries.
+            if let t = quietTime {
+                charField.stringValue = t
+                charField.isHidden = false
+                iconView.isHidden = true
+                stopFrameTimer()
+                wash = status.map { Self.color(for: $0) }
+                    ?? Chrome.theme.secondaryText
+                toolTip = "idle"
+                needsDisplay = true
+                return
+            }
             guard let s = status else {
                 charField.isHidden = true
                 iconView.isHidden = false
+                toolTip = nil
                 stopFrameTimer()
                 return
             }
@@ -252,16 +280,6 @@ final class SidebarRowView: NSView {
         badgeView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(badgeView)
 
-        // Setup BEFORE the constraint block: TAMIC=false must precede
-        // activation (an autoresizing-mask view under autolayout breaks
-        // the row).
-        timeField.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
-        timeField.textColor = Chrome.theme.secondaryText
-        timeField.isHidden = true
-        timeField.setContentHuggingPriority(.required, for: .horizontal)
-        timeField.setContentCompressionResistancePriority(.init(750), for: .horizontal)
-        timeField.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(timeField)
 
         NSLayoutConstraint.activate([
             iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.iconLeading),
@@ -287,12 +305,6 @@ final class SidebarRowView: NSView {
             // will — the right margin moved between launches.
             badgeView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             badgeView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            // time-ago rides the same right column (mutually exclusive
-            // with the badge; the close button outranks both on hover).
-            textStack.trailingAnchor.constraint(lessThanOrEqualTo: timeField.leadingAnchor, constant: -6),
-            timeField.leadingAnchor.constraint(greaterThanOrEqualTo: textStack.trailingAnchor, constant: 6),
-            timeField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            timeField.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
@@ -390,18 +402,20 @@ final class SidebarRowView: NSView {
         // Agent-style rows (mirror): a live TUI status rides the trailing
         // badge and tints the row — the plain dot stays for non-agent
         // rows (server connection states). QUIET rows (idle and seen)
-        // carry NO badge (happier/paseo: completed is silent — the moon
-        // glyph was noise on every finished agent); they show the muted
-        // time-ago instead when the last transition is known.
+        // carry the muted time-ago IN THE SAME PILL on the idle wash
+        // (happier/paseo: completed is quiet — no glyph, but the
+        // trailing column keeps one consistent shape); a quiet row
+        // with no known transition shows nothing at all.
         statusRowWash = nil
         let quiet = status.map { $0.activity == .idle && $0.seen } ?? false
+        let timeText = (quiet ? status?.at.map(Self.timeAgo) : nil) ?? nil
         if let status, status.activity != .unknown, !quiet {
+            badgeView.quietTime = nil
             badgeView.status = status
             badgeUp = true
             badgeView.isHidden = closeRevealed
             dotView.isHidden = true
             avatarDot = nil
-            timeUp = false
             switch status.activity {
             case .working: statusRowWash = SpaceStatusView.color(for: status)
                 .withAlphaComponent(0.10)
@@ -409,7 +423,16 @@ final class SidebarRowView: NSView {
                 .withAlphaComponent(0.12)
             default: break
             }
+        } else if let timeText {
+            badgeView.status = status
+            badgeView.quietTime = timeText
+            badgeUp = true
+            badgeView.isHidden = closeRevealed
+            dotView.isHidden = true
+            avatarDot = nil
         } else {
+            badgeView.quietTime = nil
+            badgeView.status = nil
             badgeUp = false
             badgeView.isHidden = true
             avatarDot = nil
@@ -425,13 +448,6 @@ final class SidebarRowView: NSView {
                 dotView.isHidden = true
             }
         }
-        // Time-ago (happier's trailing meta): quiet agent rows only —
-        // rows with a badge tell the sharper story; the close button
-        // still takes the tail on hover.
-        let timeText = (quiet ? status?.at.map(Self.timeAgo) : nil) ?? nil
-        timeField.stringValue = timeText ?? ""
-        timeUp = timeText != nil
-        timeField.isHidden = !timeUp || closeRevealed
         hoverColor = selected ? .clear : (statusRowWash ?? Chrome.theme.hoverFill)
         // State→style writes MUST invalidate: reused rows repaint only
         // when dirty, and hover events are not a substitute — clicking a
@@ -548,8 +564,6 @@ final class SidebarRowView: NSView {
     /// hides it while the close button owns the shared right column.
     private var badgeUp = false
     private var closeRevealed = false
-    /// Reveal state is written only when it CHANGES: a no-op write
-    /// would still dirty layout and keep the cycle alive.
     private func setCloseRevealed(_ revealed: Bool) {
         // Only real tab rows (with an onClose) reveal the close button —
         // never "New Tab" / "Add Remote…" / workspace rows.
@@ -557,12 +571,10 @@ final class SidebarRowView: NSView {
         closeRevealed = target
         if closeButton.isHidden != !target { closeButton.isHidden = !target }
         // The close button takes the row tail on hover: the badge (same
-        // right column) steps aside — the verb in focus wins. The
-        // time-ago tail rides the same rule.
+        // right column, glyph or quiet time-ago alike) steps aside —
+        // the verb in focus wins.
         let badgeHidden = !badgeUp || target
         if badgeView.isHidden != badgeHidden { badgeView.isHidden = badgeHidden }
-        let timeHidden = !timeUp || target
-        if timeField.isHidden != timeHidden { timeField.isHidden = timeHidden }
     }
 
     override func mouseEntered(with event: NSEvent) {

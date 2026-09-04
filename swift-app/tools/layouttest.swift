@@ -1574,6 +1574,24 @@ func run() {
     let restored = pstore.workspaces.first { $0.sshHost == "srv-a" }
     check(restored?.id == pwsId && restored?.tabs.first?.panes.first?.id == "pane-live",
           "re-add restores the same workspace/pane ids (attach reattaches)")
+    // ⌘T builds a FREE terminal (top-level Terminals section);
+    // setTabFree is the drag-across-sections commit.
+    let freeBefore = pstore.workspaces[0].tabs.count
+    pcoord.newTab()
+    check(pstore.workspaces[0].tabs.count == freeBefore + 1
+              && pstore.workspaces[0].tabs.last!.freeTerminal,
+          "newTab() creates a free-terminal tab")
+    if let lastId = pstore.workspaces[0].tabs.last?.id {
+        pcoord.setTabFree(wsId: pstore.workspaces[0].id, tabId: lastId, free: false)
+        check(pstore.workspaces[0].tabs.last?.freeTerminal == false,
+              "setTabFree clears the flag")
+        pcoord.setTabFree(wsId: pstore.workspaces[0].id, tabId: lastId, free: true)
+        check(pstore.workspaces[0].tabs.last?.freeTerminal == true,
+              "setTabFree sets the flag back")
+    }
+    pcoord.newTab(cwd: "/tmp/fold-a")
+    check(pstore.workspaces[0].tabs.last?.freeTerminal == false,
+          "newTab(cwd:) stays a directory space tab")
     check(pstore.parked.isEmpty, "parked entry consumed on re-add")
     check(WorkspaceStore(sessionName: "goty", fileURL: parkURL)
             .workspaces.contains { $0.sshHost == "srv-a" },

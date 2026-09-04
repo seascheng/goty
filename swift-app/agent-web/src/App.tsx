@@ -1531,7 +1531,7 @@ function TurnActions({ text, entryId }: { text: string; entryId: string | null |
       <button type="button" className="turn-action"
         disabled={branchDisabled}
         title={!entryId
-          ? "该消息还没有会话条目 id（重开窗格或加载历史后可从此处分支）"
+          ? "该消息还没有会话条目 id（turn 落盘后片刻自动可用；重开窗格可立即补齐）"
           : busy ? "分支创建中……"
           : "从此处分叉到新标签页继续（原会话与原窗口保留不动；turn 进行中同样可用）"}
         aria-label="分支到新标签页"

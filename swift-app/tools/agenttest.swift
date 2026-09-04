@@ -618,6 +618,49 @@ enum AgentTest {
             OmpSessionStore.rootOverride = nil
         }
 
+        print("— live settle-stamp: fresh entry marks —")
+        // Live frames carry no entry ids; after a turn settles the
+        // session re-reads the store and ships only NEW marks,
+        // content-gated and newest-first. The error tail (a3) has no
+        // text — its mark must not ship, or it would steal a2's block.
+        do {
+            let sid = UUID().uuidString
+            func entry(_ id: String, _ role: String, _ text: String) -> String {
+                let content = text.isEmpty ? "[]" : #"[{"type":"text","text":"\#(text)"}]"#
+                return #"{"type":"message","id":"\#(id)","message":{"role":"\#(role)","content":\#(content)}}"#
+            }
+            let raw = [
+                #"{"type":"session","id":"\#(sid)"}"#,
+                entry("u1", "user", "hi"),
+                entry("a1", "assistant", "hello"),
+                entry("u2", "user", "again"),
+                entry("a2", "assistant", "sure"),
+                entry("a3", "assistant", ""),   // empty provider-error tail
+            ].joined(separator: "\n")
+            func roles(_ events: [AgentSessionEvent]) -> [String] {
+                events.compactMap {
+                    if case .entryMark(let role, let id) = $0 {
+                        return "\(role):\(id)"
+                    }
+                    return nil
+                }
+            }
+            let loaded = OmpSessionStore.parse(raw)
+            check(roles(loaded.events) == ["user:u1", "agent:a1", "user:u2",
+                                           "agent:a2", "agent:a3"],
+                  "store parse keeps every entry mark in file order")
+            check(roles(OmpSessionStore.freshEntryMarks(from: loaded, known: []))
+                    == ["agent:a2", "user:u2", "agent:a1", "user:u1"],
+                  "cold stamp ships content-backed marks newest-first, error tail gated out")
+            check(roles(OmpSessionStore.freshEntryMarks(from: loaded,
+                                                        known: ["u1", "a1"]))
+                    == ["agent:a2", "user:u2"],
+                  "settled turns never re-ship their marks")
+            check(OmpSessionStore.freshEntryMarks(from: loaded,
+                                                  known: ["u1", "a1", "u2", "a2", "a3"]).isEmpty,
+                  "fully-marked store stamps nothing")
+        }
+
         print("— /rename + history title fallback —")
         // omp's session_info_update frame (/rename, auto-naming) is the
         // live title event; it must reach the page as sessionTitle.
