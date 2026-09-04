@@ -1596,6 +1596,38 @@ func run() {
     check(WorkspaceState(id: UUID(), name: "srv-a", tabs: [],
                          focusedTabIndex: 0, sshHost: "srv-a").displayName == "srv-a",
           "remote keeps the host alias as display name")
+    check(pstore.workspaces[0].tabs.last?.freeTerminal == false,
+          "newTab(cwd:) stays a directory space tab")
+
+    // — Terminals section: free tabs render in their own stack —
+    do {
+        func mkTab(_ id: String, _ cwd: String) -> TabState {
+            TabState(id: id, name: id, panes: [PaneState(id: "p-\(id)", cwd: cwd)])
+        }
+        let sidebar = SidebarView()
+        var ws = WorkspaceState(id: UUID(), name: "local",
+            tabs: [mkTab("a", "/tmp/fold-a"), mkTab("b", "/tmp/fold-b"),
+                   mkTab("c", "/tmp/fold-b")],
+            focusedTabIndex: 0, sshHost: nil)
+        sidebar.render(workspace: ws, statusFor: { _ in nil },
+                       commandFor: { _ in nil }, titleFor: { _ in "t" })
+        check(sidebar.termRowsForTest.isEmpty && sidebar.tabsRowsForTest.count == 3,
+              "no free tabs: all three land in directory sections")
+        ws.tabs[1].freeTerminal = true
+        sidebar.render(workspace: ws, statusFor: { _ in nil },
+                       commandFor: { _ in nil }, titleFor: { _ in "t" })
+        check(sidebar.termRowsForTest.count == 1
+                  && (sidebar.termRowsForTest[0] as? SidebarRowView)?.tabIndex == 1,
+              "the free tab renders in the Terminals stack")
+        check(!sidebar.tabsRowsForTest.contains { ($0 as? SidebarRowView)?.tabIndex == 1 },
+              "SPACES rows exclude the free tab")
+        // cd drift must NOT move it: the pane cwd changes, the flag holds.
+        ws.tabs[1].panes[0].cwd = "/tmp/fold-a"
+        sidebar.render(workspace: ws, statusFor: { _ in nil },
+                       commandFor: { _ in nil }, titleFor: { _ in "t" })
+        check(sidebar.termRowsForTest.count == 1,
+              "free tab stays in Terminals across cwd drift")
+    }
 
     // Space identity: one git repo = one space. The resolver collapses
     // subdirs and linked worktrees onto the repo's main root; a
