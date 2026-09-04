@@ -52,6 +52,10 @@ final class WorkspaceCoordinator {
         /// client restarts and never guesses. nil = nothing reported.
         var reported: AgentActivity? = nil
         var seen = true
+        /// When the activity last CHANGED — the sidebar's trailing
+        /// time-ago (happier/paseo consensus: idle rows carry a muted
+        /// relative time instead of a status glyph).
+        var lastActivityAt: Date? = nil
         /// Live foreground command (sessiond list reply); nil = whatever
         /// the pane was spawned with is authoritative.
         var command: String?
@@ -125,6 +129,7 @@ final class WorkspaceCoordinator {
         guard runtime[wsId] != nil else { return }
         let previous = runtime[wsId]!.agents[paneId] ?? AgentPaneRuntime()
         var next = previous
+        if state != previous.state { next.lastActivityAt = Date() }
         next.state = state
         if state != .idle {
             next.seen = true

@@ -24,6 +24,9 @@ struct SpaceStatus {
     let activity: AgentActivity
     let seen: Bool
     let spinner: Character?
+    /// When the activity last changed — nil on unknown; the sidebar's
+    /// trailing time-ago for quiet (idle-seen) rows.
+    let at: Date?
 }
 
 enum AgentCatalog {

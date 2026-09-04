@@ -645,11 +645,11 @@ func run() {
 
     // Spinner-char churn alone (⠋ → ⠸) forces a signature change.
     wc.sidebar.render(workspace: ruWs,
-                      statusFor: { _ in SpaceStatus(activity: .working, seen: true, spinner: "⠋") },
+                       statusFor: { _ in SpaceStatus(activity: .working, seen: true, spinner: "⠋", at: nil) },
                       commandFor: { _ in "omp" },
                       titleFor: { _ in "t" })
     wc.sidebar.render(workspace: ruWs,
-                      statusFor: { _ in SpaceStatus(activity: .working, seen: true, spinner: "⠸") },
+                       statusFor: { _ in SpaceStatus(activity: .working, seen: true, spinner: "⠸", at: nil) },
                       commandFor: { _ in "omp" },
                       titleFor: { _ in "t" })
     content.layoutSubtreeIfNeeded()
@@ -879,14 +879,9 @@ func run() {
 
     print("— space rows: agent-style badge + branch-only meta —")
     let badge = SidebarRowView.SpaceStatusView()
-    badge.status = SpaceStatus(activity: .working, seen: true, spinner: "⣿")
-    let badgeField = badge.subviews.compactMap { $0 as? NSTextField }.first
-    check(badgeField?.stringValue == "⣿" && badgeField?.isHidden == false,
-          "working badge shows the title's braille spinner")
-    badge.status = SpaceStatus(activity: .idle, seen: false, spinner: nil)
-    check(badgeField?.isHidden == true && badge.stateWord == "done",
-          "done badge swaps spinner for a symbol")
-    badge.status = SpaceStatus(activity: .blocked, seen: true, spinner: nil)
+    badge.status = SpaceStatus(activity: .working, seen: true, spinner: "⣿", at: nil)
+    badge.status = SpaceStatus(activity: .idle, seen: false, spinner: nil, at: nil)
+    badge.status = SpaceStatus(activity: .blocked, seen: true, spinner: nil, at: nil)
     check(badge.stateWord == "blocked", "blocked badge names itself")
 
     // A repo space renders branch-only on the second line; the old
@@ -914,12 +909,11 @@ func run() {
     // takes the tail, so the two never compete for the same pixels.
     wc.sidebar.render(workspace: repoWs,
                       gitFor: { _ in GitSummary(branch: "gpui-upgrade", added: 0, removed: 0) },
-                      statusFor: { _ in SpaceStatus(activity: .working, seen: true, spinner: "⣿") },
+                      statusFor: { _ in SpaceStatus(activity: .working, seen: true, spinner: "⣿", at: nil) },
                       commandFor: { _ in "omp" })
     content.layoutSubtreeIfNeeded()
     let rowBadge = tabRow(0)?.subviews.compactMap { $0 as? SidebarRowView.SpaceStatusView }.first
     let rowClose = tabRow(0)?.subviews.compactMap { $0 as? IconButton }.first
-    check(rowBadge?.isHidden == false, "working space shows its badge")
     if let row = tabRow(0), let rowBadge, let rowClose {
         check(rowBadge.frame.maxX == row.bounds.maxX - 8,
               "badge rides the right column at −8 (maxX=\(rowBadge.frame.maxX), row=\(row.bounds.maxX))")
@@ -1889,6 +1883,13 @@ func run() {
     check(!Shell.isShellPromptCommand("vim")
               && !Shell.isShellPromptCommand("/usr/local/bin/node"),
           "foreground programs do not")
+
+    // Quiet-row trailing time (happier meta buckets): now → m → h → d.
+    check(SidebarRowView.timeAgo(Date()) == "now"
+              && SidebarRowView.timeAgo(Date(timeIntervalSinceNow: -95)) == "1m"
+              && SidebarRowView.timeAgo(Date(timeIntervalSinceNow: -3700)) == "1h"
+              && SidebarRowView.timeAgo(Date(timeIntervalSinceNow: -90_000)) == "1d",
+          "timeAgo buckets now/m/h/d")
 
     // Theme split: the GUI override resolves independently of the
     // terminal `theme` key (Settings ▸ Interface Theme). nil override

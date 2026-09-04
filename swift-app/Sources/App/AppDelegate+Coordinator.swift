@@ -246,7 +246,8 @@ extension AppDelegate {
         // own abort — the 2026-08-31 storm); host-less panes (restart,
         // never-opened tabs) show the daemon-relayed extension report —
         // see effectiveBadgeActivity.
-        return SpaceStatus(activity: activity, seen: status.seen, spinner: spinner)
+        return SpaceStatus(activity: activity, seen: status.seen,
+                           spinner: spinner, at: status.lastActivityAt)
     }
 
     /// Workspaces whose remote daemon reports below the store
