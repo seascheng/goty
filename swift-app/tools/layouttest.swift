@@ -1658,14 +1658,13 @@ func run() {
                        commandFor: { _ in nil }, titleFor: { _ in "t" })
         check(sidebar.termRowsForTest.count == 1,
               "free tab stays in Terminals across cwd drift")
-        // T7: the free row's git badge follows the pane's LIVE cwd.
-        var gitCalls: [String] = []
-        sidebar.render(workspace: ws,
-                       gitFor: { cwd in gitCalls.append(cwd); return nil },
-                       statusFor: { _ in nil },
-                       commandFor: { _ in nil }, titleFor: { _ in "t" })
-        check(gitCalls.contains("/tmp/fold-a"),
-              "free row git lookup follows the live cwd")
+        // Compact rows: 32pt single line (no second line, no inline
+        // rename — F2/context rename still binds on directory rows).
+        sidebar.layoutSubtreeIfNeeded()
+        if let row = sidebar.termRowsForTest[0] as? SidebarRowView {
+            check(row.frame.height == 32,
+                  "free row renders compact (32pt single line)")
+        }
     }
     check(NewSpaceCard.expanded("~") == NSHomeDirectory()
               && NewSpaceCard.expanded("~/x") == NSHomeDirectory() + "/x"

@@ -836,8 +836,13 @@ final class SidebarView: NSView {
             if ProcessInfo.processInfo.environment["GOTY_DUMP_VIEWS"] == "1" {
                 print("row-diag: \(tab.name) cmd=\(command ?? "nil") brand=\(brand != nil) avatar=\(avatar != nil)")
             }
-            let git = tab.panes.first?.cwd.flatMap { gitFor?($0) }
-            let meta = git == nil ? spec?.label : nil
+            // Compact free rows: icon + title, single 32pt line — no
+            // second line (git branch/meta) and no inline rename
+            // (F2/context-menu rename still bind); directory rows keep
+            // the full two-line treatment.
+            let compact = stack === termStack
+            let git = compact ? nil : tab.panes.first?.cwd.flatMap { gitFor?($0) }
+            let meta = (!compact && git == nil) ? spec?.label : nil
             // Display name, ghostty's title rule: a user rename wins;
             // else an agent shows its brand; else the PTY's own window
             // title (OSC 0/2 through ghostty); else the default counter.
@@ -869,7 +874,8 @@ final class SidebarView: NSView {
                           onClose: { [weak self] in self?.onCloseTab?(idx) },
                           onRename: { [weak self] in self?.onRenameTab?(idx) },
                           onSetColor: { [weak self] hex in self?.onTabColor?(idx, hex) },
-                          onCommitName: { [weak self] name in self?.onRenameTabTo?(idx, name) },
+                          onCommitName: compact ? nil
+                              : { [weak self] name in self?.onRenameTabTo?(idx, name) },
                           onSetIcon: { [weak self] symbol in self?.onTabIcon?(idx, symbol) })
             nextRows[tab.id] = row
             if stack === termStack { desiredTerm.append(row) } else { desired.append(row) }
