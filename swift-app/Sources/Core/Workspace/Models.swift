@@ -101,16 +101,9 @@ struct TabState: Codable {
     /// 自由终端:属于顶层 Terminals 区,不参与目录分组。pane 的
     /// live cwd 只喂右侧 file 面板与 git 徽章。旧 state 无此键 → false。
     var freeTerminal: Bool = false
+}
 
-    init(id: String, name: String, panes: [PaneState], paneCommand: String? = nil,
-         freeTerminal: Bool = false) {
-        self.id = id
-        self.name = name
-        self.panes = panes
-        self.paneCommand = paneCommand
-        self.freeTerminal = freeTerminal
-    }
-
+extension TabState {
     private enum CodingKeys: String, CodingKey {
         case id, name, userTitle, agentTitle, panes, paneCommand, color, icon
         case freeTerminal
@@ -125,6 +118,7 @@ struct TabState: Codable {
         panes = try c.decode([PaneState].self, forKey: .panes)
         paneCommand = try c.decodeIfPresent(String.self, forKey: .paneCommand)
         color = try c.decodeIfPresent(String.self, forKey: .color)
+        icon = try c.decodeIfPresent(String.self, forKey: .icon)
         freeTerminal = try c.decodeIfPresent(Bool.self, forKey: .freeTerminal) ?? false
     }
 
