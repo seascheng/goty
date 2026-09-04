@@ -925,6 +925,39 @@ func run() {
               "leaving hover restores the badge")
     }
 
+    // Quiet tail (idle+seen): the time-ago rides the SAME pill (idle
+    // wash, no glyph) in the same right column — style consistency
+    // with the live status badges; reuse flips glyph ⇄ time in place.
+    wc.sidebar.render(workspace: repoWs,
+                      gitFor: nil,
+                      statusFor: { _ in SpaceStatus(activity: .idle, seen: true,
+                                                    spinner: nil,
+                                                    at: Date(timeIntervalSinceNow: -300)) },
+                      commandFor: { _ in "omp" })
+    content.layoutSubtreeIfNeeded()
+    let quietBadge = tabRow(0)?.subviews.compactMap { $0 as? SidebarRowView.SpaceStatusView }.first
+    let quietText = quietBadge?.subviews.compactMap { $0 as? NSTextField }.first
+    if let row = tabRow(0), let quietBadge {
+        check(quietBadge.isHidden == false && quietText?.stringValue == "5m",
+              "quiet row shows the time-ago inside the status pill (\(quietText?.stringValue ?? "nil"))")
+        check(quietBadge.frame.maxX == row.bounds.maxX - 8,
+              "time pill rides the same right column at −8")
+        check(quietBadge.intrinsicContentSize.width >= 26
+              && quietBadge.intrinsicContentSize.height == 16,
+              "time pill keeps the badge capsule metrics")
+    }
+    wc.sidebar.render(workspace: repoWs,
+                      gitFor: nil,
+                      statusFor: { _ in SpaceStatus(activity: .working, seen: true,
+                                                    spinner: "⣿", at: nil) },
+                      commandFor: { _ in "omp" })
+    content.layoutSubtreeIfNeeded()
+    let reusedBadge = tabRow(0)?.subviews.compactMap { $0 as? SidebarRowView.SpaceStatusView }.first
+    let reusedText = reusedBadge?.subviews.compactMap { $0 as? NSTextField }.first
+    check(reusedBadge === quietBadge && reusedText?.stringValue == "⣿"
+          && reusedBadge?.frame.width == 26,
+          "row reuse flips time pill back to the glyph pill at fixed width")
+
     print("— heavy terminal overlay must not move regions —")
     // The 2026-08-22 disaster, distilled: a leaf feature view full of
     // constrained children, presented over the terminal region. Regions
@@ -1589,6 +1622,21 @@ func run() {
               && spaceSecs[1].name == "notes" && spaceSecs[1].tabIndexs == [2],
           "one git repo is one space: subdir + worktree share a section, "
               + "non-repo paths stay their own")
+
+    // Terminals 顶层区:free tabs 被摘离,不进目录分组。
+    do {
+        let mk: (String, String?) -> TabState = { id, cwd in
+            TabState(id: id, name: id,
+                     panes: [PaneState(id: id + "-p", cwd: cwd)],
+                     freeTerminal: id.hasPrefix("f"))
+        }
+        let tabs = [mk("a", "/repo"), mk("f1", "/repo"), mk("b", nil), mk("f2", "/other")]
+        check(SpaceGrouping.freeIndices(in: tabs) == [1, 3],
+              "freeIndices picks the free-terminal tabs")
+        let secs = SpaceGrouping.sections(for: tabs)
+        check(secs.flatMap(\.tabIndexs).sorted() == [0, 2],
+              "sections exclude free-terminal tabs")
+    } catch { check(false, "threw: \(error)") }
 
     // Sidebar "+" menu: built pure, fired like the host picker. Every
     // space gets the same list (2026-08-31): terminal + available ACP
