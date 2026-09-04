@@ -1648,10 +1648,13 @@ export function App() {
   //     user intent.
   const PIN_THRESHOLD_PX = 24;
   const INTENT_WINDOW_MS = 320;
+  const JUMP_HOLD_MS = 2500;
   const parked = useRef(false);
-  const lastRawInputAt = useRef(-Infinity);
   const lastWriteAt = useRef(0);
-  const growing = useRef(false);
+  /// Timestamp of the last session-outline hop: the tail-follow
+  /// effect stands down for JUMP_HOLD_MS after one (see jumpToUser).
+  const jumpAt = useRef(-Infinity);
+  const lastRawInputAt = useRef(-Infinity);
 
   useEffect(() => {
     const el = scroller.current;
@@ -1703,6 +1706,7 @@ export function App() {
 
   const sentinelRef = useRef<HTMLDivElement>(null);
   const growAnchor = useRef<{ height: number; top: number } | null>(null);
+  const growing = useRef(false);
   const olderInFlight = useRef(false);
 
   // Prepend consumption: blocks arrived in FRONT (ids shifted by
@@ -1768,6 +1772,9 @@ export function App() {
   useEffect(() => {
     const el = scroller.current;
     if (!el || parked.current) return;
+    // Outline-hop grace: the hop DELIBERATELY parked near the tail;
+    // follow must not snatch the viewport back (jumpToUser).
+    if (performance.now() - jumpAt.current < JUMP_HOLD_MS) return;
     if (performance.now() - lastRawInputAt.current < INTENT_WINDOW_MS) return;
     const target = el.scrollHeight;
     if (Math.abs(target - el.clientHeight - el.scrollTop) < 0.5) return;
@@ -1819,6 +1826,15 @@ export function App() {
   const jumpToUser = (idx: number) => {
     setMsgPop(false);
     parked.current = true;
+    lastRawInputAt.current = performance.now();
+    // Intent lock: a hop landing NEAR the tail (< PIN_THRESHOLD_PX)
+    // re-arms the follow-by-measurement logic (parked=false), and the
+    // very next streaming write would drag the viewport back to the
+    // bottom — the "recent turns bounce back" report. For a grace
+    // window the tail-follow refuses to take over; a real user scroll
+    // (or the window closing) restores the normal contract.
+    jumpAt.current = performance.now();
+    if (idx < begin) setStart(idx);
     requestAnimationFrame(() => {
       const id = store.blocks[idx]?.id;
       const el = id != null
