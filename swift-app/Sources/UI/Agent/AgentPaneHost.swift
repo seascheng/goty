@@ -327,6 +327,18 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
             coverView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         // App-wide agent zoom: apply the persisted factor now (pageZoom
+        // sticks across loads) and follow later changes from any pane.
+        applyPageZoom()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(agentZoomChanged(_:)),
+            name: AgentPaneHost.zoomChangedNote, object: nil)
+        // The pane is the session's delegate — handshake events
+        // (configChanged/ready) land here and arm the 90s watchdog's
+        // done flag. Lost in an edit once: every pane timed out with
+        // "OMP 启动超时" while the agents were actually fine.
+        session.delegate = self
+        // Theme first: the page's palette lands before any queued
+        // transcript events (push order is preserved).
         bridge.onReady = { [weak self] in
             self?.pushTheme()
             self?.pushMeta()
@@ -563,6 +575,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
         // must surface as an explicit timeout, not silent nothing.
         DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self] in
             guard let self, !self.handshakeDone else { return }
+            if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
+                FileHandle.standardError.write("HANDSHAKE TIMEOUT pane=\(self.agentLabel)\n".data(using: .utf8)!)
+            }
             self.setTurnState(.errored(
                 "\(self.agentLabel) 启动超时（90 秒未完成握手）。"
                 + "常见原因：该 agent 的 MCP/hooks 启动慢（项目索引、网络拉取）。"
@@ -820,9 +835,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
         let prefs = AppPreferences.shared
         switch key {
         case "=", "+":
-            prefs.agentPageZoom = min(2.0, prefs.agentPageZoom + 0.1)
+            prefs.agentPageZoom = min(2.0, prefs.agentPageZoom + 0.05)
         case "-":
-            prefs.agentPageZoom = max(0.6, prefs.agentPageZoom - 0.1)
+            prefs.agentPageZoom = max(0.6, prefs.agentPageZoom - 0.05)
         case "0":
             prefs.agentPageZoom = 1.0
         default:
