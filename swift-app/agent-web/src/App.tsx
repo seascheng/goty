@@ -324,7 +324,7 @@ function ToolCard({ id }: { id: string }) {
   const textContent = call.content.filter((c) => c.text).map((c) => c.text).join("\n");
   const kind = call.kind ?? "other";
   return (
-    <div className={"tool" + (open ? " open" : "") + (running ? " run" : "")}>
+    <div className={"tool st-" + (call.status ?? "none") + (open ? " open" : "") + (running ? " run" : "")}>
       <button className="tool-head" onClick={() => setOpen(!open)}>
         <span className={"chevron" + (open ? " up" : "")}>▸</span>
         <span className="tool-kind" aria-hidden><ToolGlyph kind={kind} /></span>
