@@ -41,17 +41,48 @@ final class AgentSchemeHandler: NSObject, WKURLSchemeHandler {
             print("goty-scheme: \(url.absoluteString) root=\(root.path) file=\(file.path) exists=\(exists)")
         }
         if file.path.hasPrefix(root.path), let data = try? Data(contentsOf: file) {
-            respond(task, url: url, data: data, file: file)
+            respond(task, url: url, data: injectFirstPaint(data, file: file), file: file)
             return
         }
         // SPA fallback: the app is one index.html — a miss (deep link,
         // stale asset path) degrades to it instead of a blank pane.
         let index = root.appendingPathComponent("index.html")
         if let data = try? Data(contentsOf: index) {
-            respond(task, url: url, data: data, file: index)
+            respond(task, url: url, data: injectFirstPaint(data, file: index), file: index)
         } else {
             task.didFailWithError(URLError(.fileDoesNotExist))
         }
+    }
+
+    /// First-paint palette: the page's built-in `:root` defaults are
+    /// DARK, so a light user's first frame flashes dark until the
+    /// bridge's theme event lands (page-ready, a beat later). We KNOW
+    /// the live theme here — splice it into the HTML so frame zero is
+    /// already correct. Placed right before </head>: document styles
+    /// define the same custom properties, and later declarations win.
+    private func injectFirstPaint(_ data: Data, file: URL) -> Data {
+        guard file.pathExtension.lowercased() == "html",
+              var html = String(data: data, encoding: .utf8),
+              html.contains("</head>") else { return data }
+        let vars = AgentTheme.vars()
+        let decls = vars
+            .filter { $0.key != "mode" }
+            .map { "--\($0.key):\($0.value)" }
+            .joined(separator: ";")
+        // Inline data-theme beats a CSS-only splice: the stylesheet's
+        // [data-theme="light"] overrides then apply on frame zero too
+        // (working/status hues), exactly like the bridge's path.
+        let modeAttr = vars["mode"].map { " data-theme=\"\($0)\"" } ?? ""
+        let style = "<style id=\"goty-first-paint\">:root{\(decls)}</style>"
+        html = html.replacingOccurrences(of: "<html>",
+                                         with: "<html\(modeAttr)>")
+        html = html.replacingOccurrences(of: "</head>",
+                                         with: style + "</head>")
+        if ProcessInfo.processInfo.environment["GOTY_SCHEME_DEBUG"] != nil {
+            print("goty-scheme: first-paint injected mode=\(vars["mode"] ?? "?") "
+                  + " decls=\(decls.count) chars")
+        }
+        return Data(html.utf8)
     }
 
     private func respond(_ task: WKURLSchemeTask, url: URL, data: Data, file: URL) {

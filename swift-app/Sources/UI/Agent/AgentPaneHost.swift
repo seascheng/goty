@@ -261,6 +261,14 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
     /// Themed cover ABOVE the webview until the page has painted; see
     /// the setup comment for why a fill below cannot work.
     private let coverView = NSView()
+    /// Cover lifecycle: the page loads and reaches ready while the pane
+    /// is OFFSCREEN (inactive tab) — dropping the cover on the ready
+    /// signal alone left the first REVEAL unguarded, and WKWebView's
+    /// cold first raster flashed white. The cover now waits for BOTH
+    /// page-ready and first visibility.
+    private var pageReady = false
+    private var hasBeenVisible = false
+    private var coverDropped = false
 
 
     init(key: HostKey, session: any AgentSessioning, agentLabel: String) {
@@ -319,27 +327,11 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
             coverView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         // App-wide agent zoom: apply the persisted factor now (pageZoom
-        // sticks across loads) and follow later changes from any pane.
-        applyPageZoom()
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(agentZoomChanged(_:)),
-            name: AgentPaneHost.zoomChangedNote, object: nil)
-        session.delegate = self
-        // Theme first: the page's palette lands before any queued
-        // transcript events (push order is preserved).
         bridge.onReady = { [weak self] in
             self?.pushTheme()
             self?.pushMeta()
-            // Drop the cover one beat after the ready signal: React's
-            // first commit is scheduled, not synchronous.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                self?.coverView.removeFromSuperview()
-                // Settle like a terminal pane post-first-paint: clear
-                // when the window is translucent (the page body at
-                // bg-alpha is the single composite), theme background
-                // when opaque.
-                self?.layer?.backgroundColor = PaneHost.backdropTarget()?.cgColor
-            }
+            self?.pageReady = true
+            self?.dropCoverIfSettled()
             if ProcessInfo.processInfo.environment["GOTY_FOCUS_DEBUG"] != nil {
                 self?.dumpFocusState("pageReady")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
@@ -762,6 +754,36 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
     /// walk → fresh CSS vars → live restyle, no rebuild.
     func pushTheme() {
         AgentTheme.push(to: bridge)
+    }
+
+    /// First reveal of a pane that loaded OFFSCREEN: mark visibility —
+    /// the cover drops only once the page is ready AND seen (the
+    /// cold-raster flash otherwise lands on the user).
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let win = window, win.isVisible {
+            if !hasBeenVisible {
+                hasBeenVisible = true
+                dropCoverIfSettled()
+            }
+        }
+    }
+
+    /// One-way cover drop: needs page-ready AND first visibility; the
+    /// 0.15s beat lets WebKit's first raster (triggered by the attach
+    /// itself) land behind the cover before it lifts.
+    private func dropCoverIfSettled() {
+        guard pageReady, hasBeenVisible, !coverDropped else { return }
+        coverDropped = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            self.coverView.removeFromSuperview()
+            // Settle like a terminal pane post-first-paint: clear
+            // when the window is translucent (the page body at
+            // bg-alpha is the single composite), theme background
+            // when opaque.
+            self.layer?.backgroundColor = PaneHost.backdropTarget()?.cgColor
+        }
     }
 
     func retheme() {
