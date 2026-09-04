@@ -1550,6 +1550,33 @@ func run() {
     check(!pstore.workspaces.contains { $0.sshHost == "srv-a" } && pstore.parked.isEmpty,
           "close drops the workspace for real (no zombie parked copy)")
 
+    // ⌘T builds a FREE terminal (top-level Terminals section);
+    // setTabFree is the drag-across-sections commit. The coordinator's
+    // focus sits on the FOCUSED workspace, not [0].
+    do {
+        let fcoord = WorkspaceCoordinator()
+        let fstore = WorkspaceStore(sessionName: "goty-free",
+            fileURL: URL(fileURLWithPath:
+                NSTemporaryDirectory() + "goty-free-\(UUID().uuidString).json"))
+        fcoord.store = fstore
+        let n0 = fstore.focused!.tabs.count
+        fcoord.newTab()
+        check(fstore.focused!.tabs.count == n0 + 1
+                  && fstore.focused!.tabs.last!.freeTerminal,
+              "newTab() creates a free-terminal tab")
+        if let ws = fstore.focused, let lastId = ws.tabs.last?.id {
+            fcoord.setTabFree(wsId: ws.id, tabId: lastId, free: false)
+            check(fstore.focused!.tabs.last?.freeTerminal == false,
+                  "setTabFree clears the flag")
+            fcoord.setTabFree(wsId: ws.id, tabId: lastId, free: true)
+            check(fstore.focused!.tabs.last?.freeTerminal == true,
+                  "setTabFree sets the flag back")
+        }
+        fcoord.newTab(cwd: "/tmp/fold-a")
+        check(fstore.focused!.tabs.last?.freeTerminal == false,
+              "newTab(cwd:) stays a directory space tab")
+    }
+
     // Local workspace display name is derived, not stored: non-remote
     // always shows "Local" (no rename-at-load migration to rot).
     check(WorkspaceState(id: UUID(), name: "whatever", tabs: [],

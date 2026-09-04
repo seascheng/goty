@@ -212,23 +212,34 @@ enum SpaceGrouping {
     static func sections(for tabs: [TabState],
                          spaceRoot: ((String) -> String?)? = nil,
                          scratchTitle: String = "Scratch") -> [SpaceSection] {
-        let keys: [String?] = tabs.map { tab in
-            tab.panes.first?.cwd.map { spaceRoot?($0) ?? $0 }
+        // Free terminals live in the top-level Terminals section — they
+        // never join a directory group (the sidebar renders them from
+        // freeIndices before walking these sections).
+        let free = Set(freeIndices(in: tabs))
+        let keys: [String?] = tabs.enumerated().map { idx, tab in
+            guard !free.contains(idx) else { return nil }
+            return tab.panes.first?.cwd.map { spaceRoot?($0) ?? $0 }
         }
         var order: [String] = []
         for case let key? in keys where !order.contains(key) { order.append(key) }
         if order.isEmpty {
-            return [SpaceSection(name: nil, tabIndexs: Array(tabs.indices))]
+            let rest = tabs.indices.filter { !free.contains($0) }
+            return rest.isEmpty ? [] : [SpaceSection(name: nil, tabIndexs: rest)]
         }
         let names = tailNames(for: order)
         var sections = zip(order, names).map { root, name in
             SpaceSection(name: name, tabIndexs: tabs.indices.filter { keys[$0] == root })
         }
-        let scratch = tabs.indices.filter { keys[$0] == nil }
+        let scratch = tabs.indices.filter { keys[$0] == nil && !free.contains($0) }
         if !scratch.isEmpty {
             sections.append(SpaceSection(name: scratchTitle, tabIndexs: scratch))
         }
         return sections
+    }
+
+    /// 顶层 Terminals 区的成员:freeTerminal tabs 在 sections 之前摘离。
+    static func freeIndices(in tabs: [TabState]) -> [Int] {
+        tabs.indices.filter { tabs[$0].freeTerminal }
     }
 
     /// tty7 `group_names`: the shortest path tail that stays unique —

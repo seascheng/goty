@@ -717,15 +717,30 @@ final class WorkspaceCoordinator {
         pendingAgentPrompts.removeValue(forKey: paneId)
     }
 
+    /// ⌘T: a FREE terminal — it lives in the top-level Terminals
+    /// section and never joins a directory group. The spawn cwd still
+    /// follows the focused pane (contextual start, free belonging).
     func newTab() {
-        appendTab(name: nil, command: nil, cwd: activeCwd())
+        appendTab(name: nil, command: nil, cwd: activeCwd(), free: true)
     }
 
     /// A new space opened directly into a directory (the sidebar's
-    /// per-space "+").
+    /// per-space "+", New Space…, @tty/@omp triggers).
     func newTab(cwd: String?) {
         appendTab(name: nil, command: nil, cwd: cwd)
     }
+
+    /// Drag-across-sections commit: Terminals ⇄ SPACES membership.
+    func setTabFree(wsId: UUID, tabId: String, free: Bool) {
+        guard let store,
+              let wi = store.workspaces.firstIndex(where: { $0.id == wsId }),
+              let ti = store.workspaces[wi].tabs.firstIndex(where: { $0.id == tabId }),
+              store.workspaces[wi].tabs[ti].freeTerminal != free else { return }
+        store.workspaces[wi].tabs[ti].freeTerminal = free
+        store.save()
+        delegate?.coordinatorDidChange(.structure)
+    }
+
 
     /// Space "+" → New Worktree (design: docs/specs/2026-08-23): create
     func createWorktree(name: String, cwd: String, host: String?,
@@ -760,7 +775,8 @@ final class WorkspaceCoordinator {
     @discardableResult
     private func appendTab(name: String?, command: String?, cwd: String?,
                            kind: PaneKind = .terminal,
-                           agentSessionId: String? = nil) -> String? {
+                           agentSessionId: String? = nil,
+                           free: Bool = false) -> String? {
         guard let store, store.workspaces.indices.contains(store.focusedIndex) else { return nil }
         let wi = store.focusedIndex
         var pane = PaneState(id: UUID().uuidString, cwd: cwd, kind: kind)
@@ -771,7 +787,7 @@ final class WorkspaceCoordinator {
         let number = store.workspaces[wi].tabs.count + 1
         store.workspaces[wi].tabs.append(TabState(
             id: UUID().uuidString, name: name ?? String(number), panes: [pane],
-            paneCommand: command))
+            paneCommand: command, freeTerminal: free))
         store.workspaces[wi].focusedTabIndex = store.workspaces[wi].tabs.count - 1
         runtime[store.workspaces[wi].id, default: Runtime()].activePaneId = pane.id
         store.save()
