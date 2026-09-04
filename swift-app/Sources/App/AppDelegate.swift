@@ -866,6 +866,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sidebar.onReorderTab = { [weak self] from, to in
             self?.coordinator.moveTab(from: from, to: to)
         }
+        sidebar.onCrossSectionDrop = { [weak self] idx, toFree in
+            guard let self, let ws = self.coordinator.store?.focused,
+                  ws.tabs.indices.contains(idx) else { return }
+            self.coordinator.setTabFree(wsId: ws.id, tabId: ws.tabs[idx].id, free: toFree)
+        }
+        sidebar.onNewSpace = { [weak self] in
+            guard let self, let ws = self.coordinator.store?.focused else { return }
+            let card = NewSpaceCard(host: ws.sshHost) { [weak self] path in
+                self?.coordinator.newTab(cwd: path)
+            }
+            Dialog.presentCard(card, width: NewSpaceCard.cardWidth, focus: {
+                card.focusInput()
+            })
+        }
         sidebar.onTabColor = { [weak self] idx, hex in
             self?.coordinator.setTabColor(index: idx, hex: hex)
         }

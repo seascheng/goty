@@ -1601,6 +1601,33 @@ func run() {
     check(!pstore.workspaces.contains { $0.sshHost == "srv-a" } && pstore.parked.isEmpty,
           "close drops the workspace for real (no zombie parked copy)")
 
+    // ⌘T builds a FREE terminal (top-level Terminals section);
+    // setTabFree is the drag-across-sections commit. The coordinator's
+    // focus sits on the FOCUSED workspace, not [0].
+    do {
+        let fcoord = WorkspaceCoordinator()
+        let fstore = WorkspaceStore(sessionName: "goty-free",
+            fileURL: URL(fileURLWithPath:
+                NSTemporaryDirectory() + "goty-free-\(UUID().uuidString).json"))
+        fcoord.store = fstore
+        let n0 = fstore.focused!.tabs.count
+        fcoord.newTab()
+        check(fstore.focused!.tabs.count == n0 + 1
+                  && fstore.focused!.tabs.last!.freeTerminal,
+              "newTab() creates a free-terminal tab")
+        if let ws = fstore.focused, let lastId = ws.tabs.last?.id {
+            fcoord.setTabFree(wsId: ws.id, tabId: lastId, free: false)
+            check(fstore.focused!.tabs.last?.freeTerminal == false,
+                  "setTabFree clears the flag")
+            fcoord.setTabFree(wsId: ws.id, tabId: lastId, free: true)
+            check(fstore.focused!.tabs.last?.freeTerminal == true,
+                  "setTabFree sets the flag back")
+        }
+        fcoord.newTab(cwd: "/tmp/fold-a")
+        check(fstore.focused!.tabs.last?.freeTerminal == false,
+              "newTab(cwd:) stays a directory space tab")
+    }
+
     // Local workspace display name is derived, not stored: non-remote
     // always shows "Local" (no rename-at-load migration to rot).
     check(WorkspaceState(id: UUID(), name: "whatever", tabs: [],
@@ -1620,6 +1647,66 @@ func run() {
     check(WorkspaceState(id: UUID(), name: "srv-a", tabs: [],
                          focusedTabIndex: 0, sshHost: "srv-a").displayName == "srv-a",
           "remote keeps the host alias as display name")
+    check(pstore.workspaces[0].tabs.last?.freeTerminal == false,
+          "newTab(cwd:) stays a directory space tab")
+
+    // — Terminals section: free tabs render in their own stack —
+    do {
+        func mkTab(_ id: String, _ cwd: String) -> TabState {
+            TabState(id: id, name: id, panes: [PaneState(id: "p-\(id)", cwd: cwd)])
+        }
+        let sidebar = SidebarView()
+        var ws = WorkspaceState(id: UUID(), name: "local",
+            tabs: [mkTab("a", "/tmp/fold-a"), mkTab("b", "/tmp/fold-b"),
+                   mkTab("c", "/tmp/fold-b")],
+            focusedTabIndex: 0, sshHost: nil)
+        sidebar.render(workspace: ws, statusFor: { _ in nil },
+                       commandFor: { _ in nil }, titleFor: { _ in "t" })
+        check(sidebar.termRowsForTest.isEmpty && sidebar.tabsRowsForTest.count == 3,
+              "no free tabs: all three land in directory sections")
+        ws.tabs[1].freeTerminal = true
+        sidebar.render(workspace: ws, statusFor: { _ in nil },
+                       commandFor: { _ in nil }, titleFor: { _ in "t" })
+        check(sidebar.termRowsForTest.count == 1
+                  && (sidebar.termRowsForTest[0] as? SidebarRowView)?.tabIndex == 1,
+              "the free tab renders in the Terminals stack")
+        check(!sidebar.tabsRowsForTest.contains { ($0 as? SidebarRowView)?.tabIndex == 1 },
+              "SPACES rows exclude the free tab")
+        // cd drift must NOT move it: the pane cwd changes, the flag holds.
+        ws.tabs[1].panes[0].cwd = "/tmp/fold-a"
+        sidebar.render(workspace: ws, statusFor: { _ in nil },
+                       commandFor: { _ in nil }, titleFor: { _ in "t" })
+        check(sidebar.termRowsForTest.count == 1,
+              "free tab stays in Terminals across cwd drift")
+        // T7: the free row's git badge follows the pane's LIVE cwd.
+        var gitCalls: [String] = []
+        sidebar.render(workspace: ws,
+                       gitFor: { cwd in gitCalls.append(cwd); return nil },
+                       statusFor: { _ in nil },
+                       commandFor: { _ in nil }, titleFor: { _ in "t" })
+        check(gitCalls.contains("/tmp/fold-a"),
+              "free row git lookup follows the live cwd")
+    }
+    check(NewSpaceCard.expanded("~") == NSHomeDirectory()
+              && NewSpaceCard.expanded("~/x") == NSHomeDirectory() + "/x"
+              && NewSpaceCard.expanded("/abs") == "/abs",
+          "New Space path ~ expansion")
+    check(NewSpaceCard.validLocal(NewSpaceCard.expanded("~/.."))
+              && !NewSpaceCard.validLocal("/no/such/dir-goty-test"),
+          "New Space local dir validation")
+    // Cross-section drop: pure containment + the commit callback.
+    check(SidebarView.dropTarget(forGlobal: NSPoint(x: 5, y: 5),
+                                 term: NSRect(x: 0, y: 0, width: 10, height: 10),
+                                 spaces: NSRect(x: 100, y: 0, width: 10, height: 10)) == .terminals,
+          "point inside the Terminals rect targets terminals")
+    check(SidebarView.dropTarget(forGlobal: NSPoint(x: 105, y: 5),
+                                 term: NSRect(x: 0, y: 0, width: 10, height: 10),
+                                 spaces: NSRect(x: 100, y: 0, width: 10, height: 10)) == .spaces,
+          "point inside the SPACES rect targets spaces")
+    check(SidebarView.dropTarget(forGlobal: NSPoint(x: 50, y: 5),
+                                 term: NSRect(x: 0, y: 0, width: 10, height: 10),
+                                 spaces: NSRect(x: 100, y: 0, width: 10, height: 10)) == .none,
+          "point outside both rects targets none")
 
     // Space identity: one git repo = one space. The resolver collapses
     // subdirs and linked worktrees onto the repo's main root; a

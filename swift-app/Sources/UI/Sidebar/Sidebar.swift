@@ -191,6 +191,11 @@ final class SidebarView: NSView {
     var onNewAgentSessionInDir: ((String, String?) -> Void)?
     /// Availability for the + menu's agent entries; nil = local PATH.
     var agentAvailable: ((String) -> Bool)?
+    /// Cross-section drop (Terminals ⇄ SPACES): (tabIndex, toFree).
+    /// SPACES 标题"+":打开 New Space 面板(选目录建 space)。
+    var onNewSpace: (() -> Void)?
+    /// Cross-section drop (Terminals ⇄ SPACES): (tabIndex, toFree).
+    var onCrossSectionDrop: ((Int, Bool) -> Void)?
     /// Per-space "+" → "New Worktree…" — the git-repo-only entry of the
     /// space menu. Fires with the section's directory.
     var onNewWorktreeInDir: ((String?) -> Void)?
@@ -223,7 +228,7 @@ final class SidebarView: NSView {
         // it cuts AppKit's drag-event delivery to the mouse-down view
         // (the stuck-lift report: one drag event lands, then no
         // movement and no mouseUp ever arrive).
-        let stack = tabsStack
+        let stack = (row.spaceKey == "terminals") ? termStack : tabsStack
         let siblings = stack.arrangedSubviews.compactMap { $0 as? SidebarRowView }
             .filter { $0 !== row && $0.spaceKey == row.spaceKey
                 && $0.tabIndex != nil && !$0.isHidden }
@@ -242,6 +247,9 @@ final class SidebarView: NSView {
             }
         case .leftMouseUp:
             endDrag()
+            if commitCrossSectionIfNeeded(row: row, locationInWindow: event.locationInWindow) {
+                return
+            }
             let order: [Int] = stack.arrangedSubviews.compactMap { v in
                 guard let r = v as? SidebarRowView, r.spaceKey == row.spaceKey,
                       let idx = r.tabIndex else { return nil }
@@ -256,6 +264,41 @@ final class SidebarView: NSView {
             endDrag()   // cancelled: ghost down, dim off, no commit
         }
     }
+
+    // MARK: - Cross-section drop (Terminals ⇄ SPACES)
+
+    enum DropZone { case terminals, spaces, none }
+
+    /// Pure containment: which section stack a window-space point sits
+    /// over (rects pre-converted to the same coordinate space).
+    static func dropTarget(forGlobal p: NSPoint, term: NSRect, spaces: NSRect) -> DropZone {
+        if term.contains(p) { return .terminals }
+        if spaces.contains(p) { return .spaces }
+        return .none
+    }
+
+    /// A drop landing on the OTHER section's stack moves the tab across:
+    /// directory → Terminals sets freeTerminal, Terminals → SPACES
+    /// clears it. Same-section drops fall through to the reorder path.
+    @discardableResult
+    func commitCrossSectionIfNeeded(row: SidebarRowView, locationInWindow: NSPoint) -> Bool {
+        guard let idx = row.tabIndex else { return false }
+        let termFrame = termStack.convert(termStack.bounds, to: nil)
+        let spacesFrame = tabsStack.convert(tabsStack.bounds, to: nil)
+        let zone = Self.dropTarget(forGlobal: locationInWindow,
+                                   term: termFrame, spaces: spacesFrame)
+        let fromTerm = row.spaceKey == "terminals"
+        if !fromTerm, zone == .terminals {
+            onCrossSectionDrop?(idx, true)
+            return true
+        }
+        if fromTerm, zone == .spaces {
+            onCrossSectionDrop?(idx, false)
+            return true
+        }
+        return false
+    }
+
 
     /// Lift: snapshot the row into a shadowed ghost that tracks the
     /// pointer; the row itself dims in place and becomes the slot.
@@ -419,10 +462,9 @@ final class SidebarView: NSView {
     func spaceHeaderExpandedForTest(_ foldKey: String) -> Bool? {
         spaceFoldHeaders[foldKey]?.isExpandedForTest
     }
+    var termRowsForTest: [NSView] { termStack.arrangedSubviews }
     /// Host picker for the Servers '+': one entry per SSH alias, then
     /// the manager entry (parse/add/edit/delete of ~/.ssh/config —
-    /// hosts not in the file get added THERE, not through a prompt).
-    /// Pure list + pure router — the flyout renders it, tests fire it
     /// (the 2026-08-23 dead-items bug: every entry must carry its host
     /// or the click does nothing).
     func hostPickerEntries(hosts: [String]) -> [HostPickerEntry] {
@@ -479,19 +521,26 @@ final class SidebarView: NSView {
         guard let pair = sender.representedObject as? [String], pair.count == 2 else { return }
         onNewAgentSessionInDir?(pair[0], pair[1] == "" ? nil : pair[1])
     }
-
     @objc fileprivate func spacePlusTerminalAction(_ sender: NSMenuItem) {
         onNewTabInDir?(sender.representedObject as? String)
     }
-
     @objc fileprivate func spacePlusWorktreeAction(_ sender: NSMenuItem) {
         onNewWorktreeInDir?(sender.representedObject as? String)
     }
-    private let wsStack = NSStackView()
     private lazy var tabsHeader: NSView = sectionHeader("Spaces",
+                                                        plus: { [weak self] _ in
+        self?.onNewSpace?()
+    }, emphasized: true)
+    private let wsStack = NSStackView()
+    /// The top-level Terminals section: free terminals live ABOVE
+    /// SPACES (directory-independent work). Same emphasized title,
+    /// own stack, own divider.
+    private lazy var termHeader: NSView = sectionHeader("Terminals",
                                                         plus: { [weak self] _ in
         self?.onNewTab?()
     }, emphasized: true)
+    private let termStack = NSStackView()
+    private let divider2 = HairlineView()
     private let tabsStack = NSStackView()
     private var widthHandle: WidthHandle?
 
@@ -522,7 +571,6 @@ final class SidebarView: NSView {
         handle.onDrag = { [weak self] width in
             self?.onWidthChange?(width)
         }
-        widthHandle = handle
         handle.translatesAutoresizingMaskIntoConstraints = false
         addSubview(handle)
         NSLayoutConstraint.activate([
@@ -532,7 +580,8 @@ final class SidebarView: NSView {
             handle.widthAnchor.constraint(equalToConstant: 5),
         ])
 
-        for (stack, head) in [(wsStack, wsHeader), (tabsStack, tabsHeader)] {
+        for (stack, head) in [(wsStack, wsHeader), (termStack, termHeader),
+                               (tabsStack, tabsHeader)] {
             stack.orientation = .vertical
             stack.alignment = .leading
             stack.spacing = 1
@@ -542,11 +591,12 @@ final class SidebarView: NSView {
             addSubview(head)
         }
 
-        // Section divider: Servers and Spaces read as two areas (tty7's
-        // sidebar rules off its groups).
+        // Section dividers: Servers | Terminals | Spaces read as three
+        // areas (tty7's sidebar rules off its groups).
         divider.translatesAutoresizingMaskIntoConstraints = false
         addSubview(divider)
-
+        divider2.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(divider2)
 
         NSLayoutConstraint.activate([
             sep.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -563,13 +613,24 @@ final class SidebarView: NSView {
             divider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
             divider.topAnchor.constraint(equalTo: wsStack.bottomAnchor, constant: 10),
             divider.heightAnchor.constraint(equalToConstant: 1),
-            tabsHeader.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 10),
+            termHeader.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 10),
+            termHeader.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
+            termHeader.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
+            termStack.topAnchor.constraint(equalTo: termHeader.bottomAnchor, constant: 8),
+            termStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
+            termStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
+            divider2.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
+            divider2.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
+            divider2.topAnchor.constraint(equalTo: termStack.bottomAnchor, constant: 10),
+            divider2.heightAnchor.constraint(equalToConstant: 1),
+            tabsHeader.topAnchor.constraint(equalTo: divider2.bottomAnchor, constant: 10),
             tabsHeader.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
             tabsHeader.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
             tabsStack.topAnchor.constraint(equalTo: tabsHeader.bottomAnchor, constant: 8),
             tabsStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
             tabsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
         ])
+
 
         // Collapsed rail: the window titlebar (always up) carries the
         // expand toggle now — the rail itself is just the server dots.
@@ -654,6 +715,9 @@ final class SidebarView: NSView {
         wsHeader.isHidden = collapsed
         wsStack.isHidden = collapsed
         divider.isHidden = collapsed
+        termHeader.isHidden = collapsed
+        termStack.isHidden = collapsed
+        divider2.isHidden = collapsed
         tabsHeader.isHidden = collapsed
         tabsStack.isHidden = collapsed
         widthHandle?.isHidden = collapsed
@@ -721,7 +785,7 @@ final class SidebarView: NSView {
             // repo must not re-fire the render — only a real space move
             // (different key) does.
             let space = tab.panes.first?.cwd.map { spaceRoot?($0) ?? $0 }
-            signature += "|\(tab.id):\(space ?? "-")"
+            signature += "|\(tab.id):\(space ?? "-"):\(tab.freeTerminal ? "free" : "-")"
                 + ":\(tab.icon ?? "-"):\(tab.color ?? "-"):\(tab.userTitle ?? "-")"
                 + ":\(display):\(tab.id == workspace.focusedTab?.id)"
                 + ":\(status.map { "\($0.activity)|\($0.seen)|\($0.spinner.map(String.init) ?? "")" } ?? "-")"
@@ -742,11 +806,75 @@ final class SidebarView: NSView {
                    symbol: "wifi.exclamationmark", selected: false) {}
             return
         }
+
         var desired: [NSView] = []
+        var desiredTerm: [NSView] = []
         var nextRows: [String: SidebarRowView] = [:]
         var nextHeaders: [String: SectionHeaderView] = [:]
         var nextFoldHeaders: [String: SectionHeaderView] = [:]
         var nextSectionViews: [String: [NSView]] = [:]
+        // One row builder shared by BOTH sections: directory rows land
+        // in tabsStack (keyed to their space), free rows in termStack.
+        @discardableResult
+        func renderTabRow(_ tab: TabState, idx: Int, foldKey: String?,
+                          stack: NSStackView) -> SidebarRowView {
+            let selected = idx == workspace.focusedTabIndex
+            // Identity is live: spawn command, or the agent the user is
+            // running in the shell right now (foreground report).
+            let command = commandFor?(tab) ?? tab.paneCommand
+            let spec = AgentCatalog.spec(for: command)
+            let running = AgentCatalog.isAgent(command)
+            let tagColor = tab.color.flatMap { NSColor(hex: $0) }
+            // Brand disc for agent spaces (a custom user icon wins —
+            // their choice replaces the avatar treatment entirely).
+            let avatar = (tab.icon == nil && running) ? spec?.accent : nil
+            // Official logo glyph when we have one (AgentIcons.swift);
+            // a custom user icon still wins over everything.
+            let brand = (tab.icon == nil && running)
+                ? AgentBrandIcons.image(for: AgentCatalog.manifestKey(for: command))
+                : nil
+            if ProcessInfo.processInfo.environment["GOTY_DUMP_VIEWS"] == "1" {
+                print("row-diag: \(tab.name) cmd=\(command ?? "nil") brand=\(brand != nil) avatar=\(avatar != nil)")
+            }
+            let git = tab.panes.first?.cwd.flatMap { gitFor?($0) }
+            let meta = git == nil ? spec?.label : nil
+            // Display name, ghostty's title rule: a user rename wins;
+            // else an agent shows its brand; else the PTY's own window
+            // title (OSC 0/2 through ghostty); else the default counter.
+            let title = titleFor?(tab)
+            let displayName = tab.userTitle ?? tab.agentTitle ?? spec?.label ?? title ?? tab.name
+            // Live TUI status (agent-style badge); no passive evidence
+            // (or a plain shell) shows nothing.
+            let status = running ? statusFor?(tab) : nil
+            let row: SidebarRowView
+            if let reused = tabRows[tab.id] {
+                row = reused
+            } else {
+                row = SidebarRowView(click: {})
+                row.dragHandler = { [weak self] row, event in
+                    self?.handleTabDrag(row, event)
+                }
+                pin(row, to: stack)
+            }
+            // Index-targeted actions rebind per pass: closing a tab
+            // shifts every index after it.
+            row.click = { [weak self] in self?.onTabSelected?(idx) }
+            row.configure(text: displayName,
+                          symbol: tab.icon ?? spec?.icon ?? "terminal",
+                          selected: selected,
+                          tagColor: tagColor, meta: meta,
+                          avatar: avatar, git: git, status: status, brandImage: brand,
+                          tabIndex: idx,
+                          spaceKey: foldKey,
+                          onClose: { [weak self] in self?.onCloseTab?(idx) },
+                          onRename: { [weak self] in self?.onRenameTab?(idx) },
+                          onSetColor: { [weak self] hex in self?.onTabColor?(idx, hex) },
+                          onCommitName: { [weak self] name in self?.onRenameTabTo?(idx, name) },
+                          onSetIcon: { [weak self] symbol in self?.onTabIcon?(idx, symbol) })
+            nextRows[tab.id] = row
+            if stack === termStack { desiredTerm.append(row) } else { desired.append(row) }
+            return row
+        }
         for section in SpaceGrouping.sections(for: workspace.tabs, spaceRoot: spaceRoot) {
             var sectionViews: [NSView] = []   // this section's foldable members
             let dir = workspace.tabs[section.tabIndexs[0]].panes.first?.cwd
@@ -799,63 +927,8 @@ final class SidebarView: NSView {
                 desired.append(header)
             }
             for idx in section.tabIndexs {
-                let tab = workspace.tabs[idx]
-                let selected = idx == workspace.focusedTabIndex
-                // Identity is live: spawn command, or the agent the user is
-                // running in the shell right now (foreground report).
-                let command = commandFor?(tab) ?? tab.paneCommand
-                let spec = AgentCatalog.spec(for: command)
-                let running = AgentCatalog.isAgent(command)
-                let tagColor = tab.color.flatMap { NSColor(hex: $0) }
-                // Brand disc for agent spaces (a custom user icon wins —
-                // their choice replaces the avatar treatment entirely).
-                let avatar = (tab.icon == nil && running) ? spec?.accent : nil
-                // Official logo glyph when we have one (AgentIcons.swift);
-                // a custom user icon still wins over everything.
-                let brand = (tab.icon == nil && running)
-                    ? AgentBrandIcons.image(for: AgentCatalog.manifestKey(for: command))
-                    : nil
-                if ProcessInfo.processInfo.environment["GOTY_DUMP_VIEWS"] == "1" {
-                    print("row-diag: \(tab.name) cmd=\(command ?? "nil") brand=\(brand != nil) avatar=\(avatar != nil)")
-                }
-                let git = tab.panes.first?.cwd.flatMap { gitFor?($0) }
-                let meta = git == nil ? spec?.label : nil
-                // Display name, ghostty's title rule: a user rename
-                // wins; else an agent shows its brand; else the PTY's
-                // own window title (OSC 0/2 through ghostty); else the
-                // default counter. One channel for local and remote.
-                let title = titleFor?(tab)
-                let displayName = tab.userTitle ?? tab.agentTitle ?? spec?.label ?? title ?? tab.name
-                // Live TUI status (agent-style badge); no passive
-                // evidence (or a plain shell) shows nothing.
-                let status = running ? statusFor?(tab) : nil
-                let row: SidebarRowView
-                if let reused = tabRows[tab.id] {
-                    row = reused
-                } else {
-                    row = SidebarRowView(click: {})
-                    row.dragHandler = { [weak self] row, event in
-                        self?.handleTabDrag(row, event)
-                    }
-                    pin(row, to: tabsStack)
-                }
-                // Index-targeted actions rebind per pass: closing a tab
-                // shifts every index after it.
-                row.click = { [weak self] in self?.onTabSelected?(idx) }
-                row.configure(text: displayName,
-                              symbol: tab.icon ?? spec?.icon ?? "terminal",
-                              selected: selected,
-                              tagColor: tagColor, meta: meta,
-                              avatar: avatar, git: git, status: status, brandImage: brand,
-                              tabIndex: idx,
-                              spaceKey: foldKey,
-                              onClose: { [weak self] in self?.onCloseTab?(idx) },
-                              onRename: { [weak self] in self?.onRenameTab?(idx) },
-                              onSetColor: { [weak self] hex in self?.onTabColor?(idx, hex) },
-                              onCommitName: { [weak self] name in self?.onRenameTabTo?(idx, name) },
-                              onSetIcon: { [weak self] symbol in self?.onTabIcon?(idx, symbol) })
-                nextRows[tab.id] = row
-                desired.append(row)
+                let row = renderTabRow(workspace.tabs[idx], idx: idx, foldKey: foldKey,
+                                       stack: tabsStack)
                 sectionViews.append(row)
             }
             if let name = section.name {
@@ -863,20 +936,31 @@ final class SidebarView: NSView {
                 nextSectionViews[dir ?? name] = sectionViews
             }
         }
+        // Free terminals: the top-level Terminals section rides ABOVE
+        // the directory groups, in its own stack. Same row builder,
+        // fixed space key (drag-reorder works inside the section).
+        for idx in SpaceGrouping.freeIndices(in: workspace.tabs) {
+            _ = renderTabRow(workspace.tabs[idx], idx: idx, foldKey: "terminals",
+                             stack: termStack)
+        }
         // Drop closed/switched-away views, then land the desired order.
         // Moving an arranged view never recreates it — bounds, tracking
         // areas and hover state ride along.
-        let keep = Set(desired.map(ObjectIdentifier.init))
-        for v in tabsStack.arrangedSubviews where !keep.contains(ObjectIdentifier(v)) {
-            tabsStack.removeArrangedSubview(v)
-            v.removeFromSuperview()
+        func syncStack(_ stack: NSStackView, _ want: [NSView]) {
+            let keep = Set(want.map(ObjectIdentifier.init))
+            for v in stack.arrangedSubviews where !keep.contains(ObjectIdentifier(v)) {
+                stack.removeArrangedSubview(v)
+                v.removeFromSuperview()
+            }
+            for (i, v) in want.enumerated() {
+                let arranged = stack.arrangedSubviews
+                if i < arranged.count, arranged[i] === v { continue }
+                if arranged.contains(v) { stack.removeArrangedSubview(v) }
+                stack.insertArrangedSubview(v, at: i)
+            }
         }
-        for (i, v) in desired.enumerated() {
-            let arranged = tabsStack.arrangedSubviews
-            if i < arranged.count, arranged[i] === v { continue }
-            if arranged.contains(v) { tabsStack.removeArrangedSubview(v) }
-            tabsStack.insertArrangedSubview(v, at: i)
-        }
+        syncStack(tabsStack, desired)
+        syncStack(termStack, desiredTerm)
         tabRows = nextRows
         spaceHeaders = nextHeaders
         spaceFoldHeaders = nextFoldHeaders
