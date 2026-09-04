@@ -555,8 +555,21 @@ final class OmpSession: PiSession {
                 return
             }
             if let data = response["data"] as? [String: Any] {
-                self.currentModelDescriptor = (data["model"] as? [String: Any])
-                    ?? self.currentModelDescriptor
+                // omp's set_model success carries the model descriptor
+                // AS `data` (rpc-mode: success(id, "set_model", model))
+                // — there is no data.model wrapper. Reading the wrapper
+                // kept the descriptor STALE, so the confirm rebuild
+                // pushed the PREVIOUS model and the chip lagged one
+                // pick behind (pick B showed A; pick C showed B); the
+                // real new value only arrived with the next state
+                // frame — one turn too late.
+                let fresh = (data["model"] as? [String: Any])
+                    ?? ((data["id"] as? String) != nil ? data : nil)
+                self.currentModelDescriptor = fresh ?? self.currentModelDescriptor
+                if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
+                    let cur = self.currentModelDescriptor?["id"] as? String ?? "?"
+                    FileHandle.standardError.write("SET_MODEL ok data.id=\(data["id"] as? String ?? "nil") descriptor=\(cur)\n".data(using: .utf8)!)
+                }
             }
             self.rebuildConfigOptions()
         }
