@@ -58,7 +58,7 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         NSLayoutConstraint.activate([
             label.leadingAnchor.constraint(equalTo: leadingAnchor,
                                            constant: SidebarRowView.iconLeading),
-            heightAnchor.constraint(equalToConstant: 20),
+            heightAnchor.constraint(equalToConstant: 18),
             toggleButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0),
             toggleButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             toggleButton.widthAnchor.constraint(equalToConstant: 20),
@@ -530,15 +530,17 @@ final class SidebarView: NSView {
     private lazy var tabsHeader: NSView = sectionHeader("Spaces",
                                                         plus: { [weak self] _ in
         self?.onNewSpace?()
-    }, emphasized: true)
+    })   // NOT emphasized: Servers is the parent, these are its children
     private let wsStack = NSStackView()
-    /// The top-level Terminals section: free terminals live ABOVE
+    /// The scrollable child content (Terminals + SPACES).
+    private let contentScroll = NSScrollView()
+    private weak var contentClip: NSView?
     /// SPACES (directory-independent work). Same emphasized title,
     /// own stack, own divider.
     private lazy var termHeader: NSView = sectionHeader("Terminals",
                                                         plus: { [weak self] _ in
         self?.onNewTab?()
-    }, emphasized: true)
+    })   // NOT emphasized: Servers is the parent, these are its children
     private let termStack = NSStackView()
     private let divider2 = HairlineView()
     private let tabsStack = NSStackView()
@@ -580,8 +582,11 @@ final class SidebarView: NSView {
             handle.widthAnchor.constraint(equalToConstant: 5),
         ])
 
-        for (stack, head) in [(wsStack, wsHeader), (termStack, termHeader),
-                               (tabsStack, tabsHeader)] {
+        // Density/hierarchy pass (2026-09-04): Servers and its divider
+        // stay PINNED; everything below (Terminals + SPACES) lives in
+        // one borderless scroll area — many tabs never overflow the
+        // window, they scroll.
+        for (stack, head) in [(wsStack, wsHeader)] {
             stack.orientation = .vertical
             stack.alignment = .leading
             stack.spacing = 1
@@ -590,13 +595,33 @@ final class SidebarView: NSView {
             head.translatesAutoresizingMaskIntoConstraints = false
             addSubview(head)
         }
+        let contentClip = NSView()
+        contentClip.translatesAutoresizingMaskIntoConstraints = false
+        for (stack, head) in [(termStack, termHeader), (tabsStack, tabsHeader)] {
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 1
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            contentClip.addSubview(stack)
+            head.translatesAutoresizingMaskIntoConstraints = false
+            contentClip.addSubview(head)
+        }
 
-        // Section dividers: Servers | Terminals | Spaces read as three
-        // areas (tty7's sidebar rules off its groups).
         divider.translatesAutoresizingMaskIntoConstraints = false
         addSubview(divider)
         divider2.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(divider2)
+        contentClip.addSubview(divider2)
+
+        contentScroll.borderType = .noBorder
+        contentScroll.drawsBackground = false
+        contentScroll.hasVerticalScroller = true
+        contentScroll.verticalScroller?.scrollerStyle = .overlay
+        contentScroll.hasHorizontalScroller = false
+        contentScroll.autohidesScrollers = true
+        contentScroll.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(contentScroll)
+        contentScroll.documentView = contentClip
+        self.contentClip = contentClip
 
         NSLayoutConstraint.activate([
             sep.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -611,24 +636,34 @@ final class SidebarView: NSView {
             wsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
             divider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
             divider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
-            divider.topAnchor.constraint(equalTo: wsStack.bottomAnchor, constant: 10),
+            divider.topAnchor.constraint(equalTo: wsStack.bottomAnchor, constant: 8),
             divider.heightAnchor.constraint(equalToConstant: 1),
-            termHeader.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 10),
-            termHeader.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
-            termHeader.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
-            termStack.topAnchor.constraint(equalTo: termHeader.bottomAnchor, constant: 8),
-            termStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
-            termStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
-            divider2.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
-            divider2.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
-            divider2.topAnchor.constraint(equalTo: termStack.bottomAnchor, constant: 10),
+            contentScroll.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 4),
+            contentScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            contentScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            contentScroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            // DocumentView: width follows the clip, height follows the
+            // content (the stack chain below drives it).
+            contentClip.leadingAnchor.constraint(equalTo: contentScroll.leadingAnchor),
+            contentClip.trailingAnchor.constraint(equalTo: contentScroll.trailingAnchor),
+            contentClip.topAnchor.constraint(equalTo: contentScroll.topAnchor),
+            termHeader.topAnchor.constraint(equalTo: contentClip.topAnchor, constant: 6),
+            termHeader.leadingAnchor.constraint(equalTo: contentClip.leadingAnchor, constant: SidebarRowView.stackInset),
+            termHeader.trailingAnchor.constraint(equalTo: contentClip.trailingAnchor, constant: -SidebarRowView.stackInset),
+            termStack.topAnchor.constraint(equalTo: termHeader.bottomAnchor, constant: 6),
+            termStack.leadingAnchor.constraint(equalTo: contentClip.leadingAnchor, constant: SidebarRowView.stackInset),
+            termStack.trailingAnchor.constraint(equalTo: contentClip.trailingAnchor, constant: -SidebarRowView.stackInset),
+            divider2.leadingAnchor.constraint(equalTo: contentClip.leadingAnchor, constant: SidebarRowView.stackInset),
+            divider2.trailingAnchor.constraint(equalTo: contentClip.trailingAnchor, constant: -SidebarRowView.stackInset),
+            divider2.topAnchor.constraint(equalTo: termStack.bottomAnchor, constant: 8),
             divider2.heightAnchor.constraint(equalToConstant: 1),
-            tabsHeader.topAnchor.constraint(equalTo: divider2.bottomAnchor, constant: 10),
-            tabsHeader.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
-            tabsHeader.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
-            tabsStack.topAnchor.constraint(equalTo: tabsHeader.bottomAnchor, constant: 8),
-            tabsStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarRowView.stackInset),
-            tabsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -SidebarRowView.stackInset),
+            tabsHeader.topAnchor.constraint(equalTo: divider2.bottomAnchor, constant: 6),
+            tabsHeader.leadingAnchor.constraint(equalTo: contentClip.leadingAnchor, constant: SidebarRowView.stackInset),
+            tabsHeader.trailingAnchor.constraint(equalTo: contentClip.trailingAnchor, constant: -SidebarRowView.stackInset),
+            tabsStack.topAnchor.constraint(equalTo: tabsHeader.bottomAnchor, constant: 6),
+            tabsStack.leadingAnchor.constraint(equalTo: contentClip.leadingAnchor, constant: SidebarRowView.stackInset),
+            tabsStack.trailingAnchor.constraint(equalTo: contentClip.trailingAnchor, constant: -SidebarRowView.stackInset),
+            tabsStack.bottomAnchor.constraint(equalTo: contentClip.bottomAnchor, constant: -10),
         ])
 
 
@@ -691,8 +726,6 @@ final class SidebarView: NSView {
                       onSetIcon: onSetIcon, onDeleteWorkspace: onDeleteWorkspace)
         pin(row, to: stack)
     }
-
-    /// Theme switch (Settings): bump the generation so the next render
     /// rebuilds rows/headers with fresh Chrome.theme colors even with
     /// unchanged data, and repaint the self-drawn fills now.
     func retheme() {
@@ -720,6 +753,7 @@ final class SidebarView: NSView {
         divider2.isHidden = collapsed
         tabsHeader.isHidden = collapsed
         tabsStack.isHidden = collapsed
+        contentScroll.isHidden = collapsed
         widthHandle?.isHidden = collapsed
         railStack.isHidden = !collapsed
     }
@@ -898,7 +932,7 @@ final class SidebarView: NSView {
                     // is above it, so folding doesn't shift the layout
                     // (the position-jump report).
                     let gap = NSView()
-                    gap.heightAnchor.constraint(equalToConstant: 10).isActive = true
+                    gap.heightAnchor.constraint(equalToConstant: 6).isActive = true
                     desired.append(gap)
                 }
                 // The group's "+" opens the SAME add menu for every

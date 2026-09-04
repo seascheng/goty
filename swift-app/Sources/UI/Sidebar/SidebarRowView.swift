@@ -213,11 +213,9 @@ final class SidebarRowView: NSView {
     }
 
     /// Shared row chrome (tty7 tab-sidebar proportions): one fixed leading
-    /// 20pt slot every title aligns behind, tight gutters, rounded pill.
-    static let iconSlot: CGFloat = 20
+    static let iconSlot: CGFloat = 16
     static let iconLeading: CGFloat = 6
     static let textGap: CGFloat = 6
-    /// Stacks and header containers share this sidebar inset — SYMMETRIC
     /// gutters: the pill hugs the panel edge by the same gap on both
     /// sides (3 left / 8 right read as a lopsided row when selected);
     /// the icon sits deep inside its pill.
@@ -243,9 +241,8 @@ final class SidebarRowView: NSView {
         iconView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(iconView)
 
-        labelField.font = .systemFont(ofSize: 13)
         labelField.textColor = .secondaryLabelColor
-        // Terminal titles are paths/commands — the informative end is the
+        labelField.font = .systemFont(ofSize: 12)
         // tail, so overflow keeps it: "…xx/foo.rs", not "xx/foo.rs…".
         labelField.lineBreakMode = .byTruncatingHead
         labelField.cell?.truncatesLastVisibleLine = true
@@ -255,9 +252,8 @@ final class SidebarRowView: NSView {
         labelField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         labelField.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        metaField.font = .systemFont(ofSize: 10.5)
         metaField.textColor = Chrome.theme.secondaryText
-        metaField.lineBreakMode = .byTruncatingTail
+        metaField.font = .systemFont(ofSize: 10)
         metaField.cell?.truncatesLastVisibleLine = true
         metaField.cell?.wraps = false
         metaField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -349,8 +345,10 @@ final class SidebarRowView: NSView {
         self.onSetColor = onSetColor
         self.onCommitName = onCommitName
         closeButton.onClick = onClose
-        // Two-line space rows (44pt); single-line server/action rows (32pt).
-        heightConstraint?.constant = onCommitName != nil ? 44 : 32
+        // Two-line space rows (34pt); single-line server/Terminals rows
+        // (24pt) — the 2026-09-04 density pass: one screen holds ~2×
+        // the rows (see the sidebar scroll + hierarchy change).
+        heightConstraint?.constant = onCommitName != nil ? 34 : 24
         // The git line replaces the plain meta when a repo is known —
         // branch only (the old +/− counts dropped; the status badge
         // carries the live signal now).
@@ -375,7 +373,7 @@ final class SidebarRowView: NSView {
             iconView.isHidden = true
         }
         labelField.stringValue = text
-        labelField.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
+        labelField.font = .systemFont(ofSize: 12, weight: selected ? .semibold : .regular)
         labelField.textColor = !rowEnabled
             ? Chrome.theme.secondaryText.withAlphaComponent(0.5)
             : (selected ? Chrome.theme.foreground : Chrome.theme.secondaryText)

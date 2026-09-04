@@ -1658,12 +1658,16 @@ func run() {
                        commandFor: { _ in nil }, titleFor: { _ in "t" })
         check(sidebar.termRowsForTest.count == 1,
               "free tab stays in Terminals across cwd drift")
-        // Compact rows: 32pt single line (no second line, no inline
-        // rename — F2/context rename still binds on directory rows).
+        // Compact rows: 24pt single line (density pass: 32→24 for
+        // single-line rows, 44→34 for two-line space rows).
         sidebar.layoutSubtreeIfNeeded()
         if let row = sidebar.termRowsForTest[0] as? SidebarRowView {
-            check(row.frame.height == 32,
-                  "free row renders compact (32pt single line)")
+            check(row.frame.height == 24,
+                  "free row renders compact (24pt single line)")
+        }
+        if let spaceRow = sidebar.tabsRowsForTest.first as? SidebarRowView {
+            check(spaceRow.frame.height == 34,
+                  "directory row renders 34pt two-line")
         }
     }
     check(NewSpaceCard.expanded("~") == NSHomeDirectory()
