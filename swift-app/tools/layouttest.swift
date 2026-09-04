@@ -1554,7 +1554,17 @@ func run() {
     // always shows "Local" (no rename-at-load migration to rot).
     check(WorkspaceState(id: UUID(), name: "whatever", tabs: [],
                          focusedTabIndex: 0, sshHost: nil).displayName == "Local",
-          "local workspace displays as Local regardless of stored name")
+    // Terminals 顶层区:旧 state 无 freeTerminal 键必须解出 false(零迁移)。
+    do {
+        let legacy = #"{"id":"t1","name":"1","panes":[{"id":"p1","cwd":null}],"paneCommand":null}"#
+        let old = try JSONDecoder().decode(TabState.self, from: Data(legacy.utf8))
+        check(old.freeTerminal == false, "legacy TabState decodes freeTerminal=false")
+        check(TabState(id: "t2", name: "2",
+                       panes: [PaneState(id: "p2", cwd: nil)]).freeTerminal == false,
+              "memberwise default freeTerminal=false")
+    } catch {
+        check(false, "TabState legacy decode threw: \(error)")
+    }
     check(WorkspaceState(id: UUID(), name: "srv-a", tabs: [],
                          focusedTabIndex: 0, sshHost: "srv-a").displayName == "srv-a",
           "remote keeps the host alias as display name")

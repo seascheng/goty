@@ -98,6 +98,48 @@ struct TabState: Codable {
     var color: String?
     /// User icon tag (SF Symbol name); nil = default terminal glyph.
     var icon: String?
+    /// 自由终端:属于顶层 Terminals 区,不参与目录分组。pane 的
+    /// live cwd 只喂右侧 file 面板与 git 徽章。旧 state 无此键 → false。
+    var freeTerminal: Bool = false
+
+    init(id: String, name: String, panes: [PaneState], paneCommand: String? = nil,
+         freeTerminal: Bool = false) {
+        self.id = id
+        self.name = name
+        self.panes = panes
+        self.paneCommand = paneCommand
+        self.freeTerminal = freeTerminal
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, userTitle, agentTitle, panes, paneCommand, color, icon
+        case freeTerminal
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        userTitle = try c.decodeIfPresent(String.self, forKey: .userTitle)
+        agentTitle = try c.decodeIfPresent(String.self, forKey: .agentTitle)
+        panes = try c.decode([PaneState].self, forKey: .panes)
+        paneCommand = try c.decodeIfPresent(String.self, forKey: .paneCommand)
+        color = try c.decodeIfPresent(String.self, forKey: .color)
+        freeTerminal = try c.decodeIfPresent(Bool.self, forKey: .freeTerminal) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encodeIfPresent(userTitle, forKey: .userTitle)
+        try c.encodeIfPresent(agentTitle, forKey: .agentTitle)
+        try c.encode(panes, forKey: .panes)
+        try c.encodeIfPresent(paneCommand, forKey: .paneCommand)
+        try c.encodeIfPresent(color, forKey: .color)
+        try c.encodeIfPresent(icon, forKey: .icon)
+        try c.encode(freeTerminal, forKey: .freeTerminal)
+    }
 }
 
 struct WorkspaceState: Codable {
