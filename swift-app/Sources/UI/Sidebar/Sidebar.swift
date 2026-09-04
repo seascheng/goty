@@ -423,7 +423,6 @@ final class SidebarView: NSView {
     /// Fold key (directory root) → that section's header — the icon flip
     /// target. NOT spaceHeaders: that map is keyed by DISPLAY name, and
     /// the two keys differ ("fold-a" vs "/tmp/fold-a") — looking the
-    /// header up by fold key there always missed, freezing the chevron
     /// at its configure-time glyph (the icon-never-flips report).
     private var spaceFoldHeaders: [String: SectionHeaderView] = [:]
     var onSpaceFoldsChange: (([String]) -> Void)?
@@ -455,9 +454,9 @@ final class SidebarView: NSView {
     var tabsRowsForTest: [NSView] {
         tabsStack.arrangedSubviews.compactMap { $0 as? SidebarRowView }
     }
-    var tabsVisibleForTest: [NSView] {
-        tabsStack.arrangedSubviews.filter { !$0.isHidden }
-    }
+    var contentScrollFrameForTest: NSRect { contentScroll.frame }
+    var termHeaderFrameForTest: NSRect { termHeader.frame }
+    var wsStackFrameForTest: NSRect { wsStack.frame }
     /// Chevron state of a space section (fold key = directory root).
     func spaceHeaderExpandedForTest(_ foldKey: String) -> Bool? {
         spaceFoldHeaders[foldKey]?.isExpandedForTest
@@ -532,11 +531,17 @@ final class SidebarView: NSView {
         self?.onNewSpace?()
     })   // NOT emphasized: Servers is the parent, these are its children
     private let wsStack = NSStackView()
-    /// The scrollable child content (Terminals + SPACES).
     private let contentScroll = NSScrollView()
     private weak var contentClip: NSView?
-    /// SPACES (directory-independent work). Same emphasized title,
-    /// own stack, own divider.
+    /// The Terminals+SPACES document view. FLIPPED: NSClipView lays a
+    /// flipped document view out from the TOP, so short content
+    /// top-aligns instead of sinking to the bottom of the scroll area.
+    final class SidebarContentClipView: NSView {
+        override var isFlipped: Bool { true }
+    }
+
+    /// own stack, own divider. The scroll area (contentScroll) below
+    /// carries both child sections.
     private lazy var termHeader: NSView = sectionHeader("Terminals",
                                                         plus: { [weak self] _ in
         self?.onNewTab?()
@@ -595,7 +600,7 @@ final class SidebarView: NSView {
             head.translatesAutoresizingMaskIntoConstraints = false
             addSubview(head)
         }
-        let contentClip = NSView()
+        let contentClip = SidebarContentClipView()
         contentClip.translatesAutoresizingMaskIntoConstraints = false
         for (stack, head) in [(termStack, termHeader), (tabsStack, tabsHeader)] {
             stack.orientation = .vertical
@@ -642,11 +647,17 @@ final class SidebarView: NSView {
             contentScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             contentScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             contentScroll.bottomAnchor.constraint(equalTo: bottomAnchor),
-            // DocumentView: width follows the clip, height follows the
-            // content (the stack chain below drives it).
+            // DocumentView is FLIPPED (see SidebarContentClipView) so
+            // short content top-aligns inside the clip — no height
+            // floor needed. A required "clip >= scroll" floor here was
+            // the ROOT CAUSE of the stretched SERVERS section: scroll
+            // height = window - servers, so that constraint made the
+            // servers height the only free variable and autolayout
+            // inflated it until the scroll got shorter than the content.
             contentClip.leadingAnchor.constraint(equalTo: contentScroll.leadingAnchor),
             contentClip.trailingAnchor.constraint(equalTo: contentScroll.trailingAnchor),
             contentClip.topAnchor.constraint(equalTo: contentScroll.topAnchor),
+            contentClip.bottomAnchor.constraint(equalTo: contentScroll.bottomAnchor),
             termHeader.topAnchor.constraint(equalTo: contentClip.topAnchor, constant: 6),
             termHeader.leadingAnchor.constraint(equalTo: contentClip.leadingAnchor, constant: SidebarRowView.stackInset),
             termHeader.trailingAnchor.constraint(equalTo: contentClip.trailingAnchor, constant: -SidebarRowView.stackInset),

@@ -1669,6 +1669,26 @@ func run() {
             check(spaceRow.frame.height == 34,
                   "directory row renders 34pt two-line")
         }
+        // Scroll alignment: short content grows DOWN from the top —
+        // the Terminals header hugs the scroll area's top edge, and
+        // the scroll never pushes the SERVERS section around.
+        let sidebarBox = SidebarView()
+        sidebarBox.frame = NSRect(x: 0, y: 0, width: 220, height: 600)
+        sidebarBox.render(workspace: ws, statusFor: { _ in nil },
+                          commandFor: { _ in nil }, titleFor: { _ in "t" })
+        sidebarBox.layoutSubtreeIfNeeded()
+        let headGap = sidebarBox.termHeaderFrameForTest.minY
+            - sidebarBox.contentScrollFrameForTest.minY
+        check(headGap >= 0 && headGap < 12,
+              "Terminals header tops the scroll area (gap \(headGap))")
+        check(sidebarBox.contentScrollFrameForTest.maxY <= 600,
+              "scroll stays inside the sidebar bounds")
+        // THE regression this whole pass fixes: the servers stack keeps
+        // its content height (3×24 + 2×1 spacing) — autolayout must
+        // never inflate it to satisfy the scroll's fill floor.
+        let wsH = sidebarBox.wsStackFrameForTest.height
+        check(abs(wsH - 74) < 1,
+              "servers stack keeps content height (got \(wsH), want 74)")
     }
     check(NewSpaceCard.expanded("~") == NSHomeDirectory()
               && NewSpaceCard.expanded("~/x") == NSHomeDirectory() + "/x"
