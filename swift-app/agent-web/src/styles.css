@@ -216,6 +216,16 @@ body {
   width: 7px; height: 7px; border-radius: 50%; flex: none; margin-left: auto;
   background: var(--working); animation: pulse 1.2s ease-in-out infinite;
 }
+
+/* Session-outline rows (pane-head messages popover): single line,
+   newest first — whitespace-collapsed text with an ellipsis tail. */
+.msg-row {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  padding: 5px 12px; font: inherit; font-size: 12px; line-height: 1.5;
+  color: var(--fg-muted); background: none; border: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.msg-row:hover { background: var(--surface2); color: var(--foreground); }
 /* cwd/branch live in a quiet strip ABOVE the input, not in the toolbar */
 .composer-meta {
   display: flex; align-items: center; gap: 10px;

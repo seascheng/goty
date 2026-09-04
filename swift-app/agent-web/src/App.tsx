@@ -472,7 +472,7 @@ function SubagentLine({ rows }: { rows: { id: string; state?: string | null;
 /// whole knob list, so this component is stateless about current values.
 /// Minimal 24px stroke icons (lucide-style geometry, no dependency).
 function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking"
-  | "stop" | "send" | "folder" | "branch" | "copy" | "check" }) {
+  | "stop" | "send" | "folder" | "branch" | "copy" | "check" | "messages" }) {
   const common = { width: 13, height: 13, viewBox: "0 0 24 24", fill: "none",
                    stroke: "currentColor", strokeWidth: 2,
                    strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
@@ -497,6 +497,8 @@ function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking"
       return <svg {...common}><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>;
     case "check":
       return <svg {...common}><path d="M20 6 9 17l-5-5" /></svg>;
+    case "messages":
+      return <svg {...common}><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" /></svg>;
   }
 }
 
@@ -775,6 +777,43 @@ function HistoryChip({ open, onToggle, onSelect }: {
               ))}
             </div>
           )}
+        </Popover>
+      )}
+    </span>
+  );
+}
+
+/// Session outline: every USER turn in the loaded transcript, newest
+/// first. Purely derived from store.blocks — scrolling up to page in
+/// older history refreshes the list for free (the store notifies on
+/// every prepend). Clicking a row parks the viewport (so the window
+/// trim never unmounts the target) and jumps; a target above the
+/// mounted window grows the window to it first.
+function MessagesChip({ open, onToggle, onJump }: {
+  open: boolean; onToggle: () => void; onJump: (blockIndex: number) => void;
+}) {
+  const wrap = useRef<HTMLSpanElement>(null);
+  const turns = store.blocks
+    .flatMap((b, i) => (b.kind === "user" ? [{ b, i }] : []))
+    .reverse();
+  return (
+    <span ref={wrap} className="chip-wrap">
+      <button className={"icon-chip" + (open ? " open" : "")} title="本会话消息"
+        aria-label="本会话消息" aria-haspopup="dialog" aria-expanded={open}
+        onMouseDown={(e) => e.preventDefault()} onClick={onToggle}>
+        <Icon kind="messages" />
+      </button>
+      {open && (
+        <Popover anchor={wrap} side="bottom" width={360} maxHeight={340}
+          onDismiss={onToggle} role="dialog" aria-label="本会话消息"
+          className="overflow-y-auto overscroll-none py-1">
+          {turns.length === 0 && <div className="slash-desc">暂无已发送的消息</div>}
+          {turns.map(({ b, i }) => (
+            <button key={b.id} className="msg-row" title={b.text}
+              onClick={() => onJump(i)}>
+              {b.text.replace(/\s+/g, " ").trim() || "(空)"}
+            </button>
+          ))}
         </Popover>
       )}
     </span>
@@ -1502,7 +1541,6 @@ function TurnActions({ text, entryId }: { text: string; entryId: string | null |
     </div>
   );
 }
-
 /// One transcript row. Memoized: during replay only the newest blocks
 /// change identity, so scroll-up pagination re-renders just the newly
 /// revealed rows and streaming re-renders only the tail block.
@@ -1511,7 +1549,7 @@ const BlockView = React.memo(
       { block: Block; showBranch?: boolean; isTail?: boolean }) {
     switch (block.kind) {
       case "user": return (
-        <div className="user-row">
+        <div className="user-row" data-bid={block.id}>
           <div className="user">{block.text}</div>
         </div>
       );
@@ -1773,6 +1811,27 @@ export function App() {
     }
   };
 
+  // Session-outline jump: park FIRST (the onScroll echo of a
+  // programmatic scroll must settle by measurement, and the window
+  // trim must not unmount a target the user deliberately left the
+  const [msgPop, setMsgPop] = useState(false);
+
+  const jumpToUser = (idx: number) => {
+    setMsgPop(false);
+    parked.current = true;
+    requestAnimationFrame(() => {
+      const id = store.blocks[idx]?.id;
+      const el = id != null
+        ? scroller.current?.querySelector(`[data-bid="${id}"]`) : null;
+      if (!el) return;
+      // Long hops land INSTANTLY — a multi-second smooth flight across
+      // thousands of pixels reads as a glitch (and any reflow mid-flight
+      // cancels the animation halfway, the "stuck in the middle" jump).
+      const distance = Math.abs(el.getBoundingClientRect().top);
+      el.scrollIntoView({ behavior: distance > 2000 ? "auto" : "smooth", block: "start" });
+    });
+  };
+
   const jumpToBottom = () => {
     // Explicit command: release parking AND revoke input evidence (the
     // user just told us they want the tail — stale intent must not
@@ -1790,6 +1849,11 @@ export function App() {
   return (
     <div className="pane">
         <div className="pane-head">
+          {/* Session outline lives in the header, ahead of the logo —
+              the breathing dot owns the right edge. */}
+          <MessagesChip open={msgPop}
+            onToggle={() => setMsgPop(!msgPop)}
+            onJump={jumpToUser} />
           {store.meta?.icon && (
             <img className="pane-head-icon" src={store.meta.icon} alt="" draggable={false} />
           )}
