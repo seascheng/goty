@@ -670,7 +670,11 @@ final class PaneHost: NSView {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.sendText("\u{15}")
-            self.onAITask?(self, text)
+            if text.isEmpty {
+                self.openAIInputMode()
+            } else {
+                self.onAITask?(self, text)
+            }
         }
     }
 
@@ -710,7 +714,11 @@ final class PaneHost: NSView {
         sendText("\u{15}")
         switch match.kind {
         case .ai:
-            onAITask?(self, match.text)
+            if match.text.isEmpty {
+                openAIInputMode()
+            } else {
+                onAITask?(self, match.text)
+            }
         case .agent(let key):
             onAgentSessionTrigger?(self, key, match.text.isEmpty ? nil : match.text)
         case .tty:

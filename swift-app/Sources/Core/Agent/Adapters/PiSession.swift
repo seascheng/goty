@@ -112,10 +112,13 @@ class PiSession: AgentSessioning {
     private var chunkAssemblies: [String: ChunkAssembly] = [:]
 
     /// Integrity accounting.
-    private(set) var framesRouted = 0
+    var framesRouted = 0
     /// Extension dialog frames awaiting an answer: rpc frame id →
-    /// method ("select"/"confirm"/"input"/"editor"/"open_url").
-    private var pendingDialogs: [Int: String] = [:]
+    /// method ("select"/"confirm"/"input"/"editor"/"open_url"). The id
+    /// is stored as the JSON value omp/pi sent (omp Snowflake ids are
+    /// STRINGS; older builds number them) so the response echoes the
+    /// exact shape back.
+    private var pendingDialogs: [String: (jsonId: Any, method: String)] = [:]
     /// Host-owned tools (set_host_tools), registered once after the
     /// first successful handshake (omp; OmpSession.registerExtras).
     var hostTools: AgentHostTools?
@@ -149,6 +152,10 @@ class PiSession: AgentSessioning {
     var runsOnThisMac: Bool { !daemon.isRemote }
     /// omp renders its transcript from the session store, not the ring.
     var suppressesRingReplay: Bool { false }
+    /// pi-mono --mode flag. omp uses rpc-ui (the extension-UI channel —
+    /// the ask tool only registers when the harness reports a UI); plain
+    /// pi stays rpc (its builds may lack rpc-ui).
+    class var spawnMode: String { "rpc" }
     /// Dialect resume/argv decoration (omp: --cwd/--resume + replay
     /// gate; pi: --session when the store still has it).
     func appendSpawnArgs(_ args: inout [String], resume sessionId: String?) {}
@@ -263,7 +270,7 @@ class PiSession: AgentSessioning {
         // lock-guarded (PaneSession write lock, responseLock).
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            var args = ["--mode", "rpc"]
+            var args = ["--mode", Self.spawnMode]
             self.appendSpawnArgs(&args, resume: sessionId)
             // omp: the handshake is gated on the ready frame (see
             // OmpSession.interceptProtocolFrame) — the process answers
@@ -485,26 +492,25 @@ class PiSession: AgentSessioning {
     func cancel() {
         channel.send(["type": "abort"])
     }
-
     func setConfigOption(id: String, value: String) {}
 
     func respondPermission(requestID: String, optionId: String) {
         // Every interactive prompt in rpc mode rides extension dialogs
-        // (approvals = select). Answer by the recorded method shape:
+        // (approvals = select; ask questions arrive as sequential
+        // select frames). Answer by the recorded method shape:
         // select/input/editor → value, confirm → boolean, the rest →
-        // cancelled.
-        guard let id = Int(requestID),
-              let method = pendingDialogs.removeValue(forKey: id) else { return }
-        switch method {
+        // cancelled. The id echoes back in the JSON type it arrived as.
+        guard let dialog = pendingDialogs.removeValue(forKey: requestID) else { return }
+        switch dialog.method {
         case "select", "input", "editor":
             channel.send(["type": "extension_ui_response",
-                          "id": id, "value": optionId])
+                          "id": dialog.jsonId, "value": optionId])
         case "confirm":
             channel.send(["type": "extension_ui_response",
-                          "id": id, "confirmed": optionId == "confirm"])
+                          "id": dialog.jsonId, "confirmed": optionId == "confirm"])
         default:
             channel.send(["type": "extension_ui_response",
-                          "id": id, "cancelled": true])
+                          "id": dialog.jsonId, "cancelled": true])
         }
     }
 
@@ -698,26 +704,47 @@ class PiSession: AgentSessioning {
             completion?(true)
         }
     }
-
     // MARK: - extension UI (approvals, dialogs, login URLs)
 
+    /// omp Snowflake ids are strings on the wire; older builds and pi
+    /// number them. Normalize to a dictionary key while keeping the RAW
+    /// JSON value for the response echo.
+    private static func dialogKey(_ frame: [String: Any]) -> (key: String, jsonId: Any)? {
+        if let s = frame["id"] as? String { return (s, s) }
+        if let n = frame["id"] as? Int { return (String(n), n) }
+        if let d = frame["id"] as? Double, d == d.rounded() { return (String(Int(d)), Int(d)) }
+        return nil
+    }
+
     private func handleExtensionUI(_ frame: [String: Any]) {
-        guard let rawId = frame["id"] as? Int else { return }
         let method = frame["method"] as? String ?? "select"
+        // cancel: the agent retracted a pending dialog (turn aborted) —
+        // resolve its card so the pane does not wait forever.
+        if method == "cancel",
+           let target = frame["targetId"] as? String,
+           pendingDialogs.removeValue(forKey: target) != nil {
+            emit([.permissionResolved(requestID: target)])
+            return
+        }
+        guard let id = Self.dialogKey(frame) else { return }
         let title = (frame["title"] as? String) ?? (frame["message"] as? String)
         switch method {
         case "select":
-            let options = ((frame["options"] as? [String]) ?? [])
-                .map { AgentPermissionOption(optionId: $0, name: $0, kind: nil) }
+            let details = frame["optionDetails"] as? [[String: Any]]
+            let options = ((frame["options"] as? [String]) ?? []).enumerated().map { index, label in
+                AgentPermissionOption(
+                    optionId: label, name: label, kind: nil,
+                    detail: details?[index]["description"] as? String)
+            }
             guard !options.isEmpty else { return }
-            pendingDialogs[rawId] = method
+            pendingDialogs[id.key] = (id.jsonId, method)
             emit([.permissionRequested(AgentPermissionPrompt(
-                requestID: String(rawId), toolCallTitle: title,
+                requestID: id.key, toolCallTitle: title,
                 options: options, dialog: "select"))])
         case "confirm":
-            pendingDialogs[rawId] = method
+            pendingDialogs[id.key] = (id.jsonId, method)
             emit([.permissionRequested(AgentPermissionPrompt(
-                requestID: String(rawId), toolCallTitle: title,
+                requestID: id.key, toolCallTitle: title,
                 options: [
                     AgentPermissionOption(optionId: "confirm",
                                           name: "确认", kind: "allow"),
@@ -725,18 +752,20 @@ class PiSession: AgentSessioning {
                                           name: "取消", kind: nil),
                 ], dialog: "confirm"))])
         case "input", "editor":
-            pendingDialogs[rawId] = method
+            pendingDialogs[id.key] = (id.jsonId, method)
             emit([.permissionRequested(AgentPermissionPrompt(
-                requestID: String(rawId), toolCallTitle: title,
+                requestID: id.key, toolCallTitle: title,
                 options: [], dialog: method,
                 placeholder: frame["placeholder"] as? String,
-                defaultValue: (frame["value"] as? String) ?? (frame["default"] as? String)))])
+                defaultValue: (frame["value"] as? String)
+                    ?? (frame["default"] as? String)
+                    ?? (frame["prefill"] as? String)))])
         case "notify":
-            let message = (frame["message"] as? String) ?? ""
+            let message = frame["message"] as? String ?? ""
             let heading = frame["title"] as? String
             emit([.notice(heading.map { $0 + ": " + message } ?? message)])
         case "setStatus":
-            if let text = (frame["message"] as? String) ?? (frame["status"] as? String) {
+            if let text = frame["message"] as? String ?? frame["status"] as? String {
                 emit([.notice(text)])
             }
         case "open_url":
@@ -745,10 +774,10 @@ class PiSession: AgentSessioning {
             guard let url = frame["url"] as? String else { return }
             emit([.openURL(url)])
             channel.send(["type": "extension_ui_response",
-                          "id": rawId, "value": "opened"])
+                          "id": id.jsonId, "value": "opened"])
         default:
             channel.send(["type": "extension_ui_response",
-                          "id": rawId, "cancelled": true])
+                          "id": id.jsonId, "cancelled": true])
         }
     }
 
@@ -811,6 +840,9 @@ class PiSession: AgentSessioning {
     // AgentSessioning extension defaults so unsupported dialects
     // no-op identically; OmpSession overrides each with the real RPC.
 
+    var capabilities: AgentCapabilities {
+        [.steer, .sessions]
+    }
     func setFastMode(enabled: Bool) {}
     func loginProviders(completion: @escaping ([[String: Any]]) -> Void) {
         completion([])

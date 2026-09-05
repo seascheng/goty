@@ -346,6 +346,10 @@ final class CodexSession: AgentSessioning {
     /// Follow-ups no longer route here: the pane's outbox owns queuing.
     private var pendingMidTurn: [(text: String, images: [AgentImage])] = []
 
+    var capabilities: AgentCapabilities {
+        [.steer]
+    }
+
     func steer(_ text: String, images: [AgentImage]) {
         enqueueMidTurn(text, images: images)
     }

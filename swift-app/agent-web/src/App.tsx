@@ -1402,6 +1402,7 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
             <img className="pane-agent-icon" src={store.meta.icon}
                  alt="" draggable={false} />
           )}
+          {store.meta?.capabilities.includes("sessions") && (
           <HistoryChip open={openPop === "history"}
             onToggle={() => {
               const next = openPop !== "history";
@@ -1413,6 +1414,7 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
               store.apply({ type: "clearTranscript" });
               setOpenPop(null);
             }} />
+          )}
           <button className="icon-chip" title="添加图片（也可 ⌘V 粘贴或拖入）"
             onClick={() => fileInput.current?.click()}>📎</button>
           {store.runtime?.fastEnabled != null && (
@@ -1528,6 +1530,7 @@ function TurnActions({ text, entryId }: { text: string; entryId: string | null |
         }}>
         <Icon kind={copied ? "check" : "copy"} />
       </button>
+      {store.meta?.capabilities.includes("fork") && (
       <button type="button" className="turn-action"
         disabled={branchDisabled}
         title={!entryId
@@ -1541,6 +1544,7 @@ function TurnActions({ text, entryId }: { text: string; entryId: string | null |
         }}>
         <Icon kind="branch" />
       </button>
+      )}
     </div>
   );
 }
@@ -2003,16 +2007,23 @@ export function App() {
 }
 
 /// The agent asked a question / needs approval — RPC extension dialogs
-/// ride the same card: option lists (select/approvals), 确认/取消
-/// (confirm), or a text entry (input/editor).
+/// ride the same card: option lists (select/approvals/ask questions,
+/// each option may carry a muted explanation line), 确认/取消
+/// (confirm), or a text entry (input/editor — ask "Other" answers).
 function PermissionCard({ permission }: {
   permission: NonNullable<typeof store.permission>;
 }) {
   const [value, setValue] = useState(permission.defaultValue ?? "");
   const isInput = permission.dialog === "input" || permission.dialog === "editor";
+  const kind = permission.dialog === "select" ? "选择"
+    : permission.dialog === "confirm" ? "确认"
+    : isInput ? "输入" : "授权";
   return (
     <div className="permission">
-      <div className="perm-title">{permission.toolCallTitle ?? "需要授权"}</div>
+      <div className="perm-title">
+        {permission.toolCallTitle ?? "需要授权"}
+        <span className="perm-kind">{kind}</span>
+      </div>
       {isInput ? (
         <div className="perm-input">
           <input autoFocus value={value}
@@ -2032,7 +2043,8 @@ function PermissionCard({ permission }: {
             <button key={o.optionId}
               className={"btn " + (o.kind?.startsWith("allow") ? "send" : "")}
               onClick={() => postToHost({ type: "permission", optionId: o.optionId })}>
-              {o.name}
+              <span>{o.name}</span>
+              {o.detail && <span className="perm-opt-detail">{o.detail}</span>}
             </button>
           ))}
         </div>

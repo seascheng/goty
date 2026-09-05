@@ -26,7 +26,10 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                      "workspace": nz(m.workspace),
                      "directory": nz(m.directory),
                      "branch": nz(m.branch),
-                     "icon": nz(m.icon)])
+                     "icon": nz(m.icon),
+                     // Adapter capability names — the page hides what the
+                     // adapter would silently no-op (fast/branch/history).
+                     "capabilities": session.capabilities.names])
     }
 
     /// The turn lifecycle as THIS pane sees it. Derived in
@@ -282,7 +285,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
             forURLScheme: "goty")
         // Ephemeral store: asset caches must never outlive a build.
         config.websiteDataStore = WKWebsiteDataStore.nonPersistent()
-        webView = WKWebView(frame: .zero, configuration: config)
+        webView = HoverFocusWebView(frame: .zero, configuration: config)
         // File inputs (<input type="file">) hand their open panel to the
         // UI delegate and NEVER fall back — assigned after super.init
         // below ('self' pre-super is illegal); see runOpenPanelWith.
@@ -988,7 +991,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                     // adapter omits ready).
                     self.handshakeDone = true
                 case .turnEnded, .plan, .commandsChanged, .usageUpdate,
-                     .permissionRequested, .thoughtChunk, .starting,
+                     .permissionRequested, .permissionResolved, .thoughtChunk, .starting,
                      .runtimeStatus, .notice, .statusFlash, .sessionTitle,
                      .backgroundJobs, .subagentUpdate, .entryMark,
                      .openURL, .sessionStats, .historyTruncated,
@@ -1172,5 +1175,60 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
         // array would read as "chose nothing" and leave the panel logic
         // waiting in some WebKit builds.
         completionHandler(panel.runModal() == .OK ? panel.urls : nil)
+    }
+}
+
+/// WKWebView that takes the window responder on HOVER: WebKit consumes
+/// the first real click after the view loses first responder to
+/// re-establish page focus — the models/thinking chips needed a second
+/// click whenever the user had been in native UI (sidebar, terminal,
+/// another pane) first, while clicks stayed smooth as long as the
+/// webview never lost the responder. Dwelling 150ms hands the responder
+/// over BEFORE the click lands, so the click reaches the page (the
+/// same two-click webview bug Craft documented and fixed the same
+/// way). A sweep across the pane exits before the timer fires.
+final class HoverFocusWebView: WKWebView {
+    private var dwell: DispatchWorkItem?
+
+    /// Test seam: a hover dwell is scheduled and not yet fired/cancelled.
+    var hoverDwellPending: Bool { dwell != nil }
+
+    /// The webview (or an internal descendant — the page's text-input
+    /// responder) already owns the keyboard.
+    var ownsResponder: Bool {
+        guard let fr = window?.firstResponder else { return false }
+        return fr === self
+            || (fr is NSView && (fr as! NSView).isDescendant(of: self))
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        // One hover area, auto-synced to the visible rect — updateTracking
+        // re-fires on geometry changes and must not stack duplicates.
+        let tagged = trackingAreas.contains {
+            ($0.userInfo?["hoverFocus"] as? Bool) == true
+        }
+        guard !tagged else { return }
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self, userInfo: ["hoverFocus": true]))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        guard window != nil, !ownsResponder else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.window != nil, !self.ownsResponder else { return }
+            self.window?.makeFirstResponder(self)
+        }
+        dwell = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: item)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        dwell?.cancel()
+        dwell = nil
     }
 }

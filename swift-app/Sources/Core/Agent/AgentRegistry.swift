@@ -60,7 +60,13 @@ enum AgentRegistry {
             // NOTE: ringBytes here is descriptive metadata only — the
             // live value every pi-mono pane spawns with lives in
             // PiSession.openPane (1MB, see the comment there).
-            spawn: AgentSpawn(command: "omp", args: ["--mode", "rpc"],
+            //
+            // rpc-ui = rpc + the extension-UI channel: omp registers the
+            // ask tool (hasUI) and surfaces approvals/questions as
+            // extension_ui_request frames we already bridge. Plain rpc
+            // leaves ask unregistered — brainstorm questions degrade to
+            // plain text A/B lists.
+            spawn: AgentSpawn(command: "omp", args: ["--mode", "rpc-ui"],
                               ringBytes: 1_048_576),
             make: { params in OmpSession(params: params) }),
         AgentDescriptor(
@@ -93,8 +99,9 @@ enum AgentRegistry {
             make: { params in PiLegacySession(params: params) }),
     ]
 
-    /// The omp spawn shape tests construct OmpSession panes with.
-    static let ompSpawn = AgentSpawn(command: "omp", args: ["--mode", "rpc"],
+    /// The omp spawn shape tests construct OmpSession panes with
+    /// (rpc-ui: the extension-UI channel the ask tool needs).
+    static let ompSpawn = AgentSpawn(command: "omp", args: ["--mode", "rpc-ui"],
                                      ringBytes: 67_108_864)
 
     static func descriptor(for key: String) -> AgentDescriptor? {

@@ -211,7 +211,9 @@ final class LineTrigger {
     /// "open the space, no initial prompt".
     static func classify(_ line: [UInt8]) -> Match? {
         for (bytes, kind) in prefixes {
-            if hasPrefix(line, prefix: bytes, requirePayload: kind == .ai) {
+            // A bare "@ai" now opens the ask card, so payload is
+            // optional for every trigger kind.
+            if hasPrefix(line, prefix: bytes, requirePayload: false) {
                 return Match(kind: kind, text: requestText(from: line, prefix: bytes))
             }
         }
@@ -290,9 +292,8 @@ final class LineTrigger {
             guard !before.contains(where: { banned.contains($0) }) else { continue }
             let after = row[r.upperBound..<row.endIndex]
                 .trimmingCharacters(in: .whitespaces)
-            if !after.isEmpty || kind != .ai {
-                return Match(kind: kind, text: after)
-            }
+            // A bare "@ai" on a recalled history line opens the ask card.
+            return Match(kind: kind, text: after)
         }
         return nil
     }

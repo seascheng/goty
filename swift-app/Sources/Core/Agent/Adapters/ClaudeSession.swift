@@ -44,6 +44,14 @@ final class ClaudeSession: AgentSessioning {
         let suggestions: [[String: Any]]
     }
     private var pendingPermissions: [String: PendingPermission] = [:]
+    /// AskUserQuestion in flight (probed 2.1.236: it rides a can_use_tool
+    /// control frame with requires_user_interaction). The full question
+    /// list must be echoed back inside updatedInput alongside `answers`
+    /// keyed by the question TEXT (paseo's normalize contract); the card
+    /// is single-choice, so questions are asked one at a time.
+    private var pendingAsk: (requestID: String, questions: [[String: Any]],
+                             answers: [String: String],
+                             awaitingOther: Bool)? = nil
     /// Session the pane had open when it was last closed (state.json
     /// via AgentPaneParams). Re-loaded on connect — claude's `--print`
     /// processes are ephemeral; the project store is the durable state.
@@ -253,8 +261,84 @@ final class ClaudeSession: AgentSessioning {
                       "request_id": requestID,
                       "request": ["subtype": "interrupt"]])
     }
+    /// One AskUserQuestion question as a choice card: option labels with
+    /// their description lines, plus host-provided "Other" (claude's
+    /// schema expects the host to add it) and a cancel escape.
+    private func emitAskQuestion() {
+        guard let ask = pendingAsk,
+              ask.answers.count < ask.questions.count else { return }
+        let question = ask.questions[ask.answers.count]
+        let text = question["question"] as? String ?? "问题"
+        var options = ((question["options"] as? [[String: Any]]) ?? []).compactMap { option -> AgentPermissionOption? in
+            guard let label = option["label"] as? String else { return nil }
+            return AgentPermissionOption(optionId: label, name: label,
+                                         kind: nil,
+                                         detail: option["description"] as? String)
+        }
+        options.append(AgentPermissionOption(optionId: "__other__",
+                                             name: "Other（自己输入）", kind: nil))
+        options.append(AgentPermissionOption(optionId: "__cancel_ask__",
+                                             name: "取消提问", kind: "reject_once"))
+        let title = ask.questions.count > 1
+            ? "（\(ask.answers.count + 1)/\(ask.questions.count)）\(text)" : text
+        emit([.permissionRequested(AgentPermissionPrompt(
+            requestID: ask.requestID, toolCallTitle: title,
+            options: options, dialog: "select"))])
+    }
 
+    /// Collect one ask answer; when the last question lands, answer the
+    /// original can_use_tool frame with allow + updatedInput{questions,
+    /// answers keyed by question text}.
+    private func answerAsk(requestID: String, optionId: String) {
+        guard var ask = pendingAsk, ask.requestID == requestID else { return }
+        if optionId == "__cancel_ask__" {
+            pendingAsk = nil
+            channel.send(["type": "control_response",
+                          "response": ["subtype": "success",
+                                       "request_id": requestID,
+                                       "response": ["behavior": "deny",
+                                                    "message": "用户取消了提问",
+                                                    "interrupt": false]]])
+            return
+        }
+        if optionId == "__other__" {
+            ask.awaitingOther = true
+            pendingAsk = ask
+            emit([.permissionRequested(AgentPermissionPrompt(
+                requestID: requestID, toolCallTitle: "自定义回答",
+                options: [], dialog: "input", placeholder: "输入你的回答"))])
+            return
+        }
+        let index = ask.answers.count
+        guard index < ask.questions.count else { return }
+        let question = ask.questions[index]
+        guard let text = question["question"] as? String else { return }
+        ask.answers[text] = optionId
+        if ask.answers.count < ask.questions.count {
+            pendingAsk = ask
+            emitAskQuestion()
+            return
+        }
+        pendingAsk = nil
+        let result: [String: Any] = ["behavior": "allow",
+                                     "updatedInput": ["questions": ask.questions,
+                                                      "answers": ask.answers]]
+        channel.send(["type": "control_response",
+                      "response": ["subtype": "success",
+                                   "request_id": requestID,
+                                   "response": result]])
+    }
     func respondPermission(requestID: String, optionId: String) {
+        // AskUserQuestion answers route through the ask interview, not
+        // the allow/deny ladder. Awaiting-other turns the next answer
+        // (free text from the input card) into the question's answer.
+        if pendingAsk?.requestID == requestID {
+            if pendingAsk?.awaitingOther == true, optionId != "__cancel_ask__" {
+                pendingAsk?.awaitingOther = false
+            }
+            answerAsk(requestID: requestID, optionId: optionId)
+            return
+        }
         // Wire shape (raw stream-json, matches the SDK): {type:
         // "control_response", response:{subtype:"success", request_id,
         // response:<PermissionResult>}}. allow MUST echo the input back
@@ -410,6 +494,10 @@ final class ClaudeSession: AgentSessioning {
     /// no longer route here: the pane's outbox owns queuing.
     private var pendingMidTurn: [(text: String, images: [AgentImage])] = []
 
+    var capabilities: AgentCapabilities {
+        [.steer, .sessions]
+    }
+
     func steer(_ text: String, images: [AgentImage]) {
         enqueueMidTurn(text, images: images)
     }
@@ -443,19 +531,26 @@ final class ClaudeSession: AgentSessioning {
         framesRouted += 1
         if ProcessInfo.processInfo.environment["GOTY_CLAUDE_DEBUG"] != nil {
             let kind = (frame["type"] as? String) ?? "?"
-            let sub = (frame["subtype"] as? String) ?? ""
+            let sub = ((frame["request"] as? [String: Any])?["subtype"] as? String) ?? ""
             print("CLAUDE_FRAME \(kind)/\(sub) keys=\(frame.keys.sorted().joined(separator: ","))")
         }
-        // Permission requests ride control_request frames. claude → client
-        // shape: {type:"control_request", request_id, request:{subtype:
-        // "can_use_tool", tool_name, input, suggestions?}} — the SDK's
-        // canUseTool callback wraps this same frame over raw stream-json.
         if frame["type"] as? String == "control_request",
            let request = frame["request"] as? [String: Any],
            let requestID = frame["request_id"] as? String,
            request["subtype"] as? String == "can_use_tool" {
             let toolName = request["tool_name"] as? String ?? "工具"
             let input = request["input"] as? [String: Any] ?? [:]
+            // AskUserQuestion: NOT an approval — a structured interview.
+            // Show each question as a choice card (labels + description
+            // lines), collect answers, then answer the ONE control frame
+            // with updatedInput {questions, answers}.
+            if toolName == "AskUserQuestion",
+               let questions = input["questions"] as? [[String: Any]],
+               !questions.isEmpty {
+                pendingAsk = (requestID, questions, [:], false)
+                emitAskQuestion()
+                return
+            }
             pendingPermissions[requestID] = PendingPermission(
                 toolName: toolName, input: input,
                 suggestions: request["suggestions"] as? [[String: Any]] ?? [])

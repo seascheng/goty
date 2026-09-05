@@ -342,7 +342,7 @@ enum AgentTest {
 
         print("— registry —")
         let omp = AgentRegistry.descriptor(for: "omp")
-        check(omp?.spawn.command == "omp" && omp?.spawn.args == ["--mode", "rpc"], "omp rpc spawn")
+        check(omp?.spawn.command == "omp" && omp?.spawn.args == ["--mode", "rpc-ui"], "omp rpc spawn")
         check(omp?.spawn.ringBytes == 1_048_576,
               "pi-mono panes use the 1 MiB ring (live value: PiSession.openPane)")
         check(AgentRegistry.descriptors.first?.key == "omp", "picker order leads with omp")

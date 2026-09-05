@@ -87,6 +87,9 @@ extension AppDelegate {
             host.hideAITask()
         }
         card.onContinue = { [weak owner] in owner?.continueBudget(taskId: id) }
+        card.onFollowUp = { [weak owner] text in
+            owner?.continueSession(taskId: id, request: text)
+        }
         // Top-right close: always available; closing a still-running
         // agent cancels it first (cancel is inert on terminal phases).
         card.onClose = { [weak owner] in

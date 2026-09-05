@@ -34,6 +34,7 @@ const seeds: unknown[] = [
     "border-accent": "#2f3534",
   } },
   { type: "meta", workspace: "goty", directory: "agent-web", branch: "new-gui",
+    capabilities: ["steer", "sessions", "fastMode", "fork", "export", "stats"],
     icon: "data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10' fill='%2320744a'/%3E%3Ctext x='12' y='16' text-anchor='middle' fill='white' font-size='12'%3Eg%3C/text%3E%3C/svg%3E" },
   { type: "sessionTitle", title: "GUI 实验 · 模型选择弹层" },
   { type: "plan", entries: [

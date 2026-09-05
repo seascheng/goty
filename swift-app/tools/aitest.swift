@@ -131,9 +131,9 @@ import Foundation
         type("@@ai无空格配对\r")
         check(fired.last == "无空格配对", "paired @@ with no space triggers (IME)")
         type("@ai\r")
-        check(fired.last == "无空格配对", "bare @ai with no request does not trigger")
+        check(fired.last == "", "bare @ai triggers with empty request (opens ask card)")
         type("echo @ai mid-line\r")
-        check(fired.last == "无空格配对", "mid-line @ai still does not trigger")
+        check(fired.last == "", "mid-line @ai still does not trigger")
 
         // Agent prefixes (@omp/@claude/…): agentArmed-gated, routed to
         // onAgentTrigger with the manifest key; @ai and @agent are
@@ -266,8 +266,8 @@ import Foundation
               "quoted mid-command @omp passes through")
         check(LineTrigger.requestFromScreenRow("➜  ✗ ls -la") == nil,
               "row without @ai is nil")
-        check(LineTrigger.requestFromScreenRow("➜  ✗ @ai ") == nil,
-              "bare @ai row is nil")
+        check(LineTrigger.requestFromScreenRow("➜  ✗ @ai ") == "",
+              "bare @ai row matches with empty request")
 
         print("— OutputTail —")
         let tail = OutputTail()
@@ -671,6 +671,31 @@ import Foundation
                   "uddg redirect unwrapped (got \(hits.first?.url ?? "-"))")
             check(hits.first?.title == "Example A" && hits.first?.snippet == "snippet a",
                   "title/snippet pair with entity")
+        }
+
+        // Follow-up continues the same wire after the turn ends.
+        do {
+            let m = FakeModel()
+            let e = FakeExec()
+            let doneSem = DispatchSemaphore(value: 0)
+            let followDoneSem = DispatchSemaphore(value: 0)
+            var completions = 0
+            var last: AITask?
+            let coord = AITaskCoordinator(model: m, executorFor: { _ in e })
+            coord.onUpdate = { t in
+                last = t
+                if case .completed = t.phase {
+                    completions += 1
+                    if completions == 1 { doneSem.signal() }
+                    if completions == 2 { followDoneSem.signal() }
+                }
+            }
+            let tid = coord.start(context: AIContext(request: "hi", target: target,
+                                                      visibleOutput: "", hostFacts: ""))
+            check(waitSem(doneSem), "task completes")
+            coord.continueSession(taskId: tid, request: "again")
+            check(waitSem(followDoneSem), "follow-up completes")
+            check(last?.latestRequest == "again", "latestRequest follows the follow-up")
         }
 
         // cancel on a terminal phase is inert (late top-right close)

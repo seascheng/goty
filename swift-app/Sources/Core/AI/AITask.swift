@@ -34,6 +34,10 @@ struct AIRound {
 struct AITask {
     let id: UUID
     let context: AIContext
+    /// The last user question in this temporary session. Starts as the
+    /// original request and updates on every follow-up so the card
+    /// header always shows the current turn.
+    private(set) var latestRequest: String
     private(set) var phase: AITaskPhase
     private(set) var rounds: [AIRound]
     private(set) var pendingProposal: AIProposal?
@@ -46,6 +50,7 @@ struct AITask {
     init(id: UUID = UUID(), context: AIContext, budget: Int = 25) {
         self.id = id
         self.context = context
+        self.latestRequest = context.request
         self.phase = .idle
         self.rounds = []
         self.pendingProposal = nil
@@ -74,6 +79,10 @@ struct AITask {
 
     mutating func setPending(_ proposal: AIProposal?) {
         pendingProposal = proposal
+    }
+
+    mutating func setLatestRequest(_ request: String) {
+        latestRequest = request
     }
 
     /// In-place append (String.append is amortized O(1); the old

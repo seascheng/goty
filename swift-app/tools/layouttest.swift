@@ -40,6 +40,24 @@ func run() {
             }
         }
 
+        // — AITaskCard: the follow-up footer lives only between turns —
+        do {
+            let target = ExecutionTarget(
+                workspaceId: UUID(), paneId: "p1", displayName: "Local",
+                transport: .local, cwd: "/tmp", shell: "/bin/zsh")
+            let context = AIContext(request: "hi", target: target,
+                                    visibleOutput: "", hostFacts: "")
+            let card = AITaskCard(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+            var running = AITask(context: context)
+            running.advance(to: .thinking)
+            card.render(task: running, target: target)
+            check(!card.isFooterVisibleForTest, "footer hidden while the turn runs")
+            var done = AITask(context: context)
+            done.advance(to: .completed(summary: "done"))
+            card.render(task: done, target: target)
+            card.layoutSubtreeIfNeeded()
+            check(card.isFooterVisibleForTest, "footer shows once the turn ends")
+        }
         // — Offline cover: full-region, top strip included (the
         //   "top bar ignores the page color" report) —
         do {
@@ -2060,6 +2078,55 @@ func run() {
               && SidebarRowView.timeAgo(Date(timeIntervalSinceNow: -3700)) == "1h"
               && SidebarRowView.timeAgo(Date(timeIntervalSinceNow: -90_000)) == "1d",
           "timeAgo buckets now/m/h/d")
+
+    print("— agent pane hover-focus webview —")
+    // WebKit swallows the first real click after the webview loses the
+    // responder (the models/thinking two-click bug); dwelling over the
+    // pane hands the responder back BEFORE the click. Drive the enter/
+    // exit hooks directly and assert the dwell semantics.
+    do {
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
+                            styleMask: [.titled], backing: .buffered, defer: false)
+        let web = HoverFocusWebView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        let native = NSTextField(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        host.contentView?.addSubview(web)
+        host.contentView?.addSubview(native)
+        host.makeKeyAndOrderFront(nil)
+        host.makeFirstResponder(native)
+        func pump(_ s: TimeInterval) {
+            let end = Date().addingTimeInterval(s)
+            while Date() < end {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            }
+        }
+        pump(0.1)
+        check(host.firstResponder !== web && !web.ownsResponder,
+              "native field owns the responder before hover")
+        let enter = NSEvent.mouseEvent(with: .mouseMoved, location: NSPoint(x: 50, y: 50),
+                                       modifierFlags: [], timestamp: 0,
+                                       windowNumber: host.windowNumber, context: nil,
+                                       eventNumber: 0, clickCount: 0, pressure: 0)!
+        web.mouseEntered(with: enter)
+        pump(0.3)
+        check(host.firstResponder === web && web.ownsResponder,
+              "150ms dwell hands the responder to the webview")
+        // Dwell cancelled by exiting before it fires. (The responder
+        // itself can't be asserted here: WKWebView asynchronously
+        // re-grabs it after resigning, dwell or not.)
+        host.makeFirstResponder(native)
+        web.mouseEntered(with: enter)
+        check(web.hoverDwellPending, "entering the pane schedules the dwell")
+        web.mouseExited(with: enter)
+        check(!web.hoverDwellPending, "leaving before the dwell cancels it")
+        pump(0.3)
+        // Already owning → no dwell scheduled, no churn.
+        host.makeFirstResponder(web)
+        web.mouseEntered(with: enter)
+        pump(0.3)
+        check(host.firstResponder === web && web.ownsResponder,
+              "hover while already owning is a no-op")
+        host.orderOut(nil)
+    }
 
     // Theme split: the GUI override resolves independently of the
     // terminal `theme` key (Settings ▸ Interface Theme). nil override

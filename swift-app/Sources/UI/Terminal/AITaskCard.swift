@@ -26,6 +26,8 @@ final class AITaskCard: NSView {
     var onClose: (() -> Void)?
     /// Input mode (⌘⇧A): Enter submits the typed request.
     var onSubmit: ((String) -> Void)?
+    /// Follow-up question once the current turn has ended.
+    var onFollowUp: ((String) -> Void)?
 
     private let stack = FlippedStack()
     /// The ask that started the running task — shown as the card's
@@ -38,6 +40,11 @@ final class AITaskCard: NSView {
     private var lastTask: AITask?
     private var lastTarget: ExecutionTarget?
     private var inputField: ChromeInput?
+    /// Fixed footer with the follow-up input field. Collapses when
+    /// hidden because it is an NSStackView.
+    private let footerView = NSStackView()
+    private let footerSeparator = HairlineView()
+    private let followUpField = ChromeInput(placeholder: "Ask a follow-up…")
 
     /// The Settings-window translucency, exactly: ONE background@opacity
     /// fill and theme text on top — no blur (the Settings window itself
@@ -114,6 +121,23 @@ final class AITaskCard: NSView {
         headerRule.translatesAutoresizingMaskIntoConstraints = false
         addSubview(headerRule)
 
+        // Fixed footer with the follow-up input. Hidden until a turn
+        // ends, and hidden again in input mode.
+        footerView.orientation = .vertical
+        footerView.alignment = .leading
+        footerView.spacing = 0
+        footerView.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 8, right: 12)
+        footerView.translatesAutoresizingMaskIntoConstraints = false
+        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
+        followUpField.translatesAutoresizingMaskIntoConstraints = false
+        footerView.addArrangedSubview(footerSeparator)
+        footerView.addArrangedSubview(followUpField)
+        footerSeparator.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        // Hidden until a turn ends; NSStackView collapses hidden
+        // arranged subviews, so the card reclaims the footer's height.
+        setFooterVisible(false)
+        addSubview(footerView)
+
         NSLayoutConstraint.activate([
             titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             titleField.topAnchor.constraint(equalTo: topAnchor, constant: 7),
@@ -133,7 +157,8 @@ final class AITaskCard: NSView {
 
         // The stack scrolls instead of crushing: the card hugs its
         // content up to the pane cap (required constraint from the
-        // host), beyond which the BODY scrolls under the fixed header.
+        // host), beyond which the BODY scrolls under the fixed header
+        // and above the fixed footer.
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
@@ -151,14 +176,17 @@ final class AITaskCard: NSView {
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: headerRule.bottomAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: footerView.topAnchor),
             stack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
             stack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
             stack.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+            footerView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            footerView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            footerView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
-        // The card = fixed header + body; the body hugs its content
-        // (yielding to the host's pane cap, beyond which it scrolls).
+        // The card = fixed header + body + footer; the body hugs its
+        // content (yielding to the host's pane cap, beyond which it scrolls).
         let hug = scrollView.heightAnchor.constraint(equalTo: stack.heightAnchor)
         hug.priority = .init(999)   // yield to the pane cap
         hug.isActive = true
@@ -168,6 +196,14 @@ final class AITaskCard: NSView {
         bodyHeight = stack.heightAnchor.constraint(equalToConstant: 0)
         bodyHeight?.priority = .init(999)   // yield to the pane cap
         bodyHeight?.isActive = true
+    }
+
+    private func submitFollowUp() {
+        let text = followUpField.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        followUpField.stringValue = ""
+        onFollowUp?(text)
     }
 
     private var bodyHeight: NSLayoutConstraint?
@@ -225,6 +261,7 @@ final class AITaskCard: NSView {
     func enterInputMode(target: ExecutionTarget?) {
         inputMode = true
         editMode = false
+        setFooterVisible(false)
         rebuild { group in
             group.header(question: nil, target: target, phase: "Ask AI")
             let field = ChromeInput(placeholder: "Ask the model to do what, where?")
@@ -251,13 +288,14 @@ final class AITaskCard: NSView {
         metaField.textColor = Chrome.theme.secondaryText
         if let task = lastTask, let target = lastTarget {
             render(task: task, target: target)
+            updateFooter(task: task)
         }
     }
 
     func render(task: AITask, target: ExecutionTarget) {
         guard !inputMode else { return }   // typed request wins until submitted
         lastTask = task; lastTarget = target
-        taskQuestion = task.context.request
+        taskQuestion = task.latestRequest
         if editMode { renderEdit(task: task, target: target); return }
         switch task.phase {
         case .idle, .thinking:
@@ -333,6 +371,27 @@ final class AITaskCard: NSView {
             rebuild { group in
                 group.header(question: taskQuestion, target: target, phase: "cancelled")
             }
+        }
+        updateFooter(task: task)
+    }
+
+    private func updateFooter(task: AITask) {
+        let show: Bool
+        switch task.phase {
+        case .completed, .failed, .cancelled:
+            show = true
+        default:
+            show = false
+        }
+        setFooterVisible(show)
+    }
+
+    private func setFooterVisible(_ visible: Bool) {
+        footerView.isHidden = !visible
+        footerSeparator.isHidden = !visible
+        followUpField.isHidden = !visible
+        if visible {
+            followUpField.focus()
         }
     }
 
@@ -411,6 +470,9 @@ final class AITaskCard: NSView {
     func renderForTest(markdown: String) {
         rebuild { group in _ = group.markdown(markdown) }
     }
+
+    /// Test hook: the follow-up footer is only live between turns.
+    var isFooterVisibleForTest: Bool { !footerView.isHidden }
 
     private func rebuild(_ build: (Group) -> Void) {
         for view in stack.views { stack.removeView(view) }

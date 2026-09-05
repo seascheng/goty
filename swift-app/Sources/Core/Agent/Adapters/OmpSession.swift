@@ -95,7 +95,7 @@ final class OmpSession: PiSession {
 
     override var shellName: String { "omp" }
     override var suppressesRingReplay: Bool { true }
-
+    override class var spawnMode: String { "rpc-ui" }
     override func appendSpawnArgs(_ args: inout [String], resume sessionId: String?) {
         // omp buckets its sessions by --cwd; the pane cwd alone is
         // not enough for a fresh spawn from a Finder-launched GUI.
@@ -653,6 +653,9 @@ final class OmpSession: PiSession {
 
 
     // MARK: - omp capabilities
+    override var capabilities: AgentCapabilities {
+        [.steer, .sessions, .fastMode, .fork, .export, .stats]
+    }
 
     override func setFastMode(enabled: Bool) {
         request("set_fast_mode", ["enabled": enabled]) { [weak self] response in

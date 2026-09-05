@@ -158,6 +158,9 @@ struct AgentPermissionOption {
     let optionId: String
     let name: String
     let kind: String?
+    /// Option explanation shown under the label (omp ask dialogs
+    /// ship optionDetails[i].description; nil = none).
+    var detail: String? = nil
 
     init?(raw: [String: Any]) {
         guard let optionId = raw["optionId"] as? String,
@@ -165,14 +168,16 @@ struct AgentPermissionOption {
         self.optionId = optionId
         self.name = name
         self.kind = raw["kind"] as? String
+        self.detail = raw["detail"] as? String
     }
 
     /// Explicit memberwise (failable wire init suppresses the
     /// synthesized one) — native adapters build options directly.
-    init(optionId: String, name: String, kind: String?) {
+    init(optionId: String, name: String, kind: String?, detail: String? = nil) {
         self.optionId = optionId
         self.name = name
         self.kind = kind
+        self.detail = detail
     }
 }
 
@@ -382,6 +387,9 @@ enum AgentSessionEvent {
                         rawInput: [String: Any]?, oldText: String?)
     case plan([AgentPlanEntry])
     case permissionRequested(AgentPermissionPrompt)
+    /// The agent retracted a pending dialog (omp cancel frame after an
+    /// aborted turn) — clear that card so the pane stops waiting.
+    case permissionResolved(requestID: String)
     case turnEnded(stopReason: String?)
     /// Provider/model failure recorded by omp on the assistant message.
     /// The web store renders this in the composer error chip.
@@ -548,8 +556,11 @@ extension AgentSessionEvent {
                     "options": prompt.options.map { option in
                         ["optionId": option.optionId,
                          "name": option.name,
-                         "kind": option.kind ?? NSNull()] as [String: Any]
+                         "kind": option.kind ?? NSNull(),
+                         "detail": option.detail ?? NSNull()] as [String: Any]
                     }]
+        case .permissionResolved(let requestID):
+            return ["type": "permissionResolved", "requestID": requestID]
         case .transcriptReset:
             return ["type": "clearTranscript"]
         case .turnEnded:

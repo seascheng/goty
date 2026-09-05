@@ -25,7 +25,7 @@ export type RuntimeState = { fastEnabled?: boolean | null; fastActive?: boolean 
   tokensPerSecond?: number | null; queued?: number | null;
   compacting?: boolean | null; streaming?: boolean | null };
 export type Permission = { requestID: string; toolCallTitle?: string | null;
-  options: { optionId: string; name: string; kind?: string | null }[];
+  options: { optionId: string; name: string; kind?: string | null; detail?: string | null }[];
   dialog?: string | null; placeholder?: string | null; defaultValue?: string | null };
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 /// A block before it gets its stable identity stamp.
@@ -66,6 +66,7 @@ const PermissionOptionSchema = z.object({
   optionId: z.string(),
   name: z.string(),
   kind: z.string().nullish(),
+  detail: z.string().nullish(),
 });
 export type AgentSessionSummary = {
   sessionId: string; cwd?: string | null; title?: string | null;
@@ -135,7 +136,8 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
     defaultValue: z.string().nullish(),
     options: z.array(PermissionOptionSchema),
   }),
-  z.object({ type: z.literal("permissionResolved") }),
+  z.object({ type: z.literal("permissionResolved"),
+             requestID: z.string().nullish() }),
   z.object({ type: z.literal("phase"), value: z.string().nullish() }),
   z.object({ type: z.literal("statusFlash"), text: z.string() }),
   z.object({ type: z.literal("error"), text: z.string() }),
@@ -209,6 +211,7 @@ const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("theme"), vars: z.record(z.string(), z.string()) }),
   z.object({
     type: z.literal("meta"),
+    capabilities: z.array(z.string()).nullish(),
     workspace: z.string().nullish(),
     directory: z.string().nullish(),
     branch: z.string().nullish(),
@@ -353,7 +356,8 @@ class Store {
            costAmount?: number | null; costCurrency?: string | null } | null = null;
   /// Composer statusbar: workspace/folder · branch (pushed by Swift).
   meta: { workspace: string | null; directory: string | null;
-          branch: string | null; icon: string | null } | null = null;
+          branch: string | null; icon: string | null;
+          capabilities: string[] } | null = null;
   /// Monotonic counter — the useSyncExternalStore snapshot. Status-only
   /// updates (tool upsert) change nothing else observable.
   revision = 0;
@@ -617,7 +621,13 @@ class Store {
         }
         break;
       case "permission": this.permission = event; break;
-      case "permissionResolved": this.permission = null; break;
+      case "permissionResolved":
+        // Agent-side cancel targets one request; the no-id variant
+        // (host ack after our own answer) clears whatever is showing.
+        this.permission = (!event.requestID
+          || this.permission?.requestID === event.requestID)
+          ? null : this.permission;
+        break;
       case "branchState": this.branchBusy = event.active; break;
       case "turnEnded": {
         // Settled-turn stats land IN the transcript, glued to the turn
@@ -804,7 +814,8 @@ class Store {
       case "meta":
         this.meta = { workspace: event.workspace ?? null,
                       directory: event.directory ?? null,
-                      branch: event.branch ?? null, icon: event.icon ?? null };
+                      branch: event.branch ?? null, icon: event.icon ?? null,
+                      capabilities: event.capabilities ?? [] };
         break;
       default: {
         // Exhaustiveness guard: a swallowed case (an edit once ate

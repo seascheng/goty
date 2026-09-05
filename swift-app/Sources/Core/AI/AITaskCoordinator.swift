@@ -160,6 +160,25 @@ final class AITaskCoordinator {
         }
     }
 
+    /// Append a user follow-up to the running wire and start a new
+    /// model turn. Only allowed once the current turn has ended.
+    func continueSession(taskId: UUID, request: String) {
+        queue.async {
+            guard var task = self.tasks[taskId] else { return }
+            switch task.phase {
+            case .completed, .failed, .cancelled: break
+            default: return
+            }
+            task.setLatestRequest(request)
+            task.clearLive()
+            task.advance(to: .thinking)
+            self.tasks[taskId] = task
+            self.wire[taskId]?.append(ChatMessage(role: "user", content: request))
+            self.emit(taskId)
+            self.step(taskId)
+        }
+    }
+
     // MARK: loop
 
     private func step(_ id: UUID) {

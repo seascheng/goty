@@ -1,13 +1,42 @@
 // goty — see CLAUDE.md for the working principles.
 import Foundation
 
+/// What this adapter supports — the UI hides affordances an adapter
+/// would silently no-op (happier's manifest consensus: DECLARE, don't
+/// discover by calling). Mid-turn input always routes through steer()
+/// whether the dialect truly steers (pi/omp rpc) or queues to the next
+/// turn (claude/codex) — so "steer" only means the input path exists.
+struct AgentCapabilities: OptionSet {
+    let rawValue: Int
+    static let steer = AgentCapabilities(rawValue: 1 << 0)
+    static let sessions = AgentCapabilities(rawValue: 1 << 1)
+    static let fastMode = AgentCapabilities(rawValue: 1 << 2)
+    static let fork = AgentCapabilities(rawValue: 1 << 3)
+    static let export = AgentCapabilities(rawValue: 1 << 4)
+    static let stats = AgentCapabilities(rawValue: 1 << 5)
+
+    /// Stable names for the web bridge (store.meta.capabilities).
+    var names: [String] {
+        var out: [String] = []
+        if contains(.steer) { out.append("steer") }
+        if contains(.sessions) { out.append("sessions") }
+        if contains(.fastMode) { out.append("fastMode") }
+        if contains(.fork) { out.append("fork") }
+        if contains(.export) { out.append("export") }
+        if contains(.stats) { out.append("stats") }
+        return out
+    }
+}
+
 /// What a GUI agent pane needs from ANY agent implementation. The UI
 /// speaks this interface; each agent family adapts its wire dialect
 /// behind it (Adapters/: Claude/Codex their own, Pi+omp share the
 /// pi-mono rpc runtime in PiSession). Events (`AgentSessionEvent`)
-/// are the dialect-neutral currency crossing this seam.
 protocol AgentSessioning: AnyObject {
     var delegate: AgentSessionDelegate? { get set }
+    /// What this adapter supports; the default is "nothing optional" —
+    /// adapters override with their real set.
+    var capabilities: AgentCapabilities { get }
     var sessionId: String? { get }
     var isWorking: Bool { get }
     var configOptions: [AgentConfigOption] { get }
@@ -84,6 +113,8 @@ protocol AgentSessioning: AnyObject {
 
 
 extension AgentSessioning {
+    /// Nothing optional by default — adapters declare their real set.
+    var capabilities: AgentCapabilities { [] }
     /// Local by default: adapters without a daemon relationship run on
     /// the GUI's own machine.
     var runsOnThisMac: Bool { true }
