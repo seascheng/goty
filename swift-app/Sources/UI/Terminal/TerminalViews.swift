@@ -169,6 +169,9 @@ final class PaneHost: NSView {
     /// this pane, and the trigger stays unarmed (fail-open — an @ai line
     /// then reaches the shell like any other text).
     var coordinatorFeed: (() -> ExecutionTarget?)?
+    /// Bare `@ai` / ⌘⇧A: open the tab's @ai CELL in input mode (the
+    /// AppDelegate decides cell vs overlay; the pane never decides).
+    var onAIInputMode: ((PaneHost) -> Void)?
     private var aiCard: AITaskCard?
     private var lastForegroundCommand: String?
 
@@ -671,7 +674,7 @@ final class PaneHost: NSView {
             guard let self else { return }
             self.sendText("\u{15}")
             if text.isEmpty {
-                self.openAIInputMode()
+                self.onAIInputMode?(self)
             } else {
                 self.onAITask?(self, text)
             }
@@ -715,7 +718,7 @@ final class PaneHost: NSView {
         switch match.kind {
         case .ai:
             if match.text.isEmpty {
-                openAIInputMode()
+                onAIInputMode?(self)
             } else {
                 onAITask?(self, match.text)
             }

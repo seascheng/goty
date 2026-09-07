@@ -61,6 +61,23 @@ extension AppDelegate {
         aiCoordinatorBox = (token, coord)
         return coord
     }
+    /// Bare `@ai` / ⌘⇧A: the focused tab's @ai CELL in input mode; the
+    /// cell's input is focused the moment the card lands. Side terminals
+    /// keep the overlay.
+    func openAIInputCell(for host: PaneHost) {
+        if let tab = coordinator.tabOfPane(host.hostKey.pane,
+                                           wsId: host.hostKey.workspace),
+           let aiPaneId = coordinator.openAITaskPane(wsId: tab.wsId, tabId: tab.tabId),
+           let cell = hostPool[HostKey(workspace: tab.wsId, pane: aiPaneId)] as? AITaskPaneHost {
+            cell.taskCard.onClose = { [weak self] in
+                self?.coordinator.closeAITaskPane(wsId: tab.wsId, paneId: aiPaneId)
+            }
+            cell.enterInputMode()
+            return
+        }
+        host.openAIInputMode()
+    }
+
     func startAITask(host: PaneHost, text: String) {
         // A leftover ⌘⇧A card on this pane would freeze and block the
         // task render (the inputMode guard) — the "two panels" bug.

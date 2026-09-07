@@ -48,6 +48,9 @@ final class AITaskPaneHost: NSView, PaneHosting, ThemeRefreshable {
 
     func enterInputMode() {
         card.enterInputMode(target: coordinatorFeed?())
+        // The card's own makeFirstResponder runs before the freshly
+        // mounted cell is in a window — re-fire after the layout pass.
+        DispatchQueue.main.async { [weak card] in card?.focusInput() }
     }
 
     var taskCard: AITaskCard { card }

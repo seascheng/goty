@@ -293,6 +293,13 @@ final class AITaskCard: NSView {
             field.widthAnchor.constraint(equalTo: row.widthAnchor, constant: -84).isActive = true
             row.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
         }
+        focusInput()
+    }
+
+    /// The field needs the window FIRST (a freshly mounted cell calls
+    /// this before the view tree lands) — callers re-invoke after the
+    /// layout pass.
+    func focusInput() {
         window?.makeFirstResponder(inputField)
     }
 

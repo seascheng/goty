@@ -603,6 +603,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         host.onAITask = { [weak self] host, text in
             self?.startAITask(host: host, text: text)
         }
+        host.onAIInputMode = { [weak self] host in
+            self?.openAIInputCell(for: host)
+        }
         host.onAgentSessionTrigger = { [weak self] host, agent, prompt in
             guard let self else { return }
             let cwd = self.coordinator.cwd(ofPane: host.hostKey.pane,
