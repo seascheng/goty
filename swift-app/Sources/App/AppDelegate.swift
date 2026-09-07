@@ -580,10 +580,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         host.coordinatorFeed = { [weak self] in
             self?.coordinator.aiTarget(for: key)
         }
-        host.onSubmit = { [weak self] text in
-            // Find the terminal pane this AI cell serves (the tab's
-            // active terminal) and start the task through the normal
-            // path — which routes the render back into this cell.
+        // The CARD's submit (input-mode Return/Send) starts a task here.
+        // Wiring at CREATION, not at the first update — the typed
+        // request is what CREATES the task, so no update ever arrives
+        // to wire it (the silent-submit deadlock).
+        host.taskCard.onSubmit = { [weak self] text in
             guard let self else { return }
             self.startAITaskInCell(wsId: wsId, aiPaneId: pane.id, text: text)
         }

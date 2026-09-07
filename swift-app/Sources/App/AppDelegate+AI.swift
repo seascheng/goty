@@ -71,24 +71,28 @@ extension AppDelegate {
         openAIInputCell(wsId: tab.wsId, tabId: tab.tabId)
     }
 
-    /// The cell may not have a HOST yet — the grid's layout pass builds
-    /// hosts lazily from the store, and a bare @ai lands one tick before
-    /// that pass. Build it NOW so the card mounts immediately; the pass
-    /// later finds it in the pool and just lays it out.
-    func openAIInputCell(wsId: UUID, tabId: String) {
+    /// Ensure the tab's @ai cell + host exist WITHOUT touching the card's
+    /// mode. The grid's layout pass builds hosts lazily one tick later;
+    /// callers that must render NOW build the host themselves (the pass
+    /// then finds it pooled and just lays it out).
+    private func ensureAITaskCell(wsId: UUID, tabId: String) -> (cell: AITaskPaneHost, paneId: String)? {
         guard let aiPaneId = coordinator.openAITaskPane(wsId: wsId, tabId: tabId)
-        else { return }
+        else { return nil }
         let key = HostKey(workspace: wsId, pane: aiPaneId)
-        var cell = hostPool[key] as? AITaskPaneHost
-        if cell == nil, let store = coordinator.store,
-           let ws = store.workspaces.first(where: { $0.id == wsId }),
-           let pane = ws.tabs.first(where: { $0.id == tabId })?
-               .panes.first(where: { $0.id == aiPaneId }),
-           let gapp = ghostty.app,
-           let host = makePaneHost(pane: pane, ws: ws, gapp: gapp) {
-            cell = host as? AITaskPaneHost
-        }
-        guard let cell else { return }
+        if let cell = hostPool[key] as? AITaskPaneHost { return (cell, aiPaneId) }
+        guard let store = coordinator.store,
+              let ws = store.workspaces.first(where: { $0.id == wsId }),
+              let pane = ws.tabs.first(where: { $0.id == tabId })?
+                  .panes.first(where: { $0.id == aiPaneId }),
+              let gapp = ghostty.app,
+              let host = makePaneHost(pane: pane, ws: ws, gapp: gapp),
+              let cell = host as? AITaskPaneHost else { return nil }
+        return (cell, aiPaneId)
+    }
+
+    func openAIInputCell(wsId: UUID, tabId: String) {
+        guard let (cell, aiPaneId) = ensureAITaskCell(wsId: wsId, tabId: tabId)
+        else { return }
         cell.taskCard.onClose = { [weak self] in
             self?.coordinator.closeAITaskPane(wsId: wsId, paneId: aiPaneId)
         }
@@ -155,15 +159,15 @@ extension AppDelegate {
     /// the terminal the request came from (the cell itself has no cwd).
     func startAITaskInCell(wsId: UUID, tabId: String, text: String,
                            feed: (() -> ExecutionTarget?)?, tail: String) {
-        // Ensure the CELL's host exists NOW (the grid's layout pass is
-        // a tick behind) — openAIInputCell is idempotent: it reuses the
-        // existing pane, pre-builds the host and enters input mode; the
-        // task render lands in the cell from the first update on.
-        openAIInputCell(wsId: wsId, tabId: tabId)
-        guard let aiPaneId = coordinator.openAITaskPane(wsId: wsId, tabId: tabId),
+        // Ensure the CELL's host exists NOW (the grid pass is a tick
+        // behind), but do NOT re-enter input mode: render(task:) drops
+        // every update while inputMode is true — a task starting in
+        // this cell clears it first.
+        guard let (cell, aiPaneId) = ensureAITaskCell(wsId: wsId, tabId: tabId),
               let target = feed?() ?? coordinator.aiTarget(
                   for: HostKey(workspace: wsId, pane: aiPaneId))
         else { return }
+        cell.taskCard.clearInputMode()
         let context = AIContext(request: text, target: target,
                                 visibleOutput: tail, hostFacts: "")
         let coord = aiCoordinator()

@@ -288,6 +288,10 @@ final class AITaskCard: NSView {
     /// exact @ai path (PaneHost routes onSubmit to onAITask).
     var isInputMode: Bool { inputMode }
 
+    /// A task is starting in this cell — the typed request won; render
+    /// must win over the input-mode guard.
+    func clearInputMode() { inputMode = false }
+
     // Test hooks: the composer layout must pin the footer to the card's
     // bottom edge with the body above it — pinned headless.
     var footerFrameForTest: NSRect { footerView.frame }
