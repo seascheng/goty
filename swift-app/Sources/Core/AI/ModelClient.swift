@@ -259,13 +259,20 @@ final class OpenAICompatibleClient: ModelClient {
     /// assembles the final reply. Deltas fire on a URLSession task
     /// thread; the coordinator owns its own queue hop. A 400 thinking
     /// rejection retries once buffered (rare path — not worth a second
-    /// stream pass).
+    /// stream pass). Streams go DIRECT FIRST: a local proxy
+    /// (Clash/mihomo at 127.0.0.1) buffers whole SSE responses —
+    /// measured 187 text deltas arriving in a 0.13s clump through the
+    /// proxy vs the same stream spread over 3.2s direct — and a
+    /// buffered "stream" defeats the point. A direct transport failure
+    /// retries once through the system proxy (APIs that NEED the proxy
+    /// still work, just without token-by-token delivery).
     @discardableResult
     private func streamRequest(_ req: URLRequest, messages: [ChatMessage], tools: [ToolSpec],
                                allowThinking: Bool, onDelta: ((StreamDelta) -> Void)?,
-                               session: URLSession = .shared, directFallback: Bool = true,
+                               session: URLSession? = nil, proxiedFallback: Bool = true,
                                completion: @escaping (Result<ModelReply, ModelError>) -> Void)
             -> Task<Void, Never> {
+        let session = session ?? Self.directSession   // streams go direct by default
         let task = Task {
             var receivedAny = false   // never double-fire deltas on fallback
             do {
@@ -298,13 +305,14 @@ final class OpenAICompatibleClient: ModelClient {
                 if Task.isCancelled {
                     return
                 }
-                // Proxy-stalled first byte (the -1200/-1001 class): one
-                // direct retry — but only while NOTHING streamed, or a
+                // Direct failed on the first byte (GFW-class block —
+                // the API host needs the proxy): one retry through
+                // the system proxy, only while NOTHING streamed, or a
                 // resumed task would repeat its deltas.
-                if directFallback, !receivedAny {
+                if proxiedFallback, !receivedAny {
                     _ = streamRequest(req, messages: messages, tools: tools,
                                       allowThinking: allowThinking, onDelta: onDelta,
-                                      session: Self.directSession, directFallback: false,
+                                      session: .shared, proxiedFallback: false,
                                       completion: completion)
                     return
                 }
