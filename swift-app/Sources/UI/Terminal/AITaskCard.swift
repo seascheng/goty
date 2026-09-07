@@ -130,6 +130,7 @@ final class AITaskCard: NSView {
         footerView.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 8, right: 12)
         footerView.translatesAutoresizingMaskIntoConstraints = false
         footerSeparator.translatesAutoresizingMaskIntoConstraints = false
+        followUpField.onReturn = { [weak self] in self?.submitFollowUp() }
         followUpField.translatesAutoresizingMaskIntoConstraints = false
         followUpRow.orientation = .horizontal
         followUpRow.alignment = .centerY
@@ -215,8 +216,11 @@ final class AITaskCard: NSView {
     /// collapse the body and hand every leftover point to the footer —
     /// the "input floats mid-card over a dead zone" report.
     func setFillsContainer(_ fills: Bool) {
+        // Only the hug goes: the scrollView FILLS the header..footer
+        // span (required), while bodyHeight keeps the stack content-
+        // tall so it scrolls inside that span. Dropping bodyHeight too
+        // collapsed the stack to zero — results rendered INVISIBLE.
         hugConstraint?.isActive = !fills
-        bodyHeight?.isActive = !fills
     }
 
     private func submitFollowUp() {

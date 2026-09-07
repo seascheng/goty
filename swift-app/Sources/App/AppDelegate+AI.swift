@@ -119,6 +119,37 @@ extension AppDelegate {
         aiTaskOwner[id] = coord
     }
 
+    /// The cell card's wiring (update-time): same coordinator contract
+    /// as the overlay card, but CLOSE removes the pane (the terminal
+    /// reclaims the full grid) and the FIRST submit starts a new task
+    /// in this cell.
+    private func wireAITaskCell(_ cell: AITaskPaneHost, task: AITask) {
+        let card = cell.taskCard
+        let id = task.id
+        let owner = aiTaskOwner[id] ?? aiCoordinator()
+        card.onConfirm = { [weak owner] in owner?.confirm(taskId: id) }
+        card.onEdit = { [weak owner] proposal in
+            owner?.edit(taskId: id, to: proposal)
+        }
+        card.onCancel = { [weak owner] in
+            owner?.cancel(taskId: id)
+        }
+        card.onContinue = { [weak owner] in owner?.continueBudget(taskId: id) }
+        card.onFollowUp = { [weak owner] text in
+            owner?.continueSession(taskId: id, request: text)
+        }
+        card.onSubmit = { [weak self] text in
+            self?.startAITaskInCell(wsId: cell.hostKey.workspace,
+                                    aiPaneId: cell.hostKey.pane, text: text)
+        }
+        card.onClose = { [weak owner, weak self] in
+            owner?.cancel(taskId: id)
+            self?.coordinator.closeAITaskPane(wsId: cell.hostKey.workspace,
+                                              paneId: cell.hostKey.pane)
+        }
+    }
+
+
     /// The cell path: open (or reuse) the tab's @ai pane, then start the
     /// task routed to that cell. `feed` supplies the EXECUTION target of
     /// the terminal the request came from (the cell itself has no cwd).
@@ -154,33 +185,6 @@ extension AppDelegate {
         }, tail: "")
     }
 
-    /// Cell wiring: same coordinator contract as the overlay card, but
-    /// CLOSE removes the pane (the terminal reclaims the full grid).
-    private func wireAITaskCell(_ cell: AITaskPaneHost, task: AITask) {
-        let card = cell.taskCard
-        let id = task.id
-        let owner = aiTaskOwner[id] ?? aiCoordinator()
-        card.onConfirm = { [weak owner] in owner?.confirm(taskId: id) }
-        card.onEdit = { [weak owner] proposal in
-            owner?.edit(taskId: id, to: proposal)
-        }
-        card.onCancel = { [weak owner] in
-            owner?.cancel(taskId: id)
-        }
-        card.onContinue = { [weak owner] in owner?.continueBudget(taskId: id) }
-        card.onFollowUp = { [weak owner] text in
-            owner?.continueSession(taskId: id, request: text)
-        }
-        card.onClose = { [weak owner] in
-            owner?.cancel(taskId: id)
-            self.coordinator.closeAITaskPane(wsId: cell.hostKey.workspace,
-                                             paneId: cell.hostKey.pane)
-        }
-        card.onSubmit = { [weak self] text in
-            self?.startAITaskInCell(wsId: cell.hostKey.workspace,
-                                    aiPaneId: cell.hostKey.pane, text: text)
-        }
-    }
 
     /// The overlay card wiring (side terminals — no tab, no cell).
     private func wireAICard(_ host: PaneHost, task: AITask) {
