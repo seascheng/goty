@@ -43,11 +43,9 @@ final class AITaskCard: NSView {
     /// Fixed footer with the follow-up input + send button. Collapses
     /// when hidden because it is an NSStackView.
     private let footerView = NSStackView()
-    private let footerSeparator = HairlineView()
     private let headerRuleView = HairlineView()
     private let followUpField = ChromeInput(placeholder: "Ask a follow-up…")
     private let followUpRow = NSStackView()
-
     /// The Settings-window translucency, exactly: ONE background@opacity
     /// fill and theme text on top — no blur (the Settings window itself
     /// runs unblurred: no background-blur in the config). An in-window
@@ -129,7 +127,6 @@ final class AITaskCard: NSView {
         footerView.spacing = 0
         footerView.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 8, right: 12)
         footerView.translatesAutoresizingMaskIntoConstraints = false
-        footerSeparator.translatesAutoresizingMaskIntoConstraints = false
         followUpField.onReturn = { [weak self] in self?.submitFollowUp() }
         followUpField.translatesAutoresizingMaskIntoConstraints = false
         followUpRow.orientation = .horizontal
@@ -139,12 +136,10 @@ final class AITaskCard: NSView {
         followUpRow.addArrangedSubview(followUpField)
         followUpRow.addArrangedSubview(ChromeButton.make(
             "Send", style: .primary) { [weak self] in self?.submitFollowUp() })
-        footerView.addArrangedSubview(footerSeparator)
         footerView.addArrangedSubview(followUpRow)
         followUpField.heightAnchor.constraint(equalToConstant: ControlMetrics.inputHeight).isActive = true
         followUpField.widthAnchor.constraint(equalTo: followUpRow.widthAnchor, constant: -84).isActive = true
         followUpRow.widthAnchor.constraint(equalTo: footerView.widthAnchor, constant: -24).isActive = true
-        footerSeparator.heightAnchor.constraint(equalToConstant: 1).isActive = true
         // Hidden until a turn ends; NSStackView collapses hidden
         // arranged subviews, so the card reclaims the footer's height.
         setFooterVisible(false)
@@ -438,7 +433,6 @@ final class AITaskCard: NSView {
 
     private func setFooterVisible(_ visible: Bool) {
         footerView.isHidden = !visible
-        footerSeparator.isHidden = !visible
         followUpRow.isHidden = !visible
         if visible {
             followUpField.focus()
