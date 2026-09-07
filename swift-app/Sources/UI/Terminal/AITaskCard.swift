@@ -550,15 +550,14 @@ final class AITaskCard: NSView {
         return stack.views.first { $0.identifier == key }
     }
 
-    // MARK: content builders
-
-    var isTextViewSelectableForTest: Bool { selectableFieldForTest != nil }
     var selectableFieldForTest: NSView? {
         stack.views.compactMap { $0 as? NSTextField }.first { $0.isSelectable }
+            ?? stack.views.compactMap { $0 as? NSTextView }.first { $0.isSelectable }
     }
-    /// Test hook: every text field currently in the scrolling body.
+
     var bodyFieldsForTest: [NSView] { stack.views.compactMap { $0 as? NSTextField } }
-    var bodyStackForTest: NSStackView { stack }
+    /// Test hook: markdown text views currently in the body.
+    var markdownViewsForTest: [NSTextView] { stack.views.compactMap { $0 as? NSTextView } }
     var debugLayoutForTest: (sv: CGFloat, clip: CGFloat, stack: CGFloat) {
         (scrollView.bounds.width, scrollView.contentView.bounds.width, stack.bounds.width)
     }
@@ -658,15 +657,22 @@ final class AITaskCard: NSView {
         }
 
 
-        /// The model's reasoning (streaming AND completed rounds): muted
-        /// mono that wraps and stays selectable — no line cap anywhere
-        /// (the think-text never-wraps reports).
+
+        /// The model's reasoning, agent-gui style: ">"-quoted, italic,
+        /// muted — the same read as the web view's thought block.
+        /// Selectable, wraps; no line cap (the think-text never-wraps
+        /// reports).
         func thinkingBlock(_ text: String) {
-            let body = monoSelectable(text)
+            let quoted = text
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map({ "> \($0)" })
+                .joined(separator: "\n")
+            let body = monoSelectable(quoted)
+            body.font = NSFontManager.shared.convert(
+                .monospacedSystemFont(ofSize: 11.5, weight: .regular),
+                toHaveTrait: .italicFontMask)
             body.textColor = Chrome.theme.secondaryText
         }
-
-
         func proposal(_ proposal: AIProposal, target: ExecutionTarget) {
             let explanation = proposal.explanation
             if !explanation.isEmpty {
@@ -738,42 +744,39 @@ final class AITaskCard: NSView {
             return field
         }
 
-        /// Markdown flows INLINE with the rest of the card: one
-        /// attributed selectable label in the stack. The old box was a
-        /// nested text editor in its OWN scroll view inside the card's
-        /// scroller — two scroll systems fought for the pin during
-        /// streaming (the "md scrolling is chaotic" report).
+
+        /// Markdown flows INLINE with the rest of the card — on a FULL
+        /// TextKit stack (layoutManager + container). NSTextField labels
+        /// render textBlocks through the cell's simplified layout path,
+        /// which degrades GFM tables to flat text after scroll
+        /// relayouts (reported twice); a non-scrolling text view is the
+        /// documented home for NSTextTable layout. The old label also
+        /// was a nested scroller's tenant — two scroll systems fought
+        /// for the pin during streaming (the "md scrolling is chaotic"
+        /// report), hence NON-scrolling here.
         @discardableResult
-        func markdown(_ text: String) -> NSTextField {
-            let field = NSTextField(labelWithString: "")
-            field.textColor = Chrome.theme.foreground
-            field.attributedStringValue = MarkdownRenderer.render(
+        func markdown(_ text: String) -> NSTextView {
+            let editor = monoEditor(text: "", multiline: true)
+            editor.isEditable = false
+            editor.isSelectable = true
+            editor.textStorage?.setAttributedString(MarkdownRenderer.render(
                 text, bodySize: 12.5,
                 highlight: { code, lang in
                     HighlightEngine.highlight(
                         code, language: lang,
                         font: .monospacedSystemFont(ofSize: 11.5, weight: .regular),
                         color: Chrome.theme.foreground)
-                })
-            field.isSelectable = true
-            field.lineBreakMode = .byWordWrapping
-            field.cell?.wraps = true
-            field.cell?.truncatesLastVisibleLine = false
-            field.maximumNumberOfLines = 0
-            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            add(views: [field])
-            // EXACT width, not ≤: NSTextTable layout needs a definite
-            // column width. A ≤ constraint let relayout passes (scroll
-            // → fittingSize re-measure) squeeze the label until table
-            // cells wrapped character-by-character into plain text.
-            // Activated AFTER add (before it the field has no common
-            // ancestor — the streaming crash). The label's frame reads
-            // constant+4: that fixed 4pt is the cell's drawing inset,
-            // the text area is exactly the constant.
-            field.widthAnchor.constraint(equalTo: stack.widthAnchor,
-                                         constant: -24).isActive = true
-            return field
+                }))
+            add(views: [editor])
+            // EXACT width (locked after add: no common ancestor before
+            // it): NSTextTable layout needs a definite column width; a
+            // ≤ constraint let relayout passes squeeze the view until
+            // table cells wrapped character-by-character into text.
+            editor.widthAnchor.constraint(equalTo: stack.widthAnchor,
+                                          constant: -24).isActive = true
+            return editor
         }
+
 
         /// Selectable mono text (tool output, transcripts) — flat like
         /// everything else; the stack scrolls, no internal scroller.

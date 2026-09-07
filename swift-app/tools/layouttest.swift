@@ -36,7 +36,8 @@ func run() {
                 let p = card.convert(NSPoint(x: field.bounds.midX, y: field.bounds.midY), from: field)
                 let hit = card.hitTest(p)
                 let chain = hit.map { String(describing: type(of: $0)) } ?? "nil"
-                check(chain.contains("Field"), "hit-test reaches the text field (got \(chain))")
+                check(chain.contains("Field") || chain.contains("TextView"),
+                      "hit-test reaches the text view (got \(chain))")
             }
         }
 
@@ -70,26 +71,31 @@ func run() {
             // Two passes: the width constraint activates inside the
             // rebuild; the bodyHeight re-measure needs a second solve.
             card.layoutSubtreeIfNeeded()
-            card.layoutSubtreeIfNeeded()
-            let mdField = card.bodyFieldsForTest.compactMap { $0 as? NSTextField }.first
-            check(mdField != nil, "table markdown renders a field")
+            let mdView = card.markdownViewsForTest.first
+            check(mdView != nil, "table markdown renders a text view")
             _ = card.debugLayoutForTest   // kept for future layout probes
-            if let f = mdField {
-                // The label's frame reads constant+4 — the cell's fixed
-                // drawing inset; the TEXT area is exactly stack−24. The
-                // contract: the width is LOCKED (equality), so relayout
-                // passes can never squeeze NSTextTable columns.
+            if let tv = mdView {
+                // Width LOCKED by an equality constraint: relayout
+                // passes (scroll → fittingSize re-measure) can never
+                // squeeze the view, so NSTextTable columns stay put.
                 let want = card.bodyStackForTest.bounds.width - 24
-                check(f.bounds.width >= want - 1 && f.bounds.width <= want + 5,
-                      "markdown label width locked at stack-24 (+cell inset; got \(f.bounds.width) want \(want))")
+                check(tv.bounds.width >= want - 1 && tv.bounds.width <= want + 5,
+                      "markdown view width locked at stack-24 (got \(tv.bounds.width) want \(want))")
+                check(tv.bounds.height > 10,
+                      "markdown view has content height (got \(tv.bounds.height))")
                 var hasTable = false
-                f.attributedStringValue.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: f.attributedStringValue.length)) { v, _, _ in
+                let storage = tv.textStorage ?? NSTextStorage()
+                storage.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: storage.length)) { v, _, _ in
                     if let ps = v as? NSParagraphStyle,
                        ps.textBlocks.contains(where: { $0 is NSTextTableBlock }) {
                         hasTable = true
                     }
                 }
                 check(hasTable, "GFM table renders as NSTextTable blocks")
+                // The table's layout must LIVE in the full TextKit stack:
+                // visible glyph rows for the table content.
+                let laid = tv.layoutManager?.numberOfGlyphs ?? 0
+                check(laid > 0, "layout manager lays the table glyphs out (\(laid))")
             }
         }
         // — Offline cover: full-region, top strip included (the
