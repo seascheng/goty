@@ -804,6 +804,113 @@ final class WorkspaceCoordinator {
                   kind: .agent(agent), agentSessionId: sessionId)
     }
 
+    // MARK: - @ai task pane (tty7 model: AI is a grid cell, never an
+    // overlay fighting the terminal's prompt)
+
+    /// Open (or reuse) this tab's @ai task cell: existing panes compress
+    /// to the upper 3/5 of the grid, the task takes the bottom 2/5 as a
+    /// full-width row. Returns the ai pane id.
+    func openAITaskPane(wsId: UUID, tabId: String) -> String? {
+        guard let store,
+              let wi = store.workspaces.firstIndex(where: { $0.id == wsId }),
+              let ti = store.workspaces[wi].tabs.firstIndex(where: { $0.id == tabId })
+        else { return nil }
+        if let existing = store.workspaces[wi].tabs[ti].panes.first(where: { $0.kind == .aiTask }) {
+            runtime[wsId, default: Runtime()].activePaneId = existing.id
+            return existing.id
+        }
+        guard let split = Self.aiTaskSplitCells(store.workspaces[wi].tabs[ti].panes)
+        else { return nil }
+        store.workspaces[wi].tabs[ti].panes = split.cells
+        let pane = PaneState(id: UUID().uuidString, cwd: nil, kind: .aiTask,
+                             left: 0, top: split.aiTop,
+                             width: split.gridWidth, height: split.aiHeight)
+        store.workspaces[wi].tabs[ti].panes.append(pane)
+        store.save()
+        delegate?.coordinatorDidChange(.structure)
+        return pane.id
+    }
+
+    /// Remove the tab's @ai cell and stretch the remaining panes back
+    /// over the full grid (relative layout preserved; integer rounding
+    /// is absorbed by the layout-time normalization).
+
+    /// Which tab holds this pane (center-grid panes only; aux panes
+    /// answer nil). Labeled tuple so both destructuring and .tabId read.
+    func tabOfPane(_ paneId: String, wsId: UUID) -> (wsId: UUID, tabId: String)? {
+        guard let store,
+              let wi = store.workspaces.firstIndex(where: { $0.id == wsId })
+        else { return nil }
+        for tab in store.workspaces[wi].tabs {
+            if tab.panes.contains(where: { $0.id == paneId }) {
+                return (wsId, tab.id)
+            }
+        }
+        return nil
+    }
+
+    /// The tab's ACTIVE terminal pane (the @ai cell's execution target).
+    /// The runtime's activePaneId wins when it is a terminal; otherwise
+    /// the first terminal pane.
+    func activeTerminalPane(wsId: UUID, tabId: String) -> String? {
+        guard let store,
+              let wi = store.workspaces.firstIndex(where: { $0.id == wsId }),
+              let ti = store.workspaces[wi].tabs.firstIndex(where: { $0.id == tabId })
+        else { return nil }
+        let panes = store.workspaces[wi].tabs[ti].panes
+        if let active = runtime[wsId]?.activePaneId,
+           panes.first(where: { $0.id == active })?.kind == .terminal {
+            return active
+        }
+        return panes.first(where: { $0.kind == .terminal })?.id
+    }
+    func closeAITaskPane(wsId: UUID, paneId: String) {
+        guard let store,
+              let wi = store.workspaces.firstIndex(where: { $0.id == wsId }),
+              let ti = store.workspaces[wi].tabs.firstIndex(where: {
+                  $0.panes.contains { $0.id == paneId && $0.kind == .aiTask }
+              })
+        else { return }
+        store.workspaces[wi].tabs[ti].panes = Self.aiTaskRestoreCells(
+            store.workspaces[wi].tabs[ti].panes, removing: paneId)
+        store.save()
+        delegate?.coordinatorDidChange(.structure)
+    }
+    /// Geometry half of openAITaskPane: vertical extents scale to a grid
+    /// at least 5 rows tall first (a 1-row cell would otherwise round
+    /// 3/5 to 0 and collapse the band), then compress into the upper
+    /// 3/5; the ai row takes the remaining 2/5, full width. Pure so the
+    /// headless suite can pin it.
+    static func aiTaskSplitCells(_ cells: [PaneState])
+        -> (cells: [PaneState], aiTop: Int, aiHeight: Int, gridWidth: Int)? {
+        guard !cells.isEmpty else { return nil }
+        let gridWidth = max(cells.map { $0.left + $0.width }.max() ?? 1, 1)
+        let gridHeight = max(cells.map { $0.top + $0.height }.max() ?? 1, 1)
+        let factor = max(1, (5 + gridHeight - 1) / gridHeight)
+        var out = cells
+        for i in out.indices {
+            let top = out[i].top * factor
+            let height = out[i].height * factor
+            out[i].top = top * 3 / 5
+            out[i].height = max(1, height * 3 / 5)
+        }
+        let scaledH = gridHeight * factor
+        let aiTop = scaledH * 3 / 5
+        let aiHeight = max(1, scaledH - aiTop)
+        return (out, aiTop, aiHeight, gridWidth)
+    }
+
+    /// Geometry half of closeAITaskPane: drop the ai cell, scale the
+    /// remaining cells' vertical extent back over the full grid.
+    static func aiTaskRestoreCells(_ cells: [PaneState], removing paneId: String) -> [PaneState] {
+        let kept = cells.filter { $0.id != paneId && $0.kind != .aiTask }
+        var out = kept
+        for i in out.indices {
+            out[i].top = out[i].top * 5 / 3
+            out[i].height = max(1, out[i].height * 5 / 3)
+        }
+        return out
+    }
 
     func splitPane(vertical: Bool, after: Bool = true) {
         guard let store, store.workspaces.indices.contains(store.focusedIndex) else { return }

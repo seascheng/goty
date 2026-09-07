@@ -26,6 +26,10 @@ enum PaneKind: Codable, Equatable {
     case terminal
     /// A GUI agent session; payload = the AgentCatalog key ("omp").
     case agent(String)
+    /// An @ai task as its own grid cell (tty7 model: AI never overlays
+    /// the terminal's prompt area). The taskId is runtime state — it
+    /// does NOT persist; a restored pane reopens in input mode.
+    case aiTask
 }
 
 struct PaneState: Codable {

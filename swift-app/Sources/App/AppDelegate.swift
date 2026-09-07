@@ -456,6 +456,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let key = HostKey(workspace: ws.id, pane: pane.id)
         if let existing = hostPool[key] { return existing }
         print("GOTY_DEBUG: makePaneHost kind=\(pane.kind)")
+        if pane.kind == .aiTask {
+            let aiHost = makeAITaskPaneHost(pane: pane, ws: ws, key: key)
+            hostPool[key] = aiHost
+            return aiHost
+        }
         if case .agent(let agentKey) = pane.kind {
             guard let agentHost = makeAgentPaneHost(pane: pane, ws: ws, key: key, agentKey: agentKey) else {
                 // No daemon/env for this agent pane (remote link down,
@@ -561,6 +566,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // resolving nil left @ai unarmed and @omp firing into nothing.
         wireTerminalTriggers(host: host, ws: ws)
         hostPool[key] = host
+        return host
+    }
+
+    /// The @ai task card as its own grid cell (tty7 model). The
+    /// coordinator routes task updates here by the pane key; submitting
+    /// from the card (or a restored pane's input mode) follows the same
+    /// start path as a captured @ai line.
+    private func makeAITaskPaneHost(pane: PaneState, ws: WorkspaceState,
+                                     key: HostKey) -> AITaskPaneHost {
+        let host = AITaskPaneHost(key: key)
+        let wsId = ws.id
+        host.coordinatorFeed = { [weak self] in
+            self?.coordinator.aiTarget(for: key)
+        }
+        host.onSubmit = { [weak self] text in
+            // Find the terminal pane this AI cell serves (the tab's
+            // active terminal) and start the task through the normal
+            // path — which routes the render back into this cell.
+            guard let self else { return }
+            self.startAITaskInCell(wsId: wsId, aiPaneId: pane.id, text: text)
+        }
         return host
     }
 

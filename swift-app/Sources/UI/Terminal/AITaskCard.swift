@@ -40,11 +40,12 @@ final class AITaskCard: NSView {
     private var lastTask: AITask?
     private var lastTarget: ExecutionTarget?
     private var inputField: ChromeInput?
-    /// Fixed footer with the follow-up input field. Collapses when
-    /// hidden because it is an NSStackView.
+    /// Fixed footer with the follow-up input + send button. Collapses
+    /// when hidden because it is an NSStackView.
     private let footerView = NSStackView()
     private let footerSeparator = HairlineView()
     private let followUpField = ChromeInput(placeholder: "Ask a follow-up…")
+    private let followUpRow = NSStackView()
 
     /// The Settings-window translucency, exactly: ONE background@opacity
     /// fill and theme text on top — no blur (the Settings window itself
@@ -120,9 +121,8 @@ final class AITaskCard: NSView {
         let headerRule = HairlineView()
         headerRule.translatesAutoresizingMaskIntoConstraints = false
         addSubview(headerRule)
-
-        // Fixed footer with the follow-up input. Hidden until a turn
-        // ends, and hidden again in input mode.
+        // Fixed footer with the follow-up input + Send button. Hidden
+        // until a turn ends, and hidden again in input mode.
         footerView.orientation = .vertical
         footerView.alignment = .leading
         footerView.spacing = 0
@@ -130,8 +130,18 @@ final class AITaskCard: NSView {
         footerView.translatesAutoresizingMaskIntoConstraints = false
         footerSeparator.translatesAutoresizingMaskIntoConstraints = false
         followUpField.translatesAutoresizingMaskIntoConstraints = false
+        followUpRow.orientation = .horizontal
+        followUpRow.alignment = .centerY
+        followUpRow.spacing = 8
+        followUpRow.translatesAutoresizingMaskIntoConstraints = false
+        followUpRow.addArrangedSubview(followUpField)
+        followUpRow.addArrangedSubview(ChromeButton.make(
+            "Send", style: .primary) { [weak self] in self?.submitFollowUp() })
         footerView.addArrangedSubview(footerSeparator)
-        footerView.addArrangedSubview(followUpField)
+        footerView.addArrangedSubview(followUpRow)
+        followUpField.heightAnchor.constraint(equalToConstant: ControlMetrics.inputHeight).isActive = true
+        followUpField.widthAnchor.constraint(equalTo: followUpRow.widthAnchor, constant: -84).isActive = true
+        followUpRow.widthAnchor.constraint(equalTo: footerView.widthAnchor, constant: -24).isActive = true
         footerSeparator.heightAnchor.constraint(equalToConstant: 1).isActive = true
         // Hidden until a turn ends; NSStackView collapses hidden
         // arranged subviews, so the card reclaims the footer's height.
@@ -268,7 +278,20 @@ final class AITaskCard: NSView {
             field.onReturn = { [weak self] in self?.submitInput() }
             field.onEscape = { [weak self] in self?.onClose?() }
             self.inputField = field
-            field.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+            // A row keeps the Send button beside the input instead of
+            // pushing it to the next line. Add the row to the stack
+            // BEFORE binding widths — otherwise the anchors live in
+            // different hierarchies and AppKit throws a fatal exception.
+            let row = NSStackView(views: [field, ChromeButton.make(
+                "Send", style: .primary) { [weak self] in self?.submitInput() }])
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 8
+            row.translatesAutoresizingMaskIntoConstraints = false
+            group.add(row)
+            field.heightAnchor.constraint(equalToConstant: ControlMetrics.inputHeight).isActive = true
+            field.widthAnchor.constraint(equalTo: row.widthAnchor, constant: -84).isActive = true
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
         }
         window?.makeFirstResponder(inputField)
     }
@@ -389,7 +412,7 @@ final class AITaskCard: NSView {
     private func setFooterVisible(_ visible: Bool) {
         footerView.isHidden = !visible
         footerSeparator.isHidden = !visible
-        followUpField.isHidden = !visible
+        followUpRow.isHidden = !visible
         if visible {
             followUpField.focus()
         }

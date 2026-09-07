@@ -178,11 +178,18 @@ extension AppDelegate {
     @objc func menuSplitRight() { coordinator.splitPane(vertical: false) }
     @objc func menuSplitDown() { coordinator.splitPane(vertical: true) }
 
-    /// ⌘⇧A: the focused pane's AI card in request-input mode. Falls back
-    /// to the focused tab's active pane when the host pool holds no hit.
+    /// ⌘⇧A: the focused tab's @ai CELL in request-input mode (tty7
+    /// model — it opens/reuses the grid cell, never an overlay). Falls
+    /// back to the focused pane's overlay for side terminals.
     @objc private func menuAskAI() {
         guard let store = coordinator.store, let ws = store.focused,
-              let pane = coordinator.activePane(of: ws) else { return }
+              let tab = ws.focusedTab else { return }
+        if let aiPaneId = coordinator.openAITaskPane(wsId: ws.id, tabId: tab.id),
+           let cell = hostPool[HostKey(workspace: ws.id, pane: aiPaneId)] as? AITaskPaneHost {
+            cell.enterInputMode()
+            return
+        }
+        guard let pane = coordinator.activePane(of: ws) else { return }
         // The ask is app-global: clear any other pane's ask card first.
         for case let host as PaneHost in hostPool.values { host.hideAITaskIfInputMode() }
         (hostPool[HostKey(workspace: ws.id, pane: pane.id)] as? PaneHost)?.openAIInputMode()

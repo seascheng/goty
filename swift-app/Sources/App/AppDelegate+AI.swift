@@ -38,6 +38,13 @@ extension AppDelegate {
                     }
                     return
                 }
+                // Two surfaces carry a task: the grid CELL (center tabs,
+                // tty7 model) and the legacy overlay (side terminals).
+                if let cell = self.hostPool[key] as? AITaskPaneHost {
+                    cell.render(task: task)
+                    self.wireAITaskCell(cell, task: task)
+                    return
+                }
                 let host = self.hostPool[key] as? PaneHost
                 if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
                     FileHandle.standardError.write("AICARD phase=\(task.phase) host=\(host != nil) frame=\(host?.currentAITaskCard?.frame ?? .zero)\n".data(using: .utf8)!)
@@ -54,11 +61,20 @@ extension AppDelegate {
         aiCoordinatorBox = (token, coord)
         return coord
     }
-
     func startAITask(host: PaneHost, text: String) {
         // A leftover ⌘⇧A card on this pane would freeze and block the
         // task render (the inputMode guard) — the "two panels" bug.
         host.hideAITaskIfInputMode()
+        // CENTER tab terminal: the task renders in the tab's own @ai
+        // GRID CELL (tty7 model — AI and the shell coexist). Side
+        // terminals have no tab to hold a cell and keep the overlay.
+        if let (wsId, tabId) = coordinator.tabOfPane(host.hostKey.pane,
+                                                     wsId: host.hostKey.workspace) {
+            startAITaskInCell(wsId: wsId, tabId: tabId, text: text,
+                              feed: { [weak host] in host?.coordinatorFeed?() },
+                              tail: host.aiTail.snapshot)
+            return
+        }
         guard let target = host.coordinatorFeed?()
             ?? coordinator.aiTarget(for: host.hostKey) else { return }
         let context = AIContext(request: text, target: target,
@@ -67,11 +83,67 @@ extension AppDelegate {
         let id = coord.start(context: context)
         activeAIPane[id] = host.hostKey
         aiTaskOwner[id] = coord
-        if ProcessInfo.processInfo.environment["GOTY_AI_DEBUG"] == "1" {
-            FileHandle.standardError.write("AISTART id=\(id) mapped to pane=\(host.hostKey.pane)\n".data(using: .utf8)!)
+    }
+
+    /// The cell path: open (or reuse) the tab's @ai pane, then start the
+    /// task routed to that cell. `feed` supplies the EXECUTION target of
+    /// the terminal the request came from (the cell itself has no cwd).
+    func startAITaskInCell(wsId: UUID, tabId: String, text: String,
+                           feed: (() -> ExecutionTarget?)?, tail: String) {
+        guard let aiPaneId = coordinator.openAITaskPane(wsId: wsId, tabId: tabId),
+              let target = feed?() ?? coordinator.aiTarget(
+                  for: HostKey(workspace: wsId, pane: aiPaneId))
+        else { return }
+        let context = AIContext(request: text, target: target,
+                                visibleOutput: tail, hostFacts: "")
+        let coord = aiCoordinator()
+        let id = coord.start(context: context)
+        activeAIPane[id] = HostKey(workspace: wsId, pane: aiPaneId)
+        aiTaskOwner[id] = coord
+    }
+
+    /// Submitting from the CELL's own input field (a restored pane, or
+    /// ⌘⇧A focus): the target is the tab's active terminal.
+    func startAITaskInCell(wsId: UUID, aiPaneId: String, text: String) {
+        guard let tabId = coordinator.tabOfPane(aiPaneId, wsId: wsId)?.tabId else { return }
+        startAITaskInCell(wsId: wsId, tabId: tabId, text: text,
+                          feed: { [weak self] in
+            guard let self,
+                  let termPaneId = self.coordinator.activeTerminalPane(
+                      wsId: wsId, tabId: tabId) else { return nil }
+            return self.coordinator.aiTarget(for: HostKey(workspace: wsId, pane: termPaneId))
+        }, tail: "")
+    }
+
+    /// Cell wiring: same coordinator contract as the overlay card, but
+    /// CLOSE removes the pane (the terminal reclaims the full grid).
+    private func wireAITaskCell(_ cell: AITaskPaneHost, task: AITask) {
+        let card = cell.taskCard
+        let id = task.id
+        let owner = aiTaskOwner[id] ?? aiCoordinator()
+        card.onConfirm = { [weak owner] in owner?.confirm(taskId: id) }
+        card.onEdit = { [weak owner] proposal in
+            owner?.edit(taskId: id, to: proposal)
+        }
+        card.onCancel = { [weak owner] in
+            owner?.cancel(taskId: id)
+        }
+        card.onContinue = { [weak owner] in owner?.continueBudget(taskId: id) }
+        card.onFollowUp = { [weak owner] text in
+            owner?.continueSession(taskId: id, request: text)
+        }
+        card.onClose = { [weak owner] in
+            owner?.cancel(taskId: id)
+            self.coordinator.closeAITaskPane(wsId: cell.hostKey.workspace,
+                                             paneId: cell.hostKey.pane)
+        }
+        card.onSubmit = { [weak self] text in
+            self?.startAITaskInCell(wsId: cell.hostKey.workspace,
+                                    aiPaneId: cell.hostKey.pane, text: text)
         }
     }
 
+    /// The overlay card wiring (side terminals — no tab, no cell).
     private func wireAICard(_ host: PaneHost, task: AITask) {
         guard let card = host.currentAITaskCard else { return }
         let id = task.id

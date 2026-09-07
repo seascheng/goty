@@ -1568,6 +1568,30 @@ func run() {
                                           vertical: false, after: true) == nil,
           "out-of-range target is rejected, not crashed")
 
+    // @ai task cell geometry (tty7 model): the terminal compresses to
+    // the upper 3/5, the ai row takes the bottom 2/5 full-width; close
+    // restores the terminal over the full grid. Pinned headless.
+    print("— @ai task cell geometry —")
+    func aiStr(_ r: (cells: [PaneState], aiTop: Int, aiHeight: Int, gridWidth: Int)?) -> String? {
+        guard let r else { return nil }
+        return r.cells.map { cellStr($0) }.joined(separator: " | ")
+            + " ai@\(r.aiTop)h\(r.aiHeight)w\(r.gridWidth)"
+    }
+    var ai = aiStr(WorkspaceCoordinator.aiTaskSplitCells(
+        [PaneState(id: "t", cwd: nil)]))
+    check(ai == "0,0 1x3 ai@3h2w1",
+          "single terminal: 3/5 top band + 2/5 ai row (got \(ai ?? "-"))")
+    ai = aiStr(WorkspaceCoordinator.aiTaskSplitCells(
+        [PaneState(id: "a", cwd: nil, left: 0, top: 0, width: 1, height: 1),
+         PaneState(id: "b", cwd: nil, left: 1, top: 0, width: 1, height: 1)]))
+    check(ai == "0,0 1x3 | 1,0 1x3 ai@3h2w2",
+          "side-by-side pair keeps widths, both compress to the band (got \(ai ?? "-"))")
+    let aiRestored = WorkspaceCoordinator.aiTaskRestoreCells(
+        [PaneState(id: "a", cwd: nil, left: 0, top: 0, width: 1, height: 3),
+         PaneState(id: "ai", cwd: nil, kind: .aiTask, left: 0, top: 3, width: 1, height: 2)],
+        removing: "ai").map { cellStr($0) }.joined(separator: " | ")
+    check(aiRestored == "0,0 1x5",
+          "close: terminal stretches back over the full grid (got \(aiRestored))")
     // Server remove → re-add: Mode 1 keeps sessions running on the
     // host, so the workspace's pane ids (the attach keys) must be
     // recoverable — re-adding the host restores them verbatim and
@@ -1765,7 +1789,7 @@ func run() {
         let secs = SpaceGrouping.sections(for: tabs)
         check(secs.flatMap(\.tabIndexs).sorted() == [0, 2],
               "sections exclude free-terminal tabs")
-    } catch { check(false, "threw: \(error)") }
+    }
 
     // Sidebar "+" menu: built pure, fired like the host picker. Every
     // space gets the same list (2026-08-31): terminal + available ACP
