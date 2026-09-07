@@ -525,13 +525,17 @@ final class ChromeInput: NSView, NSTextViewDelegate, ThemeRefreshable {
     private let maxLines: Int
     private var boxHeight: NSLayoutConstraint?
     private let restLines: Int
+    /// No own fill/border — the composer/card supplies the visual box.
+    private let plain: Bool
 
     init(placeholder: String = "", icon: String? = nil,
-         multiline: Bool = false, restLines: Int = 3, maxLines: Int = 6) {
+         multiline: Bool = false, restLines: Int = 3, maxLines: Int = 6,
+         plain: Bool = false) {
         self.placeholderText = placeholder
         self.multiline = multiline
         self.restLines = restLines
         self.maxLines = maxLines
+        self.plain = plain
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
@@ -649,19 +653,26 @@ final class ChromeInput: NSView, NSTextViewDelegate, ThemeRefreshable {
         updatePlaceholder()
     }
 
-    /// Every themed surface reapplies on entering the tree (the
-    /// IconButton rule — a future ghostty-theme switch repaints on
-    /// re-present).
     private func applyTheme() {
-        layer?.backgroundColor = Chrome.theme.inputFill.cgColor
-        layer?.borderWidth = 1
-        layer?.borderColor = Chrome.theme.hairline.cgColor
+        if plain {
+            layer?.backgroundColor = .clear
+            layer?.borderWidth = 0
+        } else {
+            layer?.backgroundColor = Chrome.theme.inputFill.cgColor
+            layer?.borderWidth = 1
+            layer?.borderColor = Chrome.theme.hairline.cgColor
+        }
         textView.textColor = Chrome.theme.foreground
         textView.insertionPointColor = Chrome.theme.foreground
         textView.selectedTextAttributes = [
             .backgroundColor: Chrome.theme.accent,
             .foregroundColor: Chrome.theme.accentText,
         ]
+    }
+
+    func setEditable(_ enabled: Bool) {
+        textView.isEditable = enabled
+        alphaValue = enabled ? 1 : 0.55
     }
 
     /// Theme flip: applyTheme covers box/text/caret/selection; the

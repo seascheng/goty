@@ -213,6 +213,13 @@ final class AITaskCard: NSView {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         followUpField.stringValue = ""
+        // Input mode shares this footer: the first submit IS the task
+        // request (agent-gui composer semantics), not a follow-up.
+        if inputMode {
+            inputMode = false
+            onSubmit?(text)
+            return
+        }
         onFollowUp?(text)
     }
 
@@ -271,28 +278,18 @@ final class AITaskCard: NSView {
     func enterInputMode(target: ExecutionTarget?) {
         inputMode = true
         editMode = false
-        setFooterVisible(false)
+        lastTask = nil
+        lastTarget = target
+        taskQuestion = nil
+        // Agent-gui composer layout: an (empty) content area above, the
+        // input row PINNED at the bottom — the footer is the input, not
+        // a mid-card text field like the old overlay version.
         rebuild { group in
             group.header(question: nil, target: target, phase: "Ask AI")
-            let field = ChromeInput(placeholder: "Ask the model to do what, where?")
-            field.onReturn = { [weak self] in self?.submitInput() }
-            field.onEscape = { [weak self] in self?.onClose?() }
-            self.inputField = field
-            // A row keeps the Send button beside the input instead of
-            // pushing it to the next line. Add the row to the stack
-            // BEFORE binding widths — otherwise the anchors live in
-            // different hierarchies and AppKit throws a fatal exception.
-            let row = NSStackView(views: [field, ChromeButton.make(
-                "Send", style: .primary) { [weak self] in self?.submitInput() }])
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 8
-            row.translatesAutoresizingMaskIntoConstraints = false
-            group.add(row)
-            field.heightAnchor.constraint(equalToConstant: ControlMetrics.inputHeight).isActive = true
-            field.widthAnchor.constraint(equalTo: row.widthAnchor, constant: -84).isActive = true
-            row.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
+            _ = group.markdown("*Describe the task — the AI sees this "
+                + "terminal's recent output.*")
         }
+        setFooterVisible(true)
         focusInput()
     }
 
@@ -300,7 +297,7 @@ final class AITaskCard: NSView {
     /// this before the view tree lands) — callers re-invoke after the
     /// layout pass.
     func focusInput() {
-        window?.makeFirstResponder(inputField)
+        window?.makeFirstResponder(inputMode ? followUpField : inputField)
     }
 
     private func submitInput() {
