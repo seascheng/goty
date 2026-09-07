@@ -94,6 +94,13 @@ final class AITaskCard: NSView {
         titleField.setContentHuggingPriority(.required, for: .vertical)
         titleField.translatesAutoresizingMaskIntoConstraints = false
         addSubview(titleField)
+        spinnerField.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+        spinnerField.textColor = Chrome.theme.accent
+        spinnerField.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(spinnerField)
+        spinnerField.stringValue = ""
+
+
 
         metaField.font = .systemFont(ofSize: 11)
         metaField.textColor = Chrome.theme.secondaryText
@@ -146,7 +153,10 @@ final class AITaskCard: NSView {
         addSubview(footerView)
 
         NSLayoutConstraint.activate([
-            titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            spinnerField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+        spinnerField.centerYAnchor.constraint(equalTo: titleField.centerYAnchor),
+        spinnerField.widthAnchor.constraint(equalToConstant: 14),
+        titleField.leadingAnchor.constraint(equalTo: spinnerField.trailingAnchor, constant: 2),
             titleField.topAnchor.constraint(equalTo: topAnchor, constant: 7),
             titleField.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -6),
             metaField.leadingAnchor.constraint(equalTo: titleField.trailingAnchor, constant: 10),
@@ -235,7 +245,24 @@ final class AITaskCard: NSView {
 
     private var bodyHeight: NSLayoutConstraint?
     private var hugConstraint: NSLayoutConstraint?
-    /// Scroll view that reports USER wheel scrolling — the stick-to-
+    /// Phase → spinner: the RUNNING phases cycle braille frames at
+    /// 10fps; everything else (done/failed/confirmation/input) rests.
+    private func setSpinner(active: Bool) {
+        if active {
+            spinnerField.stringValue = String(Self.spinnerFrames[spinnerIndex])
+            guard spinnerTimer == nil else { return }
+            spinnerTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) {
+                [weak self] _ in
+                guard let self else { return }
+                self.spinnerIndex = (self.spinnerIndex + 1) % Self.spinnerFrames.count
+                self.spinnerField.stringValue = String(Self.spinnerFrames[self.spinnerIndex])
+            }
+        } else {
+            spinnerTimer?.invalidate()
+            spinnerTimer = nil
+            spinnerField.stringValue = ""
+        }
+    }
     /// bottom pin must never fight a reader who scrolled up.
     private final class CardScrollView: NSScrollView {
         var onUserScroll: (() -> Void)?
@@ -252,6 +279,14 @@ final class AITaskCard: NSView {
     /// Fixed title-bar fields (question + meta) — pinned above the
     /// scrolling body, set by Group.header on every render.
     private let titleField = NSTextField(labelWithString: "")
+    /// Activity spinner in the header (the sidebar SpaceStatusView
+    /// recipe): braille frames cycle at 10fps while a turn runs — a
+    /// visible "the AI is working" even when the endpoint streams in
+    /// one buffered chunk.
+    private let spinnerField = NSTextField(labelWithString: "")
+    private static let spinnerFrames: [Character] = Array("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+    private var spinnerIndex = 0
+    private var spinnerTimer: Timer?
     private let metaField = NSTextField(labelWithString: "")
     private let closeButton = IconButton()
     override func layout() {
@@ -336,6 +371,7 @@ final class AITaskCard: NSView {
         layer?.borderColor = Chrome.theme.hairline.cgColor
         titleField.textColor = Chrome.theme.foreground
         metaField.textColor = Chrome.theme.secondaryText
+        spinnerField.textColor = Chrome.theme.accent
         if let task = lastTask, let target = lastTarget {
             render(task: task, target: target)
             updateFooter(task: task)
@@ -553,6 +589,10 @@ final class AITaskCard: NSView {
             // update IN PLACE — they never scroll away with the body.
             card.titleField.stringValue = question ?? ""
             card.metaField.stringValue = "AI · \(phase) · \(name) · \(cwd)"
+            // Header phase drives the braille activity spinner: the
+            // running phases animate, everything else rests.
+            card.setSpinner(active: ["thinking…", "answering…", "executing…"]
+                .contains(phase))
         }
 
         /// One user turn in the transcript: an accent chevron line,
