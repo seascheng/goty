@@ -65,17 +65,34 @@ extension AppDelegate {
     /// cell's input is focused the moment the card lands. Side terminals
     /// keep the overlay.
     func openAIInputCell(for host: PaneHost) {
-        if let tab = coordinator.tabOfPane(host.hostKey.pane,
-                                           wsId: host.hostKey.workspace),
-           let aiPaneId = coordinator.openAITaskPane(wsId: tab.wsId, tabId: tab.tabId),
-           let cell = hostPool[HostKey(workspace: tab.wsId, pane: aiPaneId)] as? AITaskPaneHost {
-            cell.taskCard.onClose = { [weak self] in
-                self?.coordinator.closeAITaskPane(wsId: tab.wsId, paneId: aiPaneId)
-            }
-            cell.enterInputMode()
-            return
+        guard let tab = coordinator.tabOfPane(host.hostKey.pane,
+                                              wsId: host.hostKey.workspace)
+        else { host.openAIInputMode(); return }
+        openAIInputCell(wsId: tab.wsId, tabId: tab.tabId)
+    }
+
+    /// The cell may not have a HOST yet — the grid's layout pass builds
+    /// hosts lazily from the store, and a bare @ai lands one tick before
+    /// that pass. Build it NOW so the card mounts immediately; the pass
+    /// later finds it in the pool and just lays it out.
+    func openAIInputCell(wsId: UUID, tabId: String) {
+        guard let aiPaneId = coordinator.openAITaskPane(wsId: wsId, tabId: tabId)
+        else { return }
+        let key = HostKey(workspace: wsId, pane: aiPaneId)
+        var cell = hostPool[key] as? AITaskPaneHost
+        if cell == nil, let store = coordinator.store,
+           let ws = store.workspaces.first(where: { $0.id == wsId }),
+           let pane = ws.tabs.first(where: { $0.id == tabId })?
+               .panes.first(where: { $0.id == aiPaneId }),
+           let gapp = ghostty.app,
+           let host = makePaneHost(pane: pane, ws: ws, gapp: gapp) {
+            cell = host as? AITaskPaneHost
         }
-        host.openAIInputMode()
+        guard let cell else { return }
+        cell.taskCard.onClose = { [weak self] in
+            self?.coordinator.closeAITaskPane(wsId: wsId, paneId: aiPaneId)
+        }
+        cell.enterInputMode()
     }
 
     func startAITask(host: PaneHost, text: String) {
@@ -107,6 +124,11 @@ extension AppDelegate {
     /// the terminal the request came from (the cell itself has no cwd).
     func startAITaskInCell(wsId: UUID, tabId: String, text: String,
                            feed: (() -> ExecutionTarget?)?, tail: String) {
+        // Ensure the CELL's host exists NOW (the grid's layout pass is
+        // a tick behind) — openAIInputCell is idempotent: it reuses the
+        // existing pane, pre-builds the host and enters input mode; the
+        // task render lands in the cell from the first update on.
+        openAIInputCell(wsId: wsId, tabId: tabId)
         guard let aiPaneId = coordinator.openAITaskPane(wsId: wsId, tabId: tabId),
               let target = feed?() ?? coordinator.aiTarget(
                   for: HostKey(workspace: wsId, pane: aiPaneId))
