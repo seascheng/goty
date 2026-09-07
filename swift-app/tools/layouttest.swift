@@ -53,10 +53,35 @@ func run() {
             card.render(task: running, target: target)
             check(!card.isFooterVisibleForTest, "footer hidden while the turn runs")
             var done = AITask(context: context)
-            done.advance(to: .completed(summary: "done"))
+            done.complete(summary: "done", reasoning: "因为……")
             card.render(task: done, target: target)
             card.layoutSubtreeIfNeeded()
             check(card.isFooterVisibleForTest, "footer shows once the turn ends")
+            // The turn's thinking must survive completion (a plain-text
+            // answer has no round to carry it) — muted block per exchange.
+            let thinks = card.bodyFieldsForTest.filter {
+                $0 is NSTextField && ($0 as! NSTextField).stringValue.contains("因为")
+            }
+            // GFM tables need a DEFINITE column width: a second layout
+            // pass (scroll → fittingSize re-measure) must not squeeze
+            // the markdown label or the table degrades into wrapped
+            // text lines.
+            card.renderForTest(markdown: "| a | b |\n|---|---|\n| 1 | 2 |")
+            card.layoutSubtreeIfNeeded()
+            let mdField = card.bodyFieldsForTest.compactMap { $0 as? NSTextField }.first
+            check(mdField != nil, "table markdown renders a field")
+            if let f = mdField {
+                check(abs(f.bounds.width - (card.bodyStackForTest.bounds.width - 24)) < 1.5,
+                      "markdown label is EXACTLY stack-24 wide (got \(f.bounds.width) vs \(card.bodyStackForTest.bounds.width - 24))")
+                var hasTable = false
+                f.attributedStringValue.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: f.attributedStringValue.length)) { v, _, _ in
+                    if let ps = v as? NSParagraphStyle,
+                       ps.textBlocks.contains(where: { $0 is NSTextTableBlock }) {
+                        hasTable = true
+                    }
+                }
+                check(hasTable, "GFM table renders as NSTextTable blocks")
+            }
         }
         // — Offline cover: full-region, top strip included (the
         //   "top bar ignores the page color" report) —

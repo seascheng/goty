@@ -232,7 +232,8 @@ final class AITaskCoordinator {
                 pendingReasoning[id] = r
             }
             if let text = reply.text, reply.toolCalls.isEmpty {
-                task.advance(to: .completed(summary: text))
+                task.complete(summary: text, reasoning: pendingReasoning[id])
+                pendingReasoning[id] = nil
                 tasks[id] = task
                 emit(id)
                 return

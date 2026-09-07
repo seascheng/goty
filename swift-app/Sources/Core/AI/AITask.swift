@@ -48,8 +48,11 @@ struct AITask {
     private(set) var streamingReasoning: String?
     /// Completed conversation exchanges (agent-gui transcript shape:
     /// user request + assistant answer, oldest first). The live turn
-    /// renders separately from latestRequest/streamingText.
-    private(set) var transcript: [(request: String, answer: String)] = []
+    /// renders separately from latestRequest/streamingText. Each
+    /// exchange keeps the turn's reasoning — a plain-text answer has
+    /// no round to carry it, and the thinking must survive completion
+    /// (the "thinking 文本的显示呢" report).
+    private(set) var transcript: [(request: String, answer: String, reasoning: String?)] = []
 
     init(id: UUID = UUID(), context: AIContext, budget: Int = 25) {
         self.id = id
@@ -63,12 +66,17 @@ struct AITask {
         self.streamingReasoning = nil
     }
 
+    /// Terminal success for a turn: records the exchange WITH its
+    /// reasoning (a plain-text answer has no round to carry it) and
+    /// lands the phase. Callers that complete a turn must go through
+    /// here, not `advance(to: .completed)` — advance no longer knows
+    /// the reasoning.
+    mutating func complete(summary: String, reasoning: String?) {
+        transcript.append((request: latestRequest, answer: summary, reasoning: reasoning))
+        phase = .completed(summary: summary)
+    }
+
     mutating func advance(to newPhase: AITaskPhase) {
-        if case .completed(let summary) = newPhase {
-            // The turn's exchange joins the transcript; the next
-            // follow-up starts a fresh turn from latestRequest.
-            transcript.append((request: latestRequest, answer: summary))
-        }
         phase = newPhase
     }
 

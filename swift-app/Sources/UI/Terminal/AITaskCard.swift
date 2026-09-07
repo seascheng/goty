@@ -553,6 +553,10 @@ final class AITaskCard: NSView {
     var selectableFieldForTest: NSView? {
         stack.views.compactMap { $0 as? NSTextField }.first { $0.isSelectable }
     }
+    /// Test hook: every text field currently in the scrolling body.
+    var bodyFieldsForTest: [NSView] { stack.views.compactMap { $0 as? NSTextField } }
+    /// Test hook: the body stack's arranged views (table-width checks).
+    var bodyStackForTest: NSStackView { stack }
     func renderForTest(markdown: String) {
         rebuild { group in _ = group.markdown(markdown) }
     }
@@ -611,6 +615,10 @@ final class AITaskCard: NSView {
         func transcript(_ task: AITask, live: Bool) {
             for exchange in task.transcript {
                 userLine(exchange.request)
+                if let think = exchange.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !think.isEmpty {
+                    thinkingBlock(think)
+                }
                 _ = markdown(exchange.answer)
             }
             if live, !task.latestRequest.isEmpty,
@@ -746,12 +754,15 @@ final class AITaskCard: NSView {
             field.lineBreakMode = .byWordWrapping
             field.cell?.wraps = true
             field.cell?.truncatesLastVisibleLine = false
-            field.maximumNumberOfLines = 0
-            field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            // EXACT width, not ≤: NSTextTable layout needs a definite
+            // column width. A ≤ constraint lets relayout passes (scroll
+            // → fittingSize re-measure) squeeze the label, and the
+            // table cells wrap character-by-character — the "table
+            // degrades into plain text" report.
+            field.widthAnchor.constraint(equalTo: stack.widthAnchor,
+                                         constant: -24).isActive = true
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             add(views: [field])
-            field.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor,
-                                         constant: -24).isActive = true
             return field
         }
 
