@@ -10,28 +10,27 @@ import AppKit
 /// terminal resizes).
 final class AITaskPaneHost: NSView, PaneHosting, ThemeRefreshable {
     let hostKey: HostKey
-    private let card = AITaskCard()
-    /// Re-used by ⌘⇧A and the @ai trigger: submitting follows the same
-    /// path as a captured @ai line.
+    var windowVisible: Bool = true
+    /// Submitting from the composer follows the same path as a captured
+    /// @ai line (the AppDelegate routes it to the tab's terminal).
     var onSubmit: ((String) -> Void)?
     var coordinatorFeed: (() -> ExecutionTarget?)?
-
-    var windowVisible: Bool = true
-
+    private let card = AITaskCard()
     init(key: HostKey) {
         self.hostKey = key
         super.init(frame: .zero)
         card.translatesAutoresizingMaskIntoConstraints = false
         addSubview(card)
-        // Full-bleed inside the cell: the card's internal scroll view
-        // owns overflow; the cell height is the grid's, never the
-        // content's (the old overlay's content-driven height + 60% cap
-        // are gone — a fixed cell cannot fight the terminal for space).
+        // Full-bleed MINUS a margin: the agent-gui composer breathes
+        // inside its cell. The card FILLS the fixed cell (its internal
+        // scroll view owns overflow) — cell height is the grid's, never
+        // the content's, so nothing fights the terminal for space.
+        card.setFillsContainer(true)
         NSLayoutConstraint.activate([
-            card.leadingAnchor.constraint(equalTo: leadingAnchor),
-            card.trailingAnchor.constraint(equalTo: trailingAnchor),
-            card.topAnchor.constraint(equalTo: topAnchor),
-            card.bottomAnchor.constraint(equalTo: bottomAnchor),
+            card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            card.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            card.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            card.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
         ])
     }
 

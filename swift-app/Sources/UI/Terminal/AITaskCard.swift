@@ -44,6 +44,7 @@ final class AITaskCard: NSView {
     /// when hidden because it is an NSStackView.
     private let footerView = NSStackView()
     private let footerSeparator = HairlineView()
+    private let headerRuleView = HairlineView()
     private let followUpField = ChromeInput(placeholder: "Ask a follow-up…")
     private let followUpRow = NSStackView()
 
@@ -118,7 +119,7 @@ final class AITaskCard: NSView {
         closeButton.onClick = { [weak self] in self?.onClose?() }
         addSubview(closeButton)
 
-        let headerRule = HairlineView()
+        let headerRule = headerRuleView
         headerRule.translatesAutoresizingMaskIntoConstraints = false
         addSubview(headerRule)
         // Fixed footer with the follow-up input + Send button. Hidden
@@ -197,15 +198,25 @@ final class AITaskCard: NSView {
         ])
         // The card = fixed header + body + footer; the body hugs its
         // content (yielding to the host's pane cap, beyond which it scrolls).
-        let hug = scrollView.heightAnchor.constraint(equalTo: stack.heightAnchor)
-        hug.priority = .init(999)   // yield to the pane cap
-        hug.isActive = true
+        hugConstraint = scrollView.heightAnchor.constraint(equalTo: stack.heightAnchor)
+        hugConstraint?.priority = .init(999)   // yield to the pane cap
+        hugConstraint?.isActive = true
         // The stack's height is pinned EXPLICITLY to its fitting
         // height and re-measured per layout pass — otherwise the stack
         // collapses and crushes the markdown box to a line.
         bodyHeight = stack.heightAnchor.constraint(equalToConstant: 0)
         bodyHeight?.priority = .init(999)   // yield to the pane cap
         bodyHeight?.isActive = true
+    }
+
+    /// Cell mode: the card is pinned to a FIXED cell, so the body fills
+    /// the header..footer span and content scrolls. The overlay's
+    /// content-hug (card height = content) would, inside a fixed cell,
+    /// collapse the body and hand every leftover point to the footer —
+    /// the "input floats mid-card over a dead zone" report.
+    func setFillsContainer(_ fills: Bool) {
+        hugConstraint?.isActive = !fills
+        bodyHeight?.isActive = !fills
     }
 
     private func submitFollowUp() {
@@ -224,6 +235,7 @@ final class AITaskCard: NSView {
     }
 
     private var bodyHeight: NSLayoutConstraint?
+    private var hugConstraint: NSLayoutConstraint?
     /// Scroll view that reports USER wheel scrolling — the stick-to-
     /// bottom pin must never fight a reader who scrolled up.
     private final class CardScrollView: NSScrollView {
@@ -272,6 +284,11 @@ final class AITaskCard: NSView {
     /// exact @ai path (PaneHost routes onSubmit to onAITask).
     var isInputMode: Bool { inputMode }
 
+    // Test hooks: the composer layout must pin the footer to the card's
+    // bottom edge with the body above it — pinned headless.
+    var footerFrameForTest: NSRect { footerView.frame }
+    var headerRuleFrameForTest: NSRect { headerRuleView.frame }
+    var scrollViewFrameForTest: NSRect { scrollView.frame }
     func enterInputMode(target: ExecutionTarget?) {
         inputMode = true
         editMode = false
@@ -284,7 +301,7 @@ final class AITaskCard: NSView {
         followUpField.setPlaceholder("Describe the task — the AI sees this "
             + "terminal's recent output")
         rebuild { group in
-            group.header(question: nil, target: target, phase: "Ask AI")
+            group.header(question: "Ask AI", target: target, phase: "task")
         }
         setFooterVisible(true)
         focusInput()

@@ -1592,6 +1592,32 @@ func run() {
         removing: "ai").map { cellStr($0) }.joined(separator: " | ")
     check(aiRestored == "0,0 1x5",
           "close: terminal stretches back over the full grid (got \(aiRestored))")
+
+    // — AITaskPaneHost composer layout: footer PINNED to the bottom —
+    // (the field report: input row floating mid-card with a dead zone
+    // below; the constraint set must put the body above a bottom-
+    // anchored footer, full-bleed inside the cell minus a margin).
+    do {
+        let host = AITaskPaneHost(key: HostKey(workspace: UUID(), pane: "ai"))
+        host.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+        host.enterInputMode()
+        host.layoutSubtreeIfNeeded()
+        let card = host.subviews.compactMap { $0 as? AITaskCard }.first
+        check(card != nil, "the host embeds the task card")
+        if let card {
+        let cf = card.frame
+        check(abs(cf.width - 584) < 1 && abs(cf.height - 384) < 1,
+              "card fills the cell minus the 8pt margin (got \(cf))")
+            let footer = card.footerFrameForTest
+            // Non-flipped frames: origin.y counts from the card's BOTTOM.
+            check(abs(footer.minY) < 2 && footer.height < 60,
+                  "footer is pinned to the card's bottom edge, input-row tall (got \(footer))")
+            let body = card.scrollViewFrameForTest
+            check(abs(body.minY - footer.maxY) < 1 && body.height > 200,
+                  "the body fills the header..footer span (got \(body))")
+        }
+        host.retire()
+    }
     // Server remove → re-add: Mode 1 keeps sessions running on the
     // host, so the workspace's pane ids (the attach keys) must be
     // recoverable — re-adding the host restores them verbatim and
