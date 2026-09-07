@@ -516,7 +516,7 @@ final class ChromeInput: NSView, NSTextViewDelegate, ThemeRefreshable {
     private let placeholderLabel = NSTextField(labelWithString: "")
     fileprivate let textView = InputTextView()
     private static let multilinePad: CGFloat = 5
-    private let placeholderText: String
+    private var placeholderText: String
     private var iconView: NSImageView?
     /// Multiline (git commit box): wraps, Return makes a newline, the
     /// box grows line by line to maxLines (tty7's arithmetic — one line
@@ -686,10 +686,14 @@ final class ChromeInput: NSView, NSTextViewDelegate, ThemeRefreshable {
         iconView?.contentTintColor = Chrome.theme.secondaryText
     }
 
+    /// Runtime placeholder swap (the @ai cell's footer is a task input
+    /// in input mode, a follow-up after the turn).
+    func setPlaceholder(_ text: String) {
+        placeholderText = text
+        updatePlaceholder()
+    }
+
     private func updatePlaceholder() {
-        // Content-driven only: the window's key-focus pass hands the
-        // field first responder before the user types anything, and
-        // focus-hiding left the box permanently empty-looking.
         placeholderLabel.isHidden = !textView.string.isEmpty
     }
 

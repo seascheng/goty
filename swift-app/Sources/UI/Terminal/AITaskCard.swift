@@ -268,9 +268,6 @@ final class AITaskCard: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
-
-    // MARK: modes
-
     /// ⌘⇧A: an empty card with a request field. Submitting follows the
     /// exact @ai path (PaneHost routes onSubmit to onAITask).
     var isInputMode: Bool { inputMode }
@@ -284,10 +281,10 @@ final class AITaskCard: NSView {
         // Agent-gui composer layout: an (empty) content area above, the
         // input row PINNED at the bottom — the footer is the input, not
         // a mid-card text field like the old overlay version.
+        followUpField.setPlaceholder("Describe the task — the AI sees this "
+            + "terminal's recent output")
         rebuild { group in
             group.header(question: nil, target: target, phase: "Ask AI")
-            _ = group.markdown("*Describe the task — the AI sees this "
-                + "terminal's recent output.*")
         }
         setFooterVisible(true)
         focusInput()
