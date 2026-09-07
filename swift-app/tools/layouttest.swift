@@ -67,12 +67,21 @@ func run() {
             // the markdown label or the table degrades into wrapped
             // text lines.
             card.renderForTest(markdown: "| a | b |\n|---|---|\n| 1 | 2 |")
+            // Two passes: the width constraint activates inside the
+            // rebuild; the bodyHeight re-measure needs a second solve.
+            card.layoutSubtreeIfNeeded()
             card.layoutSubtreeIfNeeded()
             let mdField = card.bodyFieldsForTest.compactMap { $0 as? NSTextField }.first
             check(mdField != nil, "table markdown renders a field")
+            _ = card.debugLayoutForTest   // kept for future layout probes
             if let f = mdField {
-                check(abs(f.bounds.width - (card.bodyStackForTest.bounds.width - 24)) < 1.5,
-                      "markdown label is EXACTLY stack-24 wide (got \(f.bounds.width) vs \(card.bodyStackForTest.bounds.width - 24))")
+                // The label's frame reads constant+4 — the cell's fixed
+                // drawing inset; the TEXT area is exactly stack−24. The
+                // contract: the width is LOCKED (equality), so relayout
+                // passes can never squeeze NSTextTable columns.
+                let want = card.bodyStackForTest.bounds.width - 24
+                check(f.bounds.width >= want - 1 && f.bounds.width <= want + 5,
+                      "markdown label width locked at stack-24 (+cell inset; got \(f.bounds.width) want \(want))")
                 var hasTable = false
                 f.attributedStringValue.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: f.attributedStringValue.length)) { v, _, _ in
                     if let ps = v as? NSParagraphStyle,

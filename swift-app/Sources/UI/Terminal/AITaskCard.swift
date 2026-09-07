@@ -70,6 +70,9 @@ final class AITaskCard: NSView {
             name: Chrome.themeDidChange, object: nil)
 
         stack.orientation = .vertical
+        // Leading alignment: arranged views size themselves; labels get
+        // explicit width constraints (the stack's .width alignment
+        // proved unreliable with addView(in:) on this OS).
         stack.alignment = .leading
         stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
@@ -555,8 +558,10 @@ final class AITaskCard: NSView {
     }
     /// Test hook: every text field currently in the scrolling body.
     var bodyFieldsForTest: [NSView] { stack.views.compactMap { $0 as? NSTextField } }
-    /// Test hook: the body stack's arranged views (table-width checks).
     var bodyStackForTest: NSStackView { stack }
+    var debugLayoutForTest: (sv: CGFloat, clip: CGFloat, stack: CGFloat) {
+        (scrollView.bounds.width, scrollView.contentView.bounds.width, stack.bounds.width)
+    }
     func renderForTest(markdown: String) {
         rebuild { group in _ = group.markdown(markdown) }
     }
@@ -754,15 +759,19 @@ final class AITaskCard: NSView {
             field.lineBreakMode = .byWordWrapping
             field.cell?.wraps = true
             field.cell?.truncatesLastVisibleLine = false
-            // EXACT width, not ≤: NSTextTable layout needs a definite
-            // column width. A ≤ constraint lets relayout passes (scroll
-            // → fittingSize re-measure) squeeze the label, and the
-            // table cells wrap character-by-character — the "table
-            // degrades into plain text" report.
-            field.widthAnchor.constraint(equalTo: stack.widthAnchor,
-                                         constant: -24).isActive = true
+            field.maximumNumberOfLines = 0
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             add(views: [field])
+            // EXACT width, not ≤: NSTextTable layout needs a definite
+            // column width. A ≤ constraint let relayout passes (scroll
+            // → fittingSize re-measure) squeeze the label until table
+            // cells wrapped character-by-character into plain text.
+            // Activated AFTER add (before it the field has no common
+            // ancestor — the streaming crash). The label's frame reads
+            // constant+4: that fixed 4pt is the cell's drawing inset,
+            // the text area is exactly the constant.
+            field.widthAnchor.constraint(equalTo: stack.widthAnchor,
+                                         constant: -24).isActive = true
             return field
         }
 
@@ -785,6 +794,7 @@ final class AITaskCard: NSView {
                                          constant: -24).isActive = true
             return field
         }
+
 
         func mono(_ text: String) -> NSTextField {
             label(text, font: .monospacedSystemFont(ofSize: 11.5, weight: .regular),
