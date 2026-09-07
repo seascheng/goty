@@ -274,8 +274,17 @@ final class AITaskCard: NSView {
             onUserScroll?()
         }
     }
-    private let scrollView = CardScrollView()
-    /// True while the body should follow new content (user at/near the
+    /// Content height of a markdown text view at a given width —
+    /// layout must be forced through the manager (text views carry no
+    /// intrinsic height once vertically non-tracking).
+    static func measureMarkdownHeight(_ tv: NSTextView, width: CGFloat) -> CGFloat {
+        guard let container = tv.textContainer, let lm = tv.layoutManager else { return 0 }
+        let w = max(width, 40)
+        container.containerSize = NSSize(width: w, height: .greatestFiniteMagnitude)
+        lm.ensureLayout(for: container)
+        return ceil(lm.usedRect(for: container).height) + 2
+    }
+
     /// bottom). Flips off the moment the user wheels away; back on when
     /// they wheel to the bottom again.
     private var pinnedToBottom = true
@@ -294,6 +303,17 @@ final class AITaskCard: NSView {
     private let closeButton = IconButton()
     override func layout() {
         super.layout()
+        // Markdown text views carry no intrinsic height — re-measure
+        // every markdown view at the CURRENT width (resize re-flows the
+        // text; stale heights would clip or gap).
+        let mdWidth = stack.bounds.width - 24
+        for case let tv as NSTextView in stack.views
+        where tv.identifier?.rawValue == "goty.ai.md" {
+            let h = Self.measureMarkdownHeight(tv, width: mdWidth)
+            for c in tv.constraints where c.firstAnchor === tv.heightAnchor {
+                c.constant = h
+            }
+        }
         bodyHeight?.isActive = false
         let fitting = ceil(stack.fittingSize.height)
         bodyHeight?.constant = fitting
@@ -658,20 +678,35 @@ final class AITaskCard: NSView {
 
 
 
-        /// The model's reasoning, agent-gui style: ">"-quoted, italic,
-        /// muted — the same read as the web view's thought block.
+        /// The model's reasoning, agent-gui thought style: a 2pt left
+        /// bar + 12pt inset, italic, a notch DIMMER than muted (the
+        /// web .thought: fg-muted blended 58% toward the background).
         /// Selectable, wraps; no line cap (the think-text never-wraps
         /// reports).
         func thinkingBlock(_ text: String) {
-            let quoted = text
-                .split(separator: "\n", omittingEmptySubsequences: false)
-                .map({ "> \($0)" })
-                .joined(separator: "\n")
-            let body = monoSelectable(quoted)
+            let body = QuoteLabel(labelWithString: text)
             body.font = NSFontManager.shared.convert(
-                .monospacedSystemFont(ofSize: 11.5, weight: .regular),
-                toHaveTrait: .italicFontMask)
-            body.textColor = Chrome.theme.secondaryText
+                .systemFont(ofSize: 12), toHaveTrait: .italicFontMask)
+            body.textColor = Chrome.theme.secondaryText.blended(
+                withFraction: 0.42, of: Chrome.theme.background)
+            body.barColor = Chrome.theme.hairline
+            body.isSelectable = true
+            body.lineBreakMode = .byWordWrapping
+            body.cell?.wraps = true
+            body.cell?.truncatesLastVisibleLine = false
+            body.maximumNumberOfLines = 0
+            let para = NSMutableParagraphStyle()
+            para.headIndent = 14   // 2pt bar + 12pt gap (web padding-left)
+            para.firstLineHeadIndent = 14
+            para.lineSpacing = 2
+            let mas = NSMutableAttributedString(attributedString: body.attributedStringValue)
+            mas.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: mas.length))
+            body.attributedStringValue = mas
+            body.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            body.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            add(views: [body])
+            body.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor,
+                                        constant: -24).isActive = true
         }
         func proposal(_ proposal: AIProposal, target: ExecutionTarget) {
             let explanation = proposal.explanation
@@ -756,10 +791,7 @@ final class AITaskCard: NSView {
         /// report), hence NON-scrolling here.
         @discardableResult
         func markdown(_ text: String) -> NSTextView {
-            let editor = monoEditor(text: "", multiline: true)
-            editor.isEditable = false
-            editor.isSelectable = true
-            editor.textStorage?.setAttributedString(MarkdownRenderer.render(
+            let storage = NSTextStorage(attributedString: MarkdownRenderer.render(
                 text, bodySize: 12.5,
                 highlight: { code, lang in
                     HighlightEngine.highlight(
@@ -767,6 +799,26 @@ final class AITaskCard: NSView {
                         font: .monospacedSystemFont(ofSize: 11.5, weight: .regular),
                         color: Chrome.theme.foreground)
                 }))
+            let container = NSTextContainer(
+                size: NSSize(width: 0, height: .greatestFiniteMagnitude))
+            // Width tracks the (locked) view width; the container's own
+            // height is CONTENT-driven — heightTracksTextView would tie
+            // it to a frame nobody sizes (verticallyResizable text
+            // views have no intrinsic), and the body collapsed to zero.
+            container.widthTracksTextView = true
+            container.heightTracksTextView = false
+            let layout = NSLayoutManager()
+            storage.addLayoutManager(layout)
+            layout.addTextContainer(container)
+            let editor = NSTextView(frame: .zero, textContainer: container)
+            editor.isEditable = false
+            editor.isSelectable = true
+            editor.isRichText = false
+            editor.drawsBackground = false
+            editor.backgroundColor = .clear
+            editor.focusRingType = .none
+            editor.translatesAutoresizingMaskIntoConstraints = false
+            editor.identifier = NSUserInterfaceItemIdentifier("goty.ai.md")
             add(views: [editor])
             // EXACT width (locked after add: no common ancestor before
             // it): NSTextTable layout needs a definite column width; a
@@ -774,6 +826,11 @@ final class AITaskCard: NSView {
             // table cells wrapped character-by-character into text.
             editor.widthAnchor.constraint(equalTo: stack.widthAnchor,
                                           constant: -24).isActive = true
+            // Explicit content height, measured at the CURRENT width;
+            // the card's layout() re-measures on every pass (resize).
+            editor.heightAnchor.constraint(
+                equalToConstant: AITaskCard.measureMarkdownHeight(editor,
+                    width: stack.bounds.width - 24)).isActive = true
             return editor
         }
 
