@@ -754,6 +754,21 @@ final class ChromeInput: NSView, NSTextViewDelegate, ThemeRefreshable {
             onKeyEscape?()
         }
 
+        override func keyDown(with event: NSEvent) {
+            // Plain Return must fire the act even on the TEXT path —
+            // performKeyEquivalent alone missed it under the Chinese IME
+            // (the input method took Return as composition confirm and
+            // the box gained a stray space instead of submitting).
+            if event.keyCode == 36, swallowsReturn,
+               !hasMarkedText(),
+               event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                   .subtracting([.function, .numericPad, .capsLock]).isEmpty {
+                onKeyReturn?()
+                return
+            }
+            super.keyDown(with: event)
+        }
+
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
             if event.keyCode == 36 {   // Return
                 // ⌘⏎ is the multiline commit act when wired; single-line

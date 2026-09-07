@@ -35,8 +35,8 @@ struct AITask {
     let id: UUID
     let context: AIContext
     /// The last user question in this temporary session. Starts as the
-    /// original request and updates on every follow-up so the card
-    /// header always shows the current turn.
+    /// initial ask; every follow-up replaces it (the card's header
+    /// always shows the current turn).
     private(set) var latestRequest: String
     private(set) var phase: AITaskPhase
     private(set) var rounds: [AIRound]
@@ -46,6 +46,10 @@ struct AITask {
     /// live); cleared when the turn resolves.
     private(set) var streamingText: String?
     private(set) var streamingReasoning: String?
+    /// Completed conversation exchanges (agent-gui transcript shape:
+    /// user request + assistant answer, oldest first). The live turn
+    /// renders separately from latestRequest/streamingText.
+    private(set) var transcript: [(request: String, answer: String)] = []
 
     init(id: UUID = UUID(), context: AIContext, budget: Int = 25) {
         self.id = id
@@ -55,11 +59,19 @@ struct AITask {
         self.rounds = []
         self.pendingProposal = nil
         self.budgetRemaining = budget
+        self.streamingText = nil
+        self.streamingReasoning = nil
     }
 
     mutating func advance(to newPhase: AITaskPhase) {
+        if case .completed(let summary) = newPhase {
+            // The turn's exchange joins the transcript; the next
+            // follow-up starts a fresh turn from latestRequest.
+            transcript.append((request: latestRequest, answer: summary))
+        }
         phase = newPhase
     }
+
 
     mutating func append(round: AIRound) {
         rounds.append(round)

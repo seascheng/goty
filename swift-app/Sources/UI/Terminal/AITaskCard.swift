@@ -154,8 +154,8 @@ final class AITaskCard: NSView {
             titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             titleField.topAnchor.constraint(equalTo: topAnchor, constant: 7),
             titleField.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -6),
-            metaField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            metaField.topAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 1),
+            metaField.leadingAnchor.constraint(equalTo: titleField.trailingAnchor, constant: 10),
+            metaField.centerYAnchor.constraint(equalTo: titleField.centerYAnchor),
             metaField.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -6),
             closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             closeButton.centerYAnchor.constraint(equalTo: titleField.centerYAnchor),
@@ -163,7 +163,7 @@ final class AITaskCard: NSView {
             closeButton.heightAnchor.constraint(equalToConstant: 22),
             headerRule.leadingAnchor.constraint(equalTo: leadingAnchor),
             headerRule.trailingAnchor.constraint(equalTo: trailingAnchor),
-            headerRule.topAnchor.constraint(equalTo: metaField.bottomAnchor, constant: 6),
+            headerRule.topAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 6),
             headerRule.heightAnchor.constraint(equalToConstant: 1),
         ])
 
@@ -347,6 +347,7 @@ final class AITaskCard: NSView {
             rebuild { group in
                 group.header(question: taskQuestion, target: target,
                              phase: (task.streamingText?.isEmpty ?? true) ? "thinking…" : "answering…")
+                group.transcript(task, live: true)
                 group.rounds(task.rounds)
                 if let r = task.streamingReasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !r.isEmpty {
@@ -398,11 +399,11 @@ final class AITaskCard: NSView {
                 group.header(question: taskQuestion, target: target, phase: "executing…")
                 group.rounds(task.rounds)
             }
-        case .completed(let summary):
+        case .completed:
             rebuild { group in
                 group.header(question: taskQuestion, target: target, phase: "done")
+                group.transcript(task, live: false)
                 group.rounds(task.rounds)
-                _ = group.markdown(summary)
             }
         case .failed(let message):
             rebuild { group in
@@ -548,6 +549,30 @@ final class AITaskCard: NSView {
             // update IN PLACE — they never scroll away with the body.
             card.titleField.stringValue = question ?? ""
             card.metaField.stringValue = "AI · \(phase) · \(name) · \(cwd)"
+        }
+
+        /// One user turn in the transcript: an accent chevron line,
+        /// single truncated row (the agent-gui user-message shape).
+        func userLine(_ text: String) {
+            let line = label("❯  " + text,
+                             font: .systemFont(ofSize: 12.5, weight: .medium),
+                             color: Chrome.theme.accent)
+            line.lineBreakMode = .byTruncatingTail
+            line.maximumNumberOfLines = 1
+            line.cell?.truncatesLastVisibleLine = true
+        }
+
+        /// The full conversation: each completed exchange (user line +
+        /// answer markdown), then the LIVE turn when one is running.
+        func transcript(_ task: AITask, live: Bool) {
+            for exchange in task.transcript {
+                userLine(exchange.request)
+                _ = markdown(exchange.answer)
+            }
+            if live, !task.latestRequest.isEmpty,
+               task.transcript.last?.request != task.latestRequest {
+                userLine(task.latestRequest)
+            }
         }
 
         func rounds(_ rounds: [AIRound]) {
