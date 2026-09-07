@@ -587,8 +587,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.startAITaskInCell(wsId: wsId, aiPaneId: pane.id, text: text)
         }
+        // A RESTORED pane (app relaunch / tab reopen) must come up USABLE:
+        // input mode + a live close button. Without this the card is a
+        // blank sheet with an X that does nothing (the field report).
+        host.taskCard.onClose = { [weak self] in
+            self?.coordinator.closeAITaskPane(wsId: wsId, paneId: pane.id)
+        }
+        host.enterInputMode()
         return host
     }
+
 
     /// The @ai / @omp / @tty wiring every terminal PaneHost needs,
     /// center or side: the execution-target feed (updateAITrigger
