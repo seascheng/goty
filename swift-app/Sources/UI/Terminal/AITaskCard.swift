@@ -274,7 +274,8 @@ final class AITaskCard: NSView {
             onUserScroll?()
         }
     }
-    /// Content height of a markdown text view at a given width —
+    private let scrollView = CardScrollView()
+
     /// layout must be forced through the manager (text views carry no
     /// intrinsic height once vertically non-tracking).
     static func measureMarkdownHeight(_ tv: NSTextView, width: CGFloat) -> CGFloat {
@@ -708,6 +709,18 @@ final class AITaskCard: NSView {
             body.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor,
                                         constant: -24).isActive = true
         }
+
+        /// 2pt left bar down the view's edge — the agent-gui thought
+        /// border-left, drawn behind the label's text.
+        private final class QuoteLabel: NSTextField {
+            var barColor: NSColor = .systemGray
+            override func draw(_ dirtyRect: NSRect) {
+                barColor.setFill()
+                NSRect(x: 0, y: 1, width: 2, height: bounds.height - 2).fill()
+                super.draw(dirtyRect)
+            }
+        }
+
         func proposal(_ proposal: AIProposal, target: ExecutionTarget) {
             let explanation = proposal.explanation
             if !explanation.isEmpty {
@@ -800,7 +813,7 @@ final class AITaskCard: NSView {
                         color: Chrome.theme.foreground)
                 }))
             let container = NSTextContainer(
-                size: NSSize(width: 0, height: .greatestFiniteMagnitude))
+                size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
             // Width tracks the (locked) view width; the container's own
             // height is CONTENT-driven — heightTracksTextView would tie
             // it to a frame nobody sizes (verticallyResizable text
