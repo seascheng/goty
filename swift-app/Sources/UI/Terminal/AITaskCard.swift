@@ -272,6 +272,12 @@ final class AITaskCard: NSView {
                 self.stack.layoutSubtreeIfNeeded()
                 guard self.pinnedToBottom else { return }   // reader wins
                 let clip = self.scrollView.contentView
+                // Follow only when the body OVERFLOWS the viewport:
+                // scroll-to-bottom on sub-viewport content flings it to
+                // the empty clip's bottom edge, then the completed
+                // render re-anchors it at the top — the bottom/top
+                // bouncing report. Short bodies just stay top-anchored.
+                guard self.stack.bounds.height > clip.bounds.height + 1 else { return }
                 clip.scroll(to: NSPoint(x: 0, y: self.stack.bounds.height - clip.bounds.height))
                 self.scrollView.reflectScrolledClipView(clip)
             }
