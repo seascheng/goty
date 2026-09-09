@@ -5,6 +5,18 @@
     <description>Most recent changes to Goty.</description>
     <language>en</language>
   <item>
+    <title>Version 0.3.0 (Build 4)</title>
+    <pubDate>Wed, 09 Sep 2026 06:39:11 +0000</pubDate>
+    <sparkle:version>4</sparkle:version>
+    <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+    <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+    <description><![CDATA[<ul><li>AI 任务卡:网格 cell 模式(⌘⇧A),AI 对话与终端并行</li><li>AI 流式输出修复:直连优先(本地代理会缓冲整条 SSE),逐字输出</li><li>thinking 块:引用样式(左竖线+斜体+浅色),完成后保留</li><li>AI 卡标题栏盲文活动指示器;markdown 表格渲染稳定性修复</li><li>agent 问答卡:omp/claude 选择题结构化;能力声明驱动 UI</li></ul>]]></description>
+    <enclosure url="https://github.com/seascheng/goty/releases/download/v0.3.0/Goty-0.3.0-arm64.dmg"
+               type="application/octet-stream"
+               sparkle:edSignature="X49b6nr8mgLiPsTJ2Z8Y1ck7AGe0WFAaEV91fvKXQYBDwqjWB19lAZeicDM3hS8O3xT5okyKTDrZxBbW851JCg=="
+               length="14631506" />
+  </item>
+  <item>
     <title>Version 0.2.0 (Build 3)</title>
     <pubDate>Wed, 02 Sep 2026 04:25:08 +0000</pubDate>
     <sparkle:version>3</sparkle:version>
