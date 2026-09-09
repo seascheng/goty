@@ -68,6 +68,13 @@ class PiSession: AgentSessioning {
     var cachedModelCatalog: [[String: Any]] = []
     let mapper: PiFrameMapper
     var pane: PaneSession?
+
+    /// The last openPane ATTACHED to a daemon pane whose process
+    /// predates this connection (vs spawning a fresh one).
+    private(set) var attachedExistingPane = false
+    /// One-shot: the attach-side store rebuild has fired for this
+    /// connection (see handleStateResponse).
+    private var attachReplayFired = false
     /// omp handshake gate: the ready frame (not spawn) starts
     /// negotiate+get_state — see OmpSession.interceptProtocolFrame.
     var handshakeStarted = false
@@ -152,6 +159,15 @@ class PiSession: AgentSessioning {
     var runsOnThisMac: Bool { !daemon.isRemote }
     /// omp renders its transcript from the session store, not the ring.
     var suppressesRingReplay: Bool { false }
+
+    /// Dialects whose authoritative transcript lives in an on-disk store
+    /// (omp) rebuild it when a connection ATTACHES to an existing pane
+    /// with no resume pending — the pane process predates this client,
+    /// so nothing else will render its history (2026-09-09: the
+    /// kind-loss migration left reattached panes GUI-alive but blank).
+    /// Dialects that rebuild inside their handshake (pi get_messages)
+    /// opt out.
+    var rebuildsTranscriptOnAttach: Bool { false }
     /// pi-mono --mode flag. omp uses rpc-ui (the extension-UI channel —
     /// the ask tool only registers when the harness reports a UI); plain
     /// pi stays rpc (its builds may lack rpc-ui).
@@ -308,6 +324,7 @@ class PiSession: AgentSessioning {
             }
             opened.session.start()
             self.pane = opened.session
+            self.attachedExistingPane = opened.attachedExisting
             self.beginHandshakeAfterSpawn(attachedExisting: opened.attachedExisting,
                                           completion: completion)
         }
@@ -342,6 +359,20 @@ class PiSession: AgentSessioning {
             events.append(.configChanged(configOptions))
         }
         emit(events)
+
+        // Attach onto a pre-existing pane with no resume pending: the
+        // process holds the conversation, the page holds nothing, and
+        // no load() will come (no persisted session id — the 2026-09-09
+        // kind-loss migration's blank panes). Rebuild once from the
+        // dialect's authoritative store.
+        if rebuildsTranscriptOnAttach, attachedExistingPane,
+           resumeSessionId == nil, !attachReplayFired,
+           let sid = sessionId, !sid.isEmpty {
+            attachReplayFired = true
+            DispatchQueue.main.async { [weak self] in
+                self?.beginReplayGate(sessionId: sid)
+            }
+        }
         loadCommandsAfterHandshake()
         startStatePolling()
         registerExtras()

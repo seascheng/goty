@@ -325,6 +325,22 @@ final class WorkspaceStore {
                             ? PaneState(id: UUID().uuidString, cwd: pane.cwd)
                             : pane
                     }
+                    // Agent-pane kind loss (2026-09-09 report): an
+                    // interim deployed build rewrote pane records
+                    // without their kind, so webview agent tabs
+                    // restored as TERMINALS — attached to the pane's
+                    // still-running omp rpc-ui process, the "tab shows
+                    // raw JSON instead of the GUI" corruption.
+                    // paneCommand is set only by the agent creation
+                    // flows (a hand-typed agent carries none), so a
+                    // terminal-kind FIRST pane under an agent
+                    // paneCommand is a corrupted agent pane, not a
+                    // terminal the user chose.
+                    if let command = saved[wi].tabs[ti].paneCommand,
+                       AgentCatalog.isAgent(command),
+                       case .terminal = saved[wi].tabs[ti].panes.first?.kind {
+                        saved[wi].tabs[ti].panes[0].kind = .agent(command)
+                    }
                 }
                 saved[wi].tabs.removeAll { $0.panes.isEmpty }
                 if saved[wi].tabs.isEmpty && saved[wi].sshHost == nil {

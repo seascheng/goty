@@ -575,7 +575,8 @@ final class AITaskCard: NSView {
         stack.views.compactMap { $0 as? NSTextField }.first { $0.isSelectable }
             ?? stack.views.compactMap { $0 as? NSTextView }.first { $0.isSelectable }
     }
-
+    var isTextViewSelectableForTest: Bool { selectableFieldForTest is NSTextView }
+    var bodyStackForTest: NSStackView { stack }
     var bodyFieldsForTest: [NSView] { stack.views.compactMap { $0 as? NSTextField } }
     /// Test hook: markdown text views currently in the body.
     var markdownViewsForTest: [NSTextView] { stack.views.compactMap { $0 as? NSTextView } }

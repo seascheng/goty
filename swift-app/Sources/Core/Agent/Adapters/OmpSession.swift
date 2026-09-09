@@ -95,6 +95,9 @@ final class OmpSession: PiSession {
 
     override var shellName: String { "omp" }
     override var suppressesRingReplay: Bool { true }
+    /// The session store is omp's transcript authority — an attach with
+    /// no resume must rebuild from it (PiSession.handleStateResponse).
+    override var rebuildsTranscriptOnAttach: Bool { true }
     override class var spawnMode: String { "rpc-ui" }
     override func appendSpawnArgs(_ args: inout [String], resume sessionId: String?) {
         // omp buckets its sessions by --cwd; the pane cwd alone is

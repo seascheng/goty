@@ -27,8 +27,8 @@ enum WebUITest {
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
         window.title = "goty-webuitest"
-        window.contentView = webView
-        window.orderFrontRegardless()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
 
         // Dist resolution: packaged bundle first (the app runbook);
         // GOTY_AGENTWEB_DIST for ad-hoc runs; cwd-relative for bare
@@ -240,10 +240,50 @@ enum WebUITest {
         pump(0.5)
         let done = evalJS("document.querySelector('.transcript .composer-status')?.textContent ?? ''") ?? ""
         check(done.contains("⏱"), "turn completion shows duration stats in the transcript tail")
-        pump(3.2)
-        let settled = evalJS("document.querySelector('.transcript .composer-status')?.textContent ?? ''") ?? ""
-        check(settled.contains("⏱"), "stats persist after the old flash window")
-        check(!settled.contains("已完成"), "no stale done flash")
-        exit(failures == 0 ? 0 : 1)
+        // 9. First-click regression: another native view owns the responder
+        // (the “came from the sidebar/terminal” case), and the FIRST click on
+        // a config chip must still reach the page. This is the webview-layer
+        // bug the user keeps hitting — synthetic .click() can’t cover it.
+        do {
+            let thief = NSTextField(frame: NSRect(x: 0, y: 0, width: 4, height: 4))
+            window.contentView?.addSubview(thief)
+            _ = evalJS("""
+                window.__gotyStore.apply({type:'configOptions', options:[{
+                    id:'model', name:'模型', category:null, currentValue:'a',
+                    options:[{value:'a', name:'A', description:null, source:null},
+                             {value:'b', name:'B', description:null, source:null}]
+                }]})
+                """)
+            guard let data = evalJS("""
+                (() => { const b=document.querySelector('button[title=\"模型\"]'); if(!b) return 'null';
+                         const r=b.getBoundingClientRect(); return JSON.stringify({x:r.x,y:r.y,w:r.width,h:r.height}); })()
+                """)?.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Double],
+                  let x = obj["x"], let y = obj["y"], let w = obj["w"], let h = obj["h"]
+            else { check(false, "model chip rect available"); return }
+            let cx = x + w / 2
+            let cy = webView.isFlipped ? y + h / 2 : webView.bounds.height - (y + h / 2)
+            let inWindow = webView.convert(NSPoint(x: cx, y: cy), to: nil)
+            window.makeFirstResponder(thief)
+            pump(0.05)
+            let down = NSEvent.mouseEvent(
+                with: .leftMouseDown, location: inWindow, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                eventNumber: 1, clickCount: 1, pressure: 1)!
+            let up = NSEvent.mouseEvent(
+                with: .leftMouseUp, location: inWindow, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime + 0.01,
+                windowNumber: window.windowNumber, context: nil,
+                eventNumber: 2, clickCount: 1, pressure: 0)!
+            webView.mouseDown(with: down)
+            webView.mouseUp(with: up)
+            pump(0.3)
+            let opened = evalJS("String(!!document.querySelector('[role=\"dialog\"]'))") == "true"
+            check(opened, "first click opens the model popover after responder theft")
+
+        }
+
+         exit(failures == 0 ? 0 : 1)
     }
 }

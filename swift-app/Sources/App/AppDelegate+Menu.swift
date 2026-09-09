@@ -41,26 +41,12 @@ extension AppDelegate {
         let shellItem = NSMenuItem(title: "Shell", action: nil, keyEquivalent: "")
         let shellMenu = NSMenu()
         shellMenu.addItem(withTitle: "New Space", action: #selector(menuNewTab), keyEquivalent: "t")
-        shellMenu.addItem(withTitle: "New Claude Code Space", action: #selector(menuNewAgentTab), keyEquivalent: "n")
+        shellMenu.addItem(withTitle: "New Claude Code Session",
+                          action: #selector(menuNewAgentTab), keyEquivalent: "n")
         let askAI = NSMenuItem(title: "Ask AI…", action: #selector(menuAskAI), keyEquivalent: "a")
         askAI.keyEquivalentModifierMask = [.command, .shift]
         askAI.target = self
         shellMenu.addItem(askAI)
-        let agentMenu = NSMenu()
-        for (command, spec) in AgentCatalog.pickerOrder {
-            let item = NSMenuItem(title: spec.label, action: #selector(menuNewAgentTabFrom(_:)),
-                                  keyEquivalent: "")
-            item.target = self
-            item.representedObject = command
-            // Official brand logo when the asset exists (AgentIcons.swift),
-            // SF Symbol otherwise.
-            item.image = AgentBrandIcons.menuImage(for: command)
-                ?? menuItemIcon(spec.icon, pointSize: 11)
-            agentMenu.addItem(item)
-        }
-        let agentItem = NSMenuItem(title: "New Agent Space", action: nil, keyEquivalent: "")
-        agentItem.submenu = agentMenu
-        shellMenu.addItem(agentItem)
         let sessionMenu = NSMenu()
         for entry in AgentRegistry.pickerEntries(isAvailable: { agentAvailable(key: $0) })
         where entry.available {
@@ -103,12 +89,7 @@ extension AppDelegate {
         settingsWindow().show(over: window)
     }
     @objc func menuNewTab() { coordinator.newTab() }
-    @objc func menuNewAgentTab() { coordinator.newAgentTab() }
-    @objc private func menuNewAgentTabFrom(_ sender: NSMenuItem) {
-        if let command = sender.representedObject as? String {
-            coordinator.newAgentTab(command: command)
-        }
-    }
+    @objc func menuNewAgentTab() { openAgentSession(agent: "claude") }
 
     /// The ONE Agent GUI open path: capability gate (with the daemon
     /// upgrade offer), then open. Menu items, the tab-strip +, the

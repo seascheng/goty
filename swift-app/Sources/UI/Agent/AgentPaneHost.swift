@@ -877,6 +877,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
 
     func setVisible(_ visible: Bool) { isHidden = !visible }
     func focusAsPane() {
+        // Click-to-focus monitor routes every pane click through here.
+        // Re-making an ALREADY focused WKWebView first responder resets
+        // its internal text/view responder and can swallow that same
+        // click — the “first click does nothing” bug. Only take focus
+        // when the webview (or a descendant) doesn’t already own it.
+        if let hover = webView as? HoverFocusWebView, hover.ownsResponder { return }
         window?.makeFirstResponder(webView)
     }
     func syncCoreVisibility() {} // webview 自管生命周期，无需 occlusion 联动
@@ -1190,6 +1196,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
 final class HoverFocusWebView: WKWebView {
     private var dwell: DispatchWorkItem?
 
+
+
     /// Test seam: a hover dwell is scheduled and not yet fired/cancelled.
     var hoverDwellPending: Bool { dwell != nil }
 
@@ -1213,6 +1221,19 @@ final class HoverFocusWebView: WKWebView {
             rect: .zero,
             options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
             owner: self, userInfo: ["hoverFocus": true]))
+    }
+
+
+
+    override func mouseDown(with event: NSEvent) {
+        // LAST CHANCE for a stationary pointer: the responder was stolen
+        // while the mouse never left this webview, so mouseEntered/moved
+        // can’t help. Take the responder BEFORE WebKit sees the click —
+        // otherwise the same event is consumed just to establish focus.
+        if window != nil, !ownsResponder {
+            window?.makeFirstResponder(self)
+        }
+        super.mouseDown(with: event)
     }
 
     override func mouseEntered(with event: NSEvent) {

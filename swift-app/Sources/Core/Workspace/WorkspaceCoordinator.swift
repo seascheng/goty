@@ -681,9 +681,6 @@ final class WorkspaceCoordinator {
         }
     }
 
-    func newAgentTab(command: String = "claude") {
-        appendTab(name: "agent", command: command, cwd: activeCwd())
-    }
 
     /// Initial prompts queued for agent panes not yet built (the host
     /// factory drains them when the pane's AgentPaneHost is created).

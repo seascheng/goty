@@ -923,6 +923,44 @@ enum AgentTest {
             check(false, "sessiond protocol.rs CAPABILITY parseable")
         }
 
+        // ——— state migration: agent pane kind loss (2026-09-09) ———
+        // A deployed interim build rewrote pane records without their
+        // kind, so webview agent tabs restored as TERMINALS attached to
+        // their pane's omp rpc-ui process — raw JSON instead of the GUI.
+        // paneCommand is set only by the agent creation flows; a
+        // terminal-kind first pane under an agent paneCommand is a
+        // corrupted agent pane and must migrate back.
+        do {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("goty-kind-loss-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let file = dir.appendingPathComponent("state.json")
+            let pane = { (id: String, kind: String) -> String in
+                "{\"id\":\"\(id)\",\"kind\":\(kind),\"cwd\":\"/x\",\"left\":0,\"top\":0,\"width\":1,\"height\":1}"
+            }
+            let term = #"{"terminal":{}}"#
+            let agentOmp = #"{"agent":{"_0":"omp"}}"#
+            let state = """
+            {"focusedIndex":0,"parked":[],"workspaces":[{"auxTerminalPanes":[],"tabs":[
+            {"id":"t1","name":"omp","paneCommand":"omp","panes":[\(pane("p1", term))]},
+            {"id":"t2","name":"1","panes":[\(pane("p2", term))]},
+            {"id":"t3","name":"omp","paneCommand":"omp","panes":[\(pane("p3", agentOmp))]}
+            ],"focusedTabIndex":0,"name":"goty","sshHost":null,"id":"11111111-1111-1111-1111-111111111111"}]}
+            """
+            try state.write(to: file, atomically: true, encoding: .utf8)
+            let store = WorkspaceStore(sessionName: "test", fileURL: file)
+            let tabs = store.workspaces[0].tabs
+            check(tabs.count == 3 && tabs[0].panes[0].kind == .agent("omp"),
+                  "kind-lost omp tab migrates back to agent pane")
+            check(tabs[1].panes[0].kind == .terminal,
+                  "plain terminal tab (no paneCommand) stays terminal")
+            check(tabs[2].panes[0].kind == .agent("omp"),
+                  "healthy agent tab passes through untouched")
+            try? FileManager.default.removeItem(at: dir)
+        } catch {
+            check(false, "kind-loss fixture threw: \(error)")
+        }
+
         try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }
         print("agenttest: all passed")

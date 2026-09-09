@@ -49,14 +49,6 @@ enum AgentCatalog {
         "droid": AgentSpec(label: "Droid", icon: "terminal.fill", accentHex: "#F59E0B"),
     ]
 
-    /// Ordered picker entries for the ⌘N "New Agent Space" submenu.
-    static var pickerOrder: [(command: String, spec: AgentSpec)] {
-        ["claude", "codex", "omp", "pi", "gemini", "grok", "aider"]
-            .compactMap { command in
-                specs[command].map { (command, $0) }
-            }
-    }
-
     static func spec(for command: String?) -> AgentSpec? {
         guard let command, !command.isEmpty else { return nil }
         if let exact = specs[command] { return exact }

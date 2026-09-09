@@ -14,7 +14,7 @@
 
 <br />
 
-<img src="images/ai.png" alt="The @ai task card over the terminal grid: fixed title bar, streaming markdown body" width="900" />
+<img src="images/goty.png" alt="The @ai task card over the terminal grid: fixed title bar, streaming markdown body" width="900" />
 <br />
 <sub>Type <code>@ai</code> in any pane — a card opens over the grid: streaming markdown, executable proposals.</sub>
 
