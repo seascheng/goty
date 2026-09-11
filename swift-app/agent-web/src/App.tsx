@@ -71,7 +71,7 @@ function wordSegments(oldLine: string, newLine: string): {
   return { del, ins };
 }
 
-const KNOB_ORDER: Record<string, number> = { model: 0, thinking: 1, mode: 2 };
+const KNOB_ORDER: Record<string, number> = { model: 0, runtimeMode: 1, thinking: 2, mode: 3 };
 
 const CTX_COLLAPSE = 10;
 
@@ -1455,7 +1455,7 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
             .sort((a, b) => (KNOB_ORDER[a.id] ?? 9) - (KNOB_ORDER[b.id] ?? 9))
             .map((option) => (
             <ConfigChip key={option.id} option={option}
-              icon={<Icon kind={option.id === "thinking" ? "thinking" : option.id === "mode" ? "mode" : "model"} />}
+              icon={<Icon kind={option.id === "thinking" ? "thinking" : option.id === "mode" || option.id === "runtimeMode" ? "mode" : "model"} />}
               open={openPop === option.id}
               onToggle={() => setOpenPop(openPop === option.id ? null : option.id)}
               onPick={(value) => pickConfig(option.id, value)} />
