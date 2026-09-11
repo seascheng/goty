@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把「权限/沙箱档位」（RuntimeMode）做成跨 adapter 的一等能力：codex 每 turn 重发 approvalPolicy+sandboxPolicy，claude 支持 mid-session `set_permission_mode`，web 端一颗通用档位 chip——对齐 monocode/paseo 已验证的方案。
+> **STATUS: Phase 1 COMPLETE (2026-09-11)** — d9f6813 / d590aac / e808285 / 1df2bff / 5d05ac0；run-tests.sh 全绿、build.sh 无新警告、web 冒烟通过（chip 渲染 + setConfig(runtimeMode) 上桥）。执行方式：subagent 链路 provider 故障，退化内联执行。
 
 **Architecture:** 在现有 `AgentConfigOption` 管线上加一个 `runtimeMode` 选项（configChanged 下发、setConfigOption 回传），不改 bridge 协议；Core 层新增纯映射函数（RuntimeMode → 各家原生参数），adapter 各自落地（codex: per-turn params；claude: 控制请求 + spawn 参数）。**不碰 omp/pi**（其审批是扩展对话框体系，无 launch 档位语义；等确认 omp CLI 档位 flag 后另开任务）。
 
