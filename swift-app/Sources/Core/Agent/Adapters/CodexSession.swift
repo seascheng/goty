@@ -22,7 +22,10 @@ final class CodexSession: AgentSessioning {
     /// The agent's declared skills (skills/list) — invoked with `$name`
     /// mentions, never listed flat in the / menu.
     private var skillCommands: [AgentSlashCommand] = []
-
+    /// True while an attach-adoption replay owns the page: ring-replayed
+    /// history notifications are dropped until the authoritative
+    /// turns/list replay lands.
+    private var adoptingReplay = false
     private let paneId: String
     private let environment: [String: String]
     private let daemon: SessionDaemon
@@ -372,6 +375,7 @@ final class CodexSession: AgentSessioning {
             adoptRebuild = true
             commands = []
             loadCommands()
+            adoptingReplay = true
             if let restore = restoredSessionId {
                 if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
                     print("CODEX_ATTACH restore=\(restore)")
@@ -929,6 +933,11 @@ final class CodexSession: AgentSessioning {
         }
     }
 
+    /// turns/list pages arrive NEWEST→OLDEST and the backward cursor
+    /// walks toward older turns (probed 2026-09-11: a page's data is
+    /// sorted by startedAt descending; requesting past the beginning
+    /// returns the same first page). Collect pages oldest-first: each
+    /// older page is PREPENDED so the final order is chronological.
     private func collectTurns(threadId: String, cursor: String?,
                               box: Box, mapper: CodexFrameMapper,
                               done: @escaping () -> Void) {
@@ -936,27 +945,46 @@ final class CodexSession: AgentSessioning {
         if let cursor { params["cursor"] = cursor }
         client.request("thread/turns/list", params) { [weak self] result in
             guard let self else { return }
-            guard case .success(let value) = result else {
-                done()
+            guard case .success(let value) = result,
+                  let page = value["data"] as? [[String: Any]]
+            else {
+                self.finishReplay(box: box, mapper: mapper, done: done)
                 return
             }
-            for turn in value["data"] as? [[String: Any]] ?? [] {
-                box.turnCount += 1
-                for item in turn["items"] as? [[String: Any]] ?? [] {
-                    box.events += mapper.map(
-                        method: "item/completed",
-                        params: ["item": item, "threadId": threadId])
-                }
-                box.events += mapper.map(method: "turn/completed",
-                                         params: ["turn": turn])
+            let ordered = Array(page.reversed()) // oldest→newest
+            // No progress (same page again) = the beginning is reached.
+            if let firstId = ordered.first?["id"] as? String,
+               firstId == box.oldestTurnId {
+                self.finishReplay(box: box, mapper: mapper, done: done)
+                return
             }
-            if let next = value["nextCursor"] as? String, !next.isEmpty {
-                self.collectTurns(threadId: threadId, cursor: next,
+            box.oldestTurnId = ordered.first?["id"] as? String ?? box.oldestTurnId
+            box.rawTurns.insert(contentsOf: ordered, at: 0)
+            if let older = value["backwardsCursor"] as? String, !older.isEmpty,
+               !page.isEmpty {
+                self.collectTurns(threadId: threadId, cursor: older,
                                   box: box, mapper: mapper, done: done)
             } else {
-                done()
+                self.finishReplay(box: box, mapper: mapper, done: done)
             }
         }
+    }
+
+    /// Map the collected turns (chronological) and open the live gate.
+    private func finishReplay(box: Box, mapper: CodexFrameMapper,
+                              done: @escaping () -> Void) {
+        adoptingReplay = false
+        for turn in box.rawTurns {
+            box.turnCount += 1
+            for item in turn["items"] as? [[String: Any]] ?? [] {
+                box.events += mapper.map(
+                    method: "item/completed",
+                    params: ["item": item, "threadId": ""])
+            }
+            box.events += mapper.map(method: "turn/completed",
+                                     params: ["turn": turn])
+        }
+        done()
     }
 
     func load(sessionId: String, completion: ((Bool) -> Void)? = nil) {
@@ -994,6 +1022,11 @@ final class CodexSession: AgentSessioning {
     private final class Box {
         var events: [AgentSessionEvent] = []
         var turnCount = 0
+        /// Turns collected oldest-first across backward pages.
+        var rawTurns: [[String: Any]] = []
+        /// First turn of the newest collected page — a repeated id means
+        /// the walk hit the beginning.
+        var oldestTurnId: String?
     }
 
     func shutdown() {
@@ -1065,6 +1098,18 @@ final class CodexSession: AgentSessioning {
     }
 
     private func handleNotification(method: String, params: [String: Any]) {
+        // During attach-adoption the ring replays PRE-ATTACH history
+        // notifications (old turns, injected auto-review prompts that
+        // never appear in turns/list); the authoritative thread/read +
+        // turns/list replay owns the page until it lands. Dropping
+        // item/turn traffic here also fixes the 16MB ring racing ahead
+        // of the reset — late ring frames used to append injected
+        // history after the clean replay.
+        if adoptingReplay,
+           method.hasPrefix("item/") || method == "turn/completed"
+                || method == "turn/aborted" {
+            return
+        }
         // Turn lifecycle bookkeeping ahead of the mapper: steer needs
         // the live turn id, and every terminal clears it.
         switch method {
