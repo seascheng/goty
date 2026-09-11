@@ -517,10 +517,13 @@ final class ClaudeSession: AgentSessioning {
     /// no longer route here: the pane's outbox owns queuing.
     private var pendingMidTurn: [(text: String, images: [AgentImage])] = []
 
+    /// Single source of truth for the manifest (agenttest asserts it).
+    static let declaredCapabilities: AgentCapabilities = [.steer, .sessions, .runtimeModes]
+
     var capabilities: AgentCapabilities {
         // .runtimeModes: 权限 chip — control-protocol switch live,
         // spawn arg on respawn.
-        [.steer, .sessions, .runtimeModes]
+        Self.declaredCapabilities
     }
 
     func steer(_ text: String, images: [AgentImage]) {

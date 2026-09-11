@@ -872,8 +872,11 @@ class PiSession: AgentSessioning {
     // no-op identically; OmpSession overrides each with the real RPC.
 
     var capabilities: AgentCapabilities {
-        [.steer, .sessions]
+        Self.declaredCapabilities
     }
+
+    /// Single source of truth for the manifest (agenttest asserts it).
+    class var declaredCapabilities: AgentCapabilities { [.steer, .sessions] }
     func setFastMode(enabled: Bool) {}
     func loginProviders(completion: @escaping ([[String: Any]]) -> Void) {
         completion([])

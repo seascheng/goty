@@ -707,6 +707,11 @@ final class OmpSession: PiSession {
 
     // MARK: - omp capabilities
     override var capabilities: AgentCapabilities {
+        Self.declaredCapabilities
+    }
+
+    /// Single source of truth for the manifest (agenttest asserts it).
+    override class var declaredCapabilities: AgentCapabilities {
         [.steer, .sessions, .fastMode, .fork, .export, .stats]
     }
 

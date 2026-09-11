@@ -1147,6 +1147,21 @@ enum AgentTest {
               && !(modeFrame["request_id"] as? String ?? "").isEmpty,
               "claude setPermissionModeFrame shapes the control request")
 
+        // Manifest honesty (happier's invariant-test pattern): an
+        // adapter that declares .runtimeModes must surface the chip
+        // contract (runtimeMode option), and one that doesn't must
+        // never emit it.
+        check(CodexSession.declaredCapabilities.contains(.runtimeModes),
+              "codex declares .runtimeModes")
+        check(ClaudeSession.declaredCapabilities.contains(.runtimeModes),
+              "claude declares .runtimeModes")
+        check(!PiSession.declaredCapabilities.contains(.runtimeModes)
+              && !OmpSession.declaredCapabilities.contains(.runtimeModes),
+              "pi/omp do not claim runtime modes (their approvals are the extension dialogs)")
+        check(RuntimeModeMapping.option(current: .supervised).id == "runtimeMode"
+              && RuntimeModeMapping.option(current: .supervised).options.count == 4,
+              "shared runtimeMode option builder serves every declaring adapter")
+
         try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }
         print("agenttest: all passed")

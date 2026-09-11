@@ -479,17 +479,17 @@ final class CodexSession: AgentSessioning {
         }
     }
 
-    /// Mid-turn steering park — same contract as ClaudeSession: codex
-    /// has no steer RPC and the protocol default no-op'd, so a mid-turn
-    /// interrupt was dropped silently. Parked, then sent when the turn
-    /// settles (send() re-runs its /compact translation then).
+    /// Single source of truth for the manifest (agenttest asserts it).
+    static let declaredCapabilities: AgentCapabilities = [.steer, .sessions, .runtimeModes]
+
     var capabilities: AgentCapabilities {
         // .sessions gates the history chip: thread/list + thread/resume
         // + thread/read are implemented — the picker and reload work.
         // .runtimeModes: the 权限 chip — every turn/start re-sends the
         // tier knobs (approvalPolicy/sandboxPolicy/approvalsReviewer).
-        [.steer, .sessions, .runtimeModes]
+        Self.declaredCapabilities
     }
+
     /// Mid-turn steering, codex-native: `turn/steer` fenced to the live
     /// turn (expectedTurnId — monocode/happier parity). Falls back to
     /// the park-and-send queue when the turn id isn't known yet (the
