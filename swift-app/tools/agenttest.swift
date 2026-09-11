@@ -1108,17 +1108,70 @@ enum AgentTest {
         // mode API — monocode's per-turn resend) and the chip contract
         // matches the declared capability.
         let tp = CodexSession.turnParams(threadId: "t1", text: "hi",
-                                         model: nil, mode: .auto, effort: nil)
+                                         model: nil, mode: .auto, effort: nil,
+                                         serviceTier: nil)
         check(tp["threadId"] as? String == "t1"
               && (tp["input"] as? [[String: Any]])?.first?["text"] as? String == "hi"
               && tp["approvalPolicy"] as? String == "on-request"
               && (tp["sandboxPolicy"] as? [String: Any])?["type"] as? String == "workspaceWrite"
               && tp["approvalsReviewer"] as? String == "auto_review"
-              && tp["model"] == nil,
+              && tp["model"] == nil && tp["serviceTier"] == nil,
               "codex turnParams carries the runtime mode without a model")
         check(CodexSession.turnParams(threadId: "t", text: "x", model: "gpt-5.3",
-                                      mode: .fullAccess, effort: nil)["model"] as? String == "gpt-5.3",
-              "codex turnParams still carries the picked model")
+                                      mode: .fullAccess, effort: nil,
+                                      serviceTier: "fast")["serviceTier"] as? String == "fast",
+              "codex turnParams carries the picked model and service tier")
+
+        // Slash skill execution = paseo's shape: a structured skill
+        // entry FIRST, then the text rewritten as a $name mention. The
+        // app-server reads SKILL.md itself — the host injects nothing.
+        let skillTurn = CodexSession.turnParams(
+            threadId: "t", text: "$deploy staging now",
+            model: nil, mode: .auto, effort: nil, serviceTier: nil,
+            skill: (name: "deploy", path: "/w/.agents/skills/deploy/SKILL.md"))
+        let skillInput = skillTurn["input"] as? [[String: Any]] ?? []
+        check(skillInput.count == 2
+              && skillInput[0]["type"] as? String == "skill"
+              && skillInput[0]["name"] as? String == "deploy"
+              && skillInput[0]["path"] as? String == "/w/.agents/skills/deploy/SKILL.md"
+              && skillInput[1]["type"] as? String == "text"
+              && skillInput[1]["text"] as? String == "$deploy staging now",
+              "slash skill rides turn input as a structured entry + $mention text")
+
+        // Command directory = the agent's OWN skills/list declaration
+        // (paseo loadSkills / happier pluginAndSkillCatalog): disabled
+        // skills never list, multiple skill roots dedupe by name, and
+        // the host fabricates no builtin entries.
+        let catalog = CodexSession.parseSkillCatalog(groups: [
+            ["cwd": "/w", "skills": [
+                ["name": "deploy", "description": "Deploy the app",
+                 "path": "/w/.agents/skills/deploy/SKILL.md", "enabled": true],
+                ["name": "paseo", "description": "Shared",
+                 "path": "/w/.codex/skills/paseo/SKILL.md", "enabled": true],
+            ]],
+            ["cwd": "/home/u", "skills": [
+                ["name": "paseo", "description": "User copy",
+                 "path": "/home/u/.agents/skills/paseo/SKILL.md", "enabled": true],
+                ["name": "disabled-skill", "path": "/x/SKILL.md", "enabled": false],
+            ]],
+        ])
+        check(catalog.count == 2
+              && catalog[0].name == "deploy"
+              && catalog[0].description == "Deploy the app"
+              && catalog[0].skillPath == "/w/.agents/skills/deploy/SKILL.md"
+              && catalog.filter { $0.name == "paseo" }.count == 1,
+              "skills/list catalog: enabled only, deduped across roots, path kept")
+
+        // matchSkill: /name rest → the directory entry (skillPath
+        // present); native commands and plain text pass through.
+        let dir = [AgentSlashCommand(name: "deploy", description: nil,
+                                     inputHint: nil,
+                                     skillPath: "/w/deploy/SKILL.md")]
+        let m = CodexSession.matchSkill("/deploy staging now", commands: dir)
+        check(m?.command.name == "deploy" && m?.rest == "staging now",
+              "matchSkill splits /name and trailing args")
+        check(CodexSession.matchSkill("/native", commands: dir) == nil,
+              "unknown slash is not a skill — token reaches the agent verbatim")
         let modeOption = CodexSession.runtimeModeOption(current: .autoEdits)
         check(modeOption.id == "runtimeMode" && modeOption.name == "权限"
               && modeOption.currentValue == "autoEdits"
@@ -1150,12 +1203,12 @@ enum AgentTest {
         // codex thinking knob: effort rides turn/start like the model.
         let tpEffort = CodexSession.turnParams(threadId: "t", text: "hi",
                                                model: nil, mode: .auto,
-                                               effort: "high")
+                                               effort: "high", serviceTier: nil)
         check(tpEffort["effort"] as? String == "high",
               "codex turnParams carries the reasoning effort")
         let noEffort = CodexSession.turnParams(threadId: "t", text: "hi",
                                                 model: nil, mode: .auto,
-                                                effort: nil)
+                                                effort: nil, serviceTier: nil)
         check(noEffort["effort"] == nil,
               "codex turnParams omits effort when unset (codex default)")
         let thinking = CodexSession.thinkingOption(current: "medium")
@@ -1165,33 +1218,6 @@ enum AgentTest {
               && thinking.options.count == 5,
               "codex thinking option lists all five efforts")
 
-        // codex command directory: builtins + skill prompt expansion.
-        let builtins = CodexSession.builtinCommands()
-        check(builtins.contains { $0.name == "compact" }
-              && builtins.contains { $0.name == "init" && $0.promptBody != nil },
-              "codex builtin commands include compact and init (with prompt body)")
-        check(CodexSession.expandSlash(
-                  "/deploy staging now", commands: [
-                      AgentSlashCommand(name: "deploy", description: nil,
-                                        inputHint: nil, promptBody: "Deploy BODY."),
-                  ]) == "Deploy BODY.\n\nstaging now",
-              "slash with promptBody expands to body + args")
-        check(CodexSession.expandSlash(
-                  "/deploy", commands: [
-                      AgentSlashCommand(name: "deploy", description: nil,
-                                        inputHint: nil, promptBody: "Deploy BODY."),
-                  ]) == "Deploy BODY.",
-              "slash without args expands to the bare body")
-        check(CodexSession.expandSlash(
-                  "/native arg", commands: [
-                      AgentSlashCommand(name: "native", description: nil,
-                                        inputHint: nil),
-                  ]) == "/native arg",
-              "native command without a body passes through verbatim")
-        check(CodexSession.expandSlash("plain text", commands: []) == "plain text",
-              "non-slash text is untouched")
-
-        // Manifest honesty (happier's invariant-test pattern): an
         // adapter that declares .runtimeModes must surface the chip
         // contract (runtimeMode option), and one that doesn't must
         // never emit it.

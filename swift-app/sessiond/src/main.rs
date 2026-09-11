@@ -114,7 +114,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 let len = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
                 if len <= protocol::MAX_FRAME
-                    && (1..=protocol::kind::SKILLS_LIST).contains(&head[4])
+                    && (1..=protocol::kind::SESSION_FORK).contains(&head[4])
                 {
                     let _ = serve(&head, stream, registry);
                 } else if head[0] == b'{' {
@@ -321,15 +321,6 @@ fn dispatch(
                 }
                 Err(e) => write_error(&stream, format!("session fork: {e}")),
             }
-        }
-        protocol::kind::SKILLS_LIST => {
-            let request: protocol::SkillsListRequest = protocol::from_json(&payload)?;
-            let reply = protocol::SkillsListReply {
-                skills: list_skills(&request.cwd),
-            };
-            let payload = protocol::json(&reply)?;
-            protocol::write_frame(&stream, protocol::kind::SKILLS_LIST_REPLY, &payload)
-                .map_err(anyhow::Error::from)
         }
         protocol::kind::VERSION => {
             // Decimal ASCII, exactly how capability 1 daemons answered —
@@ -569,113 +560,6 @@ fn list_omp_sessions(cwd_filter: &Option<String>) -> Vec<protocol::SessionSummar
     }
     rows.sort_by_key(|row| std::cmp::Reverse(row.mtime_ms));
     rows
-}
-
-/// Capability 10: CODEX's own skill roots, verbatim from the agent's
-/// loader (codex-rs ext/skills/src/host_roots.rs
-/// `resolve_skill_roots_with_home_dir`):
-/// - Repo: `<cwd>/.codex/skills` plus `.agents/skills` in EVERY
-///   directory from cwd up to the project root (nested repos too)
-/// - User: `~/.codex/skills` (deprecated but kept) and `~/.agents/skills`
-///
-/// NOT other agents' dirs — a codex pane lists only what the codex
-/// agent itself loads. First name wins (repo scope beats user scope,
-/// matching the loader's dedupe order).
-fn list_skills(cwd_filter: &Option<String>) -> Vec<protocol::SkillRow> {
-    let cwd = cwd_filter.as_deref().map(Path::new);
-    let home = store_root_path("").ok();
-    list_skills_from(cwd, home.as_deref())
-}
-
-fn list_skills_from(cwd: Option<&Path>, home: Option<&Path>) -> Vec<protocol::SkillRow> {
-    let mut out: Vec<protocol::SkillRow> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let add_dir = |dir: &Path,
-                   scope: &str,
-                   out: &mut Vec<protocol::SkillRow>,
-                   seen: &mut std::collections::HashSet<String>| {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries.flatten().collect::<Vec<_>>(),
-            Err(_) => return,
-        };
-        for entry in entries {
-            // One shape only: <name>/SKILL.md (the codex skills loader's
-            // convention — loose .md files are another agent's format).
-            let path = entry.path().join("SKILL.md");
-            let Ok(raw) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let (name, description, body) = parse_skill_markdown(&raw);
-            let fallback = entry.file_name().into_string().ok();
-            let Some(name) = name.or(fallback) else {
-                continue;
-            };
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-            out.push(protocol::SkillRow {
-                name,
-                description,
-                source: scope.to_string(),
-                body,
-            });
-        }
-    };
-    // Repo roots (loader order): the project root's .codex/skills
-    // (project layer — root = nearest ancestor holding .git, codex's
-    // default project-root marker), then .agents/skills in EVERY
-    // directory between the project root and the cwd.
-    if let Some(cwd) = cwd {
-        let ancestors: Vec<&Path> = cwd.ancestors().collect();
-        let root_idx = ancestors
-            .iter()
-            .position(|dir| dir.join(".git").is_dir())
-            .unwrap_or(ancestors.len() - 1);
-        if let Some(root) = ancestors.get(root_idx) {
-            add_dir(&root.join(".codex/skills"), "repo", &mut out, &mut seen);
-        }
-        for dir in ancestors[..=root_idx].iter().rev() {
-            add_dir(&dir.join(".agents/skills"), "repo", &mut out, &mut seen);
-        }
-    }
-    // User roots.
-    if let Some(home) = home {
-        add_dir(&home.join(".codex/skills"), "user", &mut out, &mut seen);
-        add_dir(&home.join(".agents/skills"), "user", &mut out, &mut seen);
-    }
-    out
-}
-
-/// Split a SKILL.md: frontmatter `name`/`description` + the markdown
-/// body after the closing fence. Missing frontmatter falls back to the
-/// directory name.
-fn parse_skill_markdown(raw: &str) -> (Option<String>, Option<String>, String) {
-    let trimmed = raw.trim_start();
-    let Some(after_fence) = trimmed.strip_prefix("---") else {
-        return (None, None, raw.to_string());
-    };
-    let Some(end) = after_fence.find("\n---") else {
-        return (None, None, raw.to_string());
-    };
-    let front = &after_fence[..end];
-    let body = after_fence[end + 4..].trim_start_matches('\n').to_string();
-    let mut name = None;
-    let mut description = None;
-    for line in front.lines() {
-        if let Some(value) = line.strip_prefix("name:") {
-            name = Some(value.trim().trim_matches('"').to_string());
-        } else if let Some(value) = line.strip_prefix("description:") {
-            let value = value.trim().trim_matches('"').to_string();
-            // YAML block-scalar markers (`description: |`) — the codex
-            // TUI shows NO description for these skills, and we match
-            // that instead of displaying the marker verbatim.
-            if !value.is_empty() && !matches!(value.as_str(), "|" | ">" | "|-" | ">-" | "|+" | ">+")
-            {
-                description = Some(value);
-            }
-        }
-    }
-    (name, description, body)
 }
 
 /// Capability 7: codex rollout listing (`~/.codex/sessions/YYYY/MM/DD/
@@ -1379,24 +1263,6 @@ mod tests {
     }
 
     #[test]
-    fn skill_description_block_scalar_shows_nothing() {
-        // The codex TUI shows NO description for `description: |`
-        // skills (it renders the marker as an empty placeholder) — we
-        // match: no description line at all. A plain single-line
-        // description still displays.
-        let (name, description, body) =
-            parse_skill_markdown("---\nname: qa\ndescription: |\n  hidden lines\n---\nBody.");
-        assert_eq!(name.as_deref(), Some("qa"));
-        assert_eq!(description, None);
-        assert_eq!(body, "Body.");
-
-        let (_, description, _) = parse_skill_markdown(
-            "---\nname: research-report\ndescription: Summarize results.\n---\nBody.",
-        );
-        assert_eq!(description.as_deref(), Some("Summarize results."));
-    }
-
-    #[test]
     fn codex_rollout_title_takes_only_real_user_input() {
         // Injected context (AGENTS.md etc.) rides role=user too, but its
         // content_item_kinds is prefixed — only "user." kinds are real
@@ -1476,86 +1342,6 @@ mod tests {
             merge_codex_rows(vec![], vec![row("t9", Some("仅扫描"), "/p/x.jsonl", 1)]).len(),
             1
         );
-    }
-
-    #[test]
-    fn skill_markdown_parses_frontmatter_and_body() {
-        let raw = "---\nname: ship\ndescription: \"Ship it\"\n---\nDo the thing.";
-        let (name, description, body) = parse_skill_markdown(raw);
-        assert_eq!(name.as_deref(), Some("ship"));
-        assert_eq!(description.as_deref(), Some("Ship it"));
-        assert_eq!(body, "Do the thing.");
-        // No frontmatter: whole file is the body, name comes from the
-        // dir upstream.
-        let (name, _, body) = parse_skill_markdown("just a prompt");
-        assert_eq!(name, None);
-        assert_eq!(body, "just a prompt");
-    }
-
-    #[test]
-    fn skills_list_walks_codex_roots_exactly() -> anyhow::Result<()> {
-        // Roots verbatim from ext/skills/src/host_roots.rs: cwd's
-        // .codex/skills + .agents/skills in every ancestor, then the
-        // two user-level roots. Other agents' dirs (.claude, .omp)
-        // are NOT codex's territory and must never appear.
-        let dir = std::env::temp_dir().join(format!("goty-skills-{}", std::process::id()));
-        let project = dir.join("proj");
-        let nested = project.join("apps/web"); // cwd, two levels down
-        let home = dir.join("home");
-        std::fs::create_dir_all(project.join(".git"))?; // project-root marker
-        std::fs::create_dir_all(&nested)?;
-        std::fs::create_dir_all(project.join(".agents/skills/shared"))?;
-        std::fs::create_dir_all(project.join(".codex/skills/deploy"))?;
-        std::fs::create_dir_all(nested.join(".agents/skills/nested"))?;
-        std::fs::create_dir_all(home.join(".codex/skills/personal"))?;
-        std::fs::create_dir_all(home.join(".agents/skills/shared"))?;
-        std::fs::create_dir_all(project.join(".claude/skills/review"))?;
-        std::fs::write(
-            project.join(".codex/skills/deploy/SKILL.md"),
-            "---\nname: deploy\ndescription: Deploy the app\n---\nDeploy now.",
-        )?;
-        std::fs::write(
-            project.join(".agents/skills/shared/SKILL.md"),
-            "---\nname: shared\ndescription: Repo wins\n---\nRepo body.",
-        )?;
-        std::fs::write(
-            nested.join(".agents/skills/nested/SKILL.md"),
-            "---\nname: nested\n---\nNested body.",
-        )?;
-        std::fs::write(
-            home.join(".codex/skills/personal/SKILL.md"),
-            "---\nname: personal\n---\nPersonal body.",
-        )?;
-        std::fs::write(
-            home.join(".agents/skills/shared/SKILL.md"),
-            "---\nname: shared\n---\nUser body.",
-        )?;
-        std::fs::write(
-            project.join(".claude/skills/review/SKILL.md"),
-            "---\nname: review\n---\nClaude-only body.",
-        )?;
-
-        let cwd = nested.as_path();
-        let skills = crate::list_skills_from(Some(cwd), Some(home.as_path()));
-        let by_name = |n: &str| skills.iter().find(|s| s.name == n);
-        assert_eq!(
-            by_name("shared").map(|s| s.body.as_str()),
-            Some("Repo body."),
-            "repo scope shadows user scope for the same name"
-        );
-        assert!(by_name("deploy").is_some(), "cwd .codex/skills");
-        assert!(by_name("nested").is_some(), "ancestor .agents/skills");
-        assert_eq!(
-            by_name("personal").map(|s| s.source.as_str()),
-            Some("user"),
-            "user-level root carries the user scope"
-        );
-        assert!(
-            by_name("review").is_none(),
-            ".claude/skills is another agent's territory — never listed"
-        );
-        std::fs::remove_dir_all(&dir)?;
-        Ok(())
     }
 
     #[test]

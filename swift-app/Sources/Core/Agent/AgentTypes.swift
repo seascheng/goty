@@ -327,28 +327,29 @@ struct AgentSlashCommand {
     let name: String
     let description: String?
     let inputHint: String?
-    /// File-backed skills/prompts (codex & friends): the SKILL.md body
-    /// the HOST injects as the prompt — the agent never parses the
-    /// slash token itself. nil = native command (the token reaches the
-    /// agent verbatim).
-    let promptBody: String?
+    /// `skillPath` — for skills-based commands (codex), the SKILL.md
+    /// path the AGENT itself declared in `skills/list`. Execution sends
+    /// a structured `{type:"skill", name, path}` input entry (paseo /
+    /// happier); the host never reads or injects the body. nil = native
+    /// command (the token reaches the agent verbatim).
+    var skillPath: String?
 
     init?(raw: [String: Any]) {
         guard let name = raw["name"] as? String else { return nil }
         self.name = name
         self.description = raw["description"] as? String
         self.inputHint = (raw["input"] as? [String: Any])?["hint"] as? String
-        self.promptBody = nil
+        self.skillPath = raw["path"] as? String
     }
 
     /// Explicit memberwise (failable wire init suppresses the
-    /// synthesized one) — native adapters build commands directly.
+    /// compiler-generated one).
     init(name: String, description: String?, inputHint: String?,
-         promptBody: String? = nil) {
+         skillPath: String? = nil) {
         self.name = name
         self.description = description
         self.inputHint = inputHint
-        self.promptBody = promptBody
+        self.skillPath = skillPath
     }
     static func list(_ raw: Any?) -> [AgentSlashCommand] {
         (raw as? [[String: Any]] ?? []).compactMap { AgentSlashCommand(raw: $0) }

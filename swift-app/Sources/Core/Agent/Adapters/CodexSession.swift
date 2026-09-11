@@ -37,86 +37,117 @@ final class CodexSession: AgentSessioning {
     /// Permission/sandbox tier — rides EVERY turn/start (codex has no
     /// mid-session mode RPC; monocode's per-turn resend).
     private var runtimeMode: AgentRuntimeMode = .supervised
+    /// Model chip state: the live thread model + the paged catalog.
+    private var modelCurrent: String?
+    private var modelChoices: [AgentConfigChoice] = []
+    /// Reasoning effort picked in the thinking chip; nil = codex's own
+    /// default (turn/start omits the field).
+    private var reasoningEffort: String?
     /// Mid-turn sends parked while a turn runs (steer's fallback path).
     private var pendingMidTurn: [(text: String, images: [AgentImage])] = []
-
+    /// Speed tier (TUI /fast /ultrafast → serviceTier on turn/start).
+    private var serviceTier: String?
 
     /// The runtimeMode chip's config option (options = all four tiers).
     static func runtimeModeOption(current: AgentRuntimeMode) -> AgentConfigOption {
         RuntimeModeMapping.option(current: current)
     }
 
-    /// The three knobs' live state — every configOptions emission
-    /// rebuilds from these (one assembly point, no drift between the
-    /// start/attach/catalog/switch paths).
-    private var modelCurrent: String?
-    private var modelChoices: [AgentConfigChoice] = []
-    /// Reasoning effort picked in the thinking chip; nil = codex's
-    /// own default (turn/start omits the field).
-    private var reasoningEffort: String?
-
+    /// Every configOptions emission rebuilds from this one assembly
+    /// point — start/attach/catalog/switch paths cannot drift.
     private func assembleOptions() -> [AgentConfigOption] {
         [
             AgentConfigOption(id: "model", name: "模型", category: nil,
                               currentValue: modelCurrent, options: modelChoices),
+            Self.speedOption(current: serviceTier),
             Self.thinkingOption(current: reasoningEffort ?? "medium"),
             Self.runtimeModeOption(current: runtimeMode),
         ]
     }
 
-    /// Host-side builtin command set (the TUI's translatable core):
-    /// /compact is the one true RPC; file-backed skills join after the
-    /// daemon's SKILLS_LIST lands.
-    static func builtinCommands() -> [AgentSlashCommand] {
-        [
-            AgentSlashCommand(name: "compact",
-                              description: "压缩对话以释放上下文",
-                              inputHint: nil),
-            AgentSlashCommand(name: "init",
-                              description: "为当前项目生成 AGENTS.md",
-                              inputHint: nil,
-                              promptBody: """
-                              Please analyze this codebase and create an AGENTS.md \
-                              file with: build/test/lint commands, code style \
-                              conventions, architecture notes, and repo-specific \
-                              gotchas. Keep it concise and actionable.
-                              """),
-        ]
-    }
 
-    /// Capability-10 SKILLS_LIST over the daemon (project + user skill
-    /// dirs on the daemon's machine — the only correct view for remote
-    /// panes). Builtin commands always win the name.
-    private func loadSkillCommands() {
-        guard let rows = daemon.skillsList(cwd: cwd) else { return }
-        let builtin = Set(Self.builtinCommands().map { $0.name })
-        let skills = rows
-            .filter { !$0.name.isEmpty && !builtin.contains($0.name) }
-            .map { row in
-                AgentSlashCommand(name: row.name,
-                                  description: row.description,
-                                  inputHint: nil,
-                                  promptBody: row.body)
-            }
-        commands = Self.builtinCommands() + skills
-        emit([.commandsChanged(commands)])
-    }
-
-    /// turn/start params as a pure function (test seam, monocode's
-    /// buildTurnStartParams): text input + picked model + tier knobs.
+    /// turn/start params as a pure function (test seam): paseo's exact
+    /// shape — a slash skill becomes a STRUCTURED `{type:"skill", name,
+    /// path}` input entry plus the text rewritten as a `$name` mention;
+    /// the app-server reads the SKILL.md itself, the host injects
+    /// nothing. Scalar knobs (model/effort/tier/mode) ride the params.
     static func turnParams(threadId: String, text: String,
                            model: String?, mode: AgentRuntimeMode,
-                           effort: String?) -> [String: Any] {
+                           effort: String?, serviceTier: String?,
+                           skill: (name: String, path: String)? = nil)
+        -> [String: Any] {
+        var input: [[String: Any]] = []
+        if let skill {
+            input.append(["type": "skill", "name": skill.name,
+                          "path": skill.path])
+        }
+        input.append(["type": "text", "text": text, "text_elements": []])
         var params: [String: Any] = [
             "threadId": threadId,
-            "input": [["type": "text", "text": text]],
+            "input": input,
         ]
         if let model { params["model"] = model }
         if let effort { params["effort"] = effort }
+        if let serviceTier { params["serviceTier"] = serviceTier }
         for (key, value) in RuntimeModeMapping.codexParams(mode) {
             params[key] = value
         }
         return params
+    }
+
+    /// The speed chip (TUI /fast /ultrafast): serviceTier values from
+    /// the agent's own tier catalog; nil = model default.
+    static func speedOption(current: String?) -> AgentConfigOption {
+        AgentConfigOption(
+            id: "speed", name: "速度", category: nil,
+            currentValue: current ?? "default",
+            options: [
+                AgentConfigChoice(value: "default", name: "默认",
+                                  description: "标准吞吐", source: nil),
+                AgentConfigChoice(value: "fast", name: "fast",
+                                  description: "1.5x 速度，用量增加", source: nil),
+                AgentConfigChoice(value: "ultrafast", name: "ultrafast",
+                                  description: "最低延迟（部分模型）", source: nil),
+            ])
+    }
+
+    /// The command directory: `skills/list` — the agent's OWN
+    /// declaration, exactly what the TUI's / menu shows (paseo's
+    /// loadSkills + enabledCodexSkills, happier's pluginAndSkillCatalog):
+    /// names, descriptions, paths; disabled skills never list; multiple
+    /// skill roots dedupe by name. The host invents no entries and
+    /// never reads SKILL.md bodies — execution rides the structured
+    /// input entry. Older app-servers without the method degrade to an
+    /// empty directory.
+    static func parseSkillCatalog(groups: [[String: Any]]) -> [AgentSlashCommand] {
+        var byName: [String: AgentSlashCommand] = [:]
+        var order: [String] = []
+        for group in groups {
+            for raw in group["skills"] as? [[String: Any]] ?? [] {
+                guard let name = raw["name"] as? String, !name.isEmpty,
+                      let path = raw["path"] as? String, !path.isEmpty,
+                      raw["enabled"] as? Bool != false,
+                      byName[name] == nil else { continue }
+                byName[name] = AgentSlashCommand(
+                    name: name,
+                    description: raw["description"] as? String,
+                    inputHint: nil,
+                    skillPath: path)
+                order.append(name)
+            }
+        }
+        return order.compactMap { byName[$0] }
+    }
+
+    private func loadSkillCommands() {
+        var params: [String: Any] = [:]
+        if let cwd { params["cwds"] = [cwd] }
+        client.request("skills/list", params) { [weak self] result in
+            guard let self else { return }
+            let groups = (try? result.get())?["data"] as? [[String: Any]] ?? []
+            self.commands = Self.parseSkillCatalog(groups: groups)
+            self.emit([.commandsChanged(self.commands)])
+        }
     }
 
     /// The thinking chip's config option (id "thinking" — the web
@@ -208,9 +239,9 @@ final class CodexSession: AgentSessioning {
             configOptions = assembleOptions()
             loadModelCatalog()
             adoptRebuild = true
-            commands = Self.builtinCommands()
+            commands = []
             loadSkillCommands()
-            emit([.configChanged(configOptions), .commandsChanged(commands), .ready])
+            emit([.configChanged(configOptions), .ready])
             completion?(true)
             return
         }
@@ -307,21 +338,23 @@ final class CodexSession: AgentSessioning {
             }
             self.threadId = id
             self.sessionId = id
-            // The model chip ALWAYS exists — a thread/start response
-            // without a model field (or a failed model/list) must not
-            // leave the pane knob-less.
-            self.modelCurrent = value["model"] as? String
+            // The thread object carries the live model + reasoning
+            // effort (probe: thread/start has NO top-level model field
+            // — reading it left the model chip blank).
+            self.modelCurrent = thread["model"] as? String
             self.modelChoices = []
+            if let effort = thread["reasoningEffort"] as? String,
+               ["minimal", "low", "medium", "high", "xhigh"].contains(effort) {
+                self.reasoningEffort = effort
+            }
             self.configOptions = self.assembleOptions()
             // Model catalog (monocode parity): model/list pages the
             // picker's options in after ready — the thread already
             // works with its default while the catalog loads.
             self.loadModelCatalog()
             var readyEvents: [AgentSessionEvent] = [.configChanged(self.configOptions), .ready]
-            // v1 command directory: builtins now, file skills right
-            // after (daemon SKILLS_LIST — codex has no command RPC).
-            self.commands = Self.builtinCommands()
-            readyEvents.append(.commandsChanged(self.commands))
+            // Command directory = the agent's own skills/list
+            // declaration (codex has no separate command RPC).
             self.loadSkillCommands()
             self.emit(readyEvents)
             completion?(true)
@@ -369,19 +402,26 @@ final class CodexSession: AgentSessioning {
         page(nil)
     }
 
-
-
     func send(_ text: String, images: [AgentImage]) {
         guard let threadId, !isWorking else { return }
-        // Builtin slash handling: app-server takes raw text; /compact
-        // is ours to translate, everything else with a promptBody is
-        // host-injected (the agent never parses the slash token).
+        // /compact is the one host translation (an app-server turn the
+        // TUI owns as a command). Everything else passes through: slash
+        // skills ride the structured input entry, native tokens reach
+        // the agent verbatim.
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed == "/compact" {
             client.request("thread/compact/start", ["threadId": threadId]) { _ in }
             return
         }
-        var prompt = Self.expandSlash(text, commands: commands)
+        var prompt = text
+        var skill: (name: String, path: String)?
+        if trimmed.hasPrefix("/"),
+           let match = Self.matchSkill(trimmed, commands: commands) {
+            skill = (name: match.command.name, path: match.command.skillPath ?? "")
+            prompt = match.rest.isEmpty
+                ? "$\(match.command.name)"
+                : "$\(match.command.name) \(match.rest)"
+        }
         for image in images {
             if let path = Self.stageImage(image) {
                 prompt += "\n\(path)"
@@ -389,14 +429,37 @@ final class CodexSession: AgentSessioning {
                 emit([.notice("⚠︎ 一张图片未能保存，已跳过")])
             }
         }
-        let turnParams = Self.turnParams(threadId: threadId, text: prompt,
-                                          model: selectedModel, mode: runtimeMode,
-                                          effort: reasoningEffort)
-        client.request("turn/start", turnParams) { [weak self] _ in
+        let params = Self.turnParams(threadId: threadId, text: prompt,
+                                     model: selectedModel, mode: runtimeMode,
+                                     effort: reasoningEffort,
+                                     serviceTier: serviceTier,
+                                     skill: skill.flatMap {
+                                         $0.path.isEmpty ? nil : $0
+                                     })
+        client.request("turn/start", params) { [weak self] _ in
             // turn outcome arrives as turn/completed notification; the
             // request result only acknowledges the turn object.
             _ = self
         }
+    }
+
+    /// `/name rest…` against the directory (pure, test seam): returns
+    /// the matching skill command and the trailing args.
+    static func matchSkill(_ text: String,
+                           commands: [AgentSlashCommand])
+        -> (command: AgentSlashCommand, rest: String)? {
+        let body = text.dropFirst()
+        let (name, rest) = if let space = body.firstIndex(where: { $0 == " " || $0 == "\n" }) {
+            (String(body[..<space]),
+             String(body[body.index(after: space)...])
+                 .trimmingCharacters(in: .whitespacesAndNewlines))
+        } else {
+            (String(body), "")
+        }
+        guard let command = commands.first(where: {
+            $0.name == name && $0.skillPath != nil
+        }) else { return nil }
+        return (command, rest)
     }
 
     /// Base64 → temp file the codex process can read (it runs on this
@@ -415,26 +478,6 @@ final class CodexSession: AgentSessioning {
         } catch {
             return nil
         }
-    }
-
-    /// Pure form of the send() slash expansion (test seam): a command
-    /// with a promptBody replaces the token with body + trailing args;
-    /// native commands and plain text pass through verbatim.
-    static func expandSlash(_ text: String,
-                            commands: [AgentSlashCommand]) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("/") else { return text }
-        let body = trimmed.dropFirst()
-        let (name, rest) = if let space = body.firstIndex(where: { $0 == " " || $0 == "\n" }) {
-            (String(body[..<space]),
-             String(body[body.index(after: space)...])
-                .trimmingCharacters(in: .whitespacesAndNewlines))
-        } else {
-            (String(body), "")
-        }
-        guard let command = commands.first(where: { $0.name == name }),
-              let promptBody = command.promptBody else { return text }
-        return rest.isEmpty ? promptBody : promptBody + "\n\n" + rest
     }
 
     func cancel() {
@@ -462,6 +505,14 @@ final class CodexSession: AgentSessioning {
                 return
             }
             reasoningEffort = value
+        case "speed":
+            // TUI /fast /ultrafast parity: serviceTier on turn/start;
+            // "default" clears back to the model's own tier.
+            guard ["default", "fast", "ultrafast"].contains(value) else {
+                emit([.notice("未知的速度档位：\(value)")])
+                return
+            }
+            serviceTier = value == "default" ? nil : value
         case "model":
             // Applies on the NEXT turn/start; the chip's currentValue
             // reflects it immediately.
@@ -532,17 +583,25 @@ final class CodexSession: AgentSessioning {
             guard let self else { return }
             var events: [AgentSessionEvent] = [.transcriptReset]
             if case .success(let value) = result,
-               let thread = value["thread"] as? [String: Any],
-               let turns = thread["turns"] as? [[String: Any]] {
-                for turn in turns {
-                    guard let items = turn["items"] as? [[String: Any]] else { continue }
-                    for item in items {
-                        events += self.mapper.map(
-                            method: "item/completed",
-                            params: ["item": item, "threadId": id])
+               let thread = value["thread"] as? [String: Any] {
+                if let model = thread["model"] as? String {
+                    self.modelCurrent = model
+                }
+                if let effort = thread["reasoningEffort"] as? String,
+                   ["minimal", "low", "medium", "high", "xhigh"].contains(effort) {
+                    self.reasoningEffort = effort
+                }
+                if let turns = thread["turns"] as? [[String: Any]] {
+                    for turn in turns {
+                        guard let items = turn["items"] as? [[String: Any]] else { continue }
+                        for item in items {
+                            events += self.mapper.map(
+                                method: "item/completed",
+                                params: ["item": item, "threadId": id])
+                        }
+                        events += self.mapper.map(method: "turn/completed",
+                                                  params: ["turn": turn])
                     }
-                    events += self.mapper.map(method: "turn/completed",
-                                              params: ["turn": turn])
                 }
             }
             self.emit(events)
@@ -564,20 +623,28 @@ final class CodexSession: AgentSessioning {
                 guard let self else { return }
                 var events: [AgentSessionEvent] = []
                 if case .success(let value) = result,
-                   let thread = value["thread"] as? [String: Any],
-                   let turns = thread["turns"] as? [[String: Any]] {
-                    for turn in turns {
-                        guard let items = turn["items"] as? [[String: Any]] else { continue }
-                        for item in items {
-                            events += self.mapper.map(
-                                method: "item/completed",
-                                params: ["item": item, "threadId": sessionId])
+                   let thread = value["thread"] as? [String: Any] {
+                    if let model = thread["model"] as? String {
+                        self.modelCurrent = model
+                    }
+                    if let effort = thread["reasoningEffort"] as? String,
+                       ["minimal", "low", "medium", "high", "xhigh"].contains(effort) {
+                        self.reasoningEffort = effort
+                    }
+                    if let turns = thread["turns"] as? [[String: Any]] {
+                        for turn in turns {
+                            guard let items = turn["items"] as? [[String: Any]] else { continue }
+                            for item in items {
+                                events += self.mapper.map(
+                                    method: "item/completed",
+                                    params: ["item": item, "threadId": sessionId])
+                            }
+                            events += self.mapper.map(method: "turn/completed",
+                                                      params: ["turn": turn])
                         }
-                        events += self.mapper.map(method: "turn/completed",
-                                                  params: ["turn": turn])
                     }
                 }
-                self.emit(events + [.ready])
+                self.emit(events + [.configChanged(self.assembleOptions()), .ready])
                 completion?(true)
             }
         }

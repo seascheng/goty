@@ -35,11 +35,7 @@ pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 ///   the resumed agent's own plan still shows. The client's windowed
 ///   parse only ever wants the tail anyway. Old daemons ignore the
 ///   field (serde), so the request stays compatible either way.
-/// - 10 = SKILLS_LIST — skill/prompt files on the daemon's machine
-///   (`<cwd>/.agents/skills`, `<cwd>/.codex/skills`, `~/.codex/skills`,
-///   the other agents' dirs too — one call serves every family). The
-///   GUI's own filesystem is the WRONG view for remote panes.
-pub const CAPABILITY: u8 = 10;
+pub const CAPABILITY: u8 = 9;
 
 pub mod kind {
     pub const SPAWN: u8 = 1;
@@ -57,10 +53,6 @@ pub mod kind {
     /// Write a prefix fork of one store file (the branch button's
     /// remote fast path — a pure file operation, no agent process).
     pub const SESSION_FORK: u8 = 11;
-    /// Capability 10: skill/prompt discovery on THIS machine — the
-    /// daemon-side filesystem is the only correct view for remote
-    /// panes (the GUI's disk sees a different machine's ~/.codex).
-    pub const SKILLS_LIST: u8 = 12;
 
     pub const SPAWNED: u8 = 0x81;
     pub const SIZE: u8 = 0x82;
@@ -76,8 +68,6 @@ pub mod kind {
     pub const SESSION_FILE_REPLY: u8 = 0x8a;
     /// Payload = JSON {"id": "<new session id>"}.
     pub const SESSION_FORK_REPLY: u8 = 0x8b;
-    /// Payload = JSON SkillsListReply.
-    pub const SKILLS_LIST_REPLY: u8 = 0x8c;
     pub const ERROR: u8 = 0xff;
 }
 
@@ -126,29 +116,6 @@ pub struct SessionFileRequest {
 pub struct SessionForkRequest {
     pub session_id: String,
     pub entry_id: String,
-}
-
-/// Capability 10: skill/prompt discovery. `cwd` scopes the project
-/// level; every agent family's skill dirs are scanned in one call —
-/// the host injects the body as the prompt, the same for all of them.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SkillsListRequest {
-    pub cwd: Option<String>,
-}
-
-/// One skill: frontmatter name/description + the markdown body (the
-/// prompt the host sends when the user picks the command).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SkillRow {
-    pub name: String,
-    pub description: Option<String>,
-    pub source: String,
-    pub body: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SkillsListReply {
-    pub skills: Vec<SkillRow>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

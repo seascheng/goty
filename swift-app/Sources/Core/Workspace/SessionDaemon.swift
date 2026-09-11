@@ -47,7 +47,7 @@ private enum SessionFrame {
     static let sessionList: UInt8 = 9
     static let sessionFile: UInt8 = 10
     static let sessionFork: UInt8 = 11
-    static let skillsList: UInt8 = 12
+
 
     static let spawned: UInt8 = 0x81
     static let size: UInt8 = 0x82
@@ -60,7 +60,6 @@ private enum SessionFrame {
     static let sessionListReply: UInt8 = 0x89
     static let sessionFileReply: UInt8 = 0x8a
     static let sessionForkReply: UInt8 = 0x8b
-    static let skillsListReply: UInt8 = 0x8c
     static let error: UInt8 = 0xff
 }
 
@@ -258,31 +257,6 @@ final class SessionDaemon {
         var paths: [String: String] = [:]
         for row in decoded.sessions { paths[row.id] = row.path }
         return (decoded.sessions, paths)
-    }
-
-    /// One daemon-side skill file (capability 10 SKILLS_LIST).
-    struct DaemonSkillRow: Decodable {
-        let name: String
-        let description: String?
-        let source: String
-        let body: String
-    }
-
-    /// SKILLS_LIST: the daemon machine's skill/prompt files (project +
-    /// user level, every agent family's dirs in one call). nil = the
-    /// caller keeps its builtin command set only.
-    func skillsList(cwd: String?) -> [DaemonSkillRow]? {
-        guard (pingCapability() ?? 0) >= 10 else { return nil }
-        let request = try? JSONSerialization.data(
-            withJSONObject: ["cwd": (cwd as String? ?? "") as Any])
-        struct Reply: Decodable { let skills: [DaemonSkillRow] }
-        guard let data = request,
-              let reply = storeRoundTrip(kind: SessionFrame.skillsList,
-                                         payload: data,
-                                         replyKind: SessionFrame.skillsListReply),
-              let decoded = try? JSONDecoder().decode(Reply.self, from: reply)
-        else { return nil }
-        return decoded.skills
     }
 
     /// SESSION_FILE: one store file's raw bytes (the authoritative
