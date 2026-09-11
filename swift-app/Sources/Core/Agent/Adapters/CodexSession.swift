@@ -13,6 +13,9 @@ final class CodexSession: AgentSessioning {
 
     let cwd: String?
     private(set) var sessionId: String?
+    /// PaneState.agentSessionId at GUI start: the thread to re-open on
+    /// both the attach (thread/read) and respawn (thread/resume) paths.
+    private let restoredSessionId: String?
     private(set) var isWorking = false
     private(set) var configOptions: [AgentConfigOption] = []
     private(set) var commands: [AgentSlashCommand] = []
@@ -307,6 +310,10 @@ final class CodexSession: AgentSessioning {
         self.environment = params.environment
         self.daemon = params.daemon
         self.grid = AgentPaneDefaults.grid
+        // The thread the user last had here (PaneState.agentSessionId) —
+        // claude/pi consume the same param; without it a restart either
+        // starts a blank thread or gambles on discovery.
+        self.restoredSessionId = params.restoredSessionId
         client.onOutbound = { [weak self] in self?.pane?.sendInput($0) }
         client.onUnparseable = { line in
             if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
@@ -353,26 +360,34 @@ final class CodexSession: AgentSessioning {
             // re-starting (thread/start would fork the conversation).
             // The chips and transcript still have to come from
             // somewhere: emit the knobs now (model/list pages the
-            // picker in over the live app-server). The thread id comes
-            // from the app-server itself: thread/loaded/list reports
-            // the live threads of THIS process — the ring replay's
-            // orphaned thread/start result only survives while it is
-            // still inside the 16MB window, so a GUI restart on a
-            // long-lived pane would otherwise never rebuild.
+            // picker in over the live app-server). The thread to open is
+            // the one the user left here (restoredSessionId — the exact
+            // claude/pi restore param); without one, fall back to the
+            // app-server's own live-thread report (thread/loaded/list).
+            // The ring replay's orphaned thread/start result only
+            // survives inside the 16MB window, so it can't be the
+            // primary source.
             configOptions = assembleOptions()
             loadModelCatalog()
             adoptRebuild = true
             commands = []
             loadCommands()
-            client.request("thread/loaded/list", [:]) { [weak self] result in
-                guard let self, self.adoptRebuild,
-                      let value = try? result.get(),
-                      let id = Self.pickLoadedThreadId(value)
-                else { return }
-                self.adoptRebuild = false
-                self.threadId = id
-                self.sessionId = id
-                self.rebuildAdoptedThread(id)
+            if let restore = restoredSessionId {
+                adoptRebuild = false
+                threadId = restore
+                sessionId = restore
+                rebuildAdoptedThread(restore)
+            } else {
+                client.request("thread/loaded/list", [:]) { [weak self] result in
+                    guard let self, self.adoptRebuild,
+                          let value = try? result.get(),
+                          let id = Self.pickLoadedThreadId(value)
+                    else { return }
+                    self.adoptRebuild = false
+                    self.threadId = id
+                    self.sessionId = id
+                    self.rebuildAdoptedThread(id)
+                }
             }
             emit([.configChanged(configOptions), .ready])
             completion?(true)
@@ -418,7 +433,13 @@ final class CodexSession: AgentSessioning {
                 return
             }
             self.client.notify("initialized", [:])
-            self.startThread(completion: completion)
+            // A restarted GUI with a remembered thread re-opens IT
+            // (thread/resume); thread/start would fork a new one.
+            if let restore = self.restoredSessionId {
+                self.load(sessionId: restore) { _ in completion?(true) }
+            } else {
+                self.startThread(completion: completion)
+            }
         }
     }
 
@@ -436,18 +457,9 @@ final class CodexSession: AgentSessioning {
             completion?(true)
             return
         }
-        // Fresh process: re-adopt via thread/resume on the last live id.
-        handshake { [weak self] ok in
-            guard let self, ok else {
-                completion?(ok)
-                return
-            }
-            if let restore = self.lastSessionId {
-                self.load(sessionId: restore) { _ in completion?(true) }
-            } else {
-                completion?(true)
-            }
-        }
+        // Fresh process: handshake re-opens the remembered thread
+        // (restoredSessionId / lastSessionId) itself via thread/resume.
+        handshake(completion)
     }
 
 
