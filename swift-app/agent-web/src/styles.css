@@ -685,6 +685,10 @@ body {
   padding: 6px 12px 0;
   font-size: 11.5px; color: var(--fg-muted);
 }
+/* Inside the transcript (StatusLine) the parent already owns the 20px
+   gutter — the composer's 12px left padding double-indents and the
+   status falls out of alignment with the turn body above it. */
+.composer-status.in-transcript { padding: 6px 0 0; }
 .cstat { display: inline-flex; gap: 6px; align-items: center; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cstat.warn { color: var(--accent-bright); }
 .cstat.awaiting { color: var(--accent-bright); animation: pulse 1.2s ease-in-out infinite; }
