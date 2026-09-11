@@ -746,7 +746,17 @@ class Store {
         }, 6000);
         break;
       }
-      case "configOptions": this.configOptions = coerceList(event.options, ConfigOptionSchema); break;
+      case "configOptions": {
+        // One knob per id — a double-emitting adapter must not render
+        // two chips (and two popovers) for the same knob. Last wins:
+        // the fresher entry carries the newer currentValue.
+        const seen = new Map<string, ConfigOption>();
+        for (const opt of coerceList(event.options, ConfigOptionSchema)) {
+          seen.set(opt.id, opt);
+        }
+        this.configOptions = [...seen.values()];
+        break;
+      }
       case "commands": this.commands = coerceList(event.commands, AgentCommandSchema); break;
       case "usage": this.usage = event; break;
       case "clearTranscript":

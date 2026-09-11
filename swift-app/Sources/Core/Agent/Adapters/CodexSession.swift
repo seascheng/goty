@@ -213,16 +213,16 @@ final class CodexSession: AgentSessioning {
             }
             self.threadId = id
             self.sessionId = id
-            if let model = value["model"] as? String {
-                self.configOptions = [
-                    AgentConfigOption(id: "model", name: "模型",
-                                      category: nil,
-                                      currentValue: model, options: []),
-                    Self.runtimeModeOption(current: self.runtimeMode),
-                ]
-            } else {
-                self.configOptions = [Self.runtimeModeOption(current: self.runtimeMode)]
-            }
+            // The model chip ALWAYS exists — a thread/start response
+            // without a model field (or a failed model/list) must not
+            // leave the pane knob-less.
+            self.configOptions = [
+                AgentConfigOption(id: "model", name: "模型",
+                                  category: nil,
+                                  currentValue: value["model"] as? String,
+                                  options: []),
+                Self.runtimeModeOption(current: self.runtimeMode),
+            ]
             // Model catalog (monocode parity): model/list pages the
             // picker's options in after ready — the thread already
             // works with its default while the catalog loads.
@@ -352,7 +352,12 @@ final class CodexSession: AgentSessioning {
                 return
             }
             runtimeMode = mode
-            emit([.configChanged(configOptions + [Self.runtimeModeOption(current: mode)])])
+            // REPLACE the chip entry — appending here duplicated the
+            // knob on every switch (two chips, two open popovers).
+            var options = configOptions.filter { $0.id != "runtimeMode" }
+            options.append(Self.runtimeModeOption(current: mode))
+            configOptions = options
+            emit([.configChanged(configOptions)])
             return
         }
         guard id == "model" else { return }
