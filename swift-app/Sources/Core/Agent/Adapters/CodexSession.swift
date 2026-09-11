@@ -67,6 +67,12 @@ final class CodexSession: AgentSessioning {
         ProcessInfo.processInfo.environment["GOTY_CODEX_MODEL"]
     }
 
+    /// Attach-adoption transcript rebuild pending: the ring will
+    /// re-stream the thread/start response; when its id lands, re-read
+    /// the thread (the authoritative history — the ring alone is not a
+    /// rebuild source for codex).
+    private var adoptRebuild = false
+
     init(params: AgentPaneParams) {
         self.paneId = params.paneId
         self.cwd = params.cwd
@@ -88,14 +94,15 @@ final class CodexSession: AgentSessioning {
         client.onRequest = { [weak self] id, method, params in
             self?.handleServerRequest(id: id, method: method, params: params)
         }
-        // Attach adoption: the ring re-streams the original thread/start
-        // response — the only wire record of the live thread id.
         client.onOrphanResult = { [weak self] result in
             guard let self, self.threadId == nil,
                   let thread = result["thread"] as? [String: Any],
                   let id = thread["id"] as? String else { return }
             self.threadId = id
             self.sessionId = id
+            guard self.adoptRebuild else { return }
+            self.adoptRebuild = false
+            self.rebuildAdoptedThread(id)
         }
     }
 
@@ -116,7 +123,19 @@ final class CodexSession: AgentSessioning {
         if opened.attachedExisting {
             // Live thread on the far side of the ring — adopting, never
             // re-starting (thread/start would fork the conversation).
-            emit([.ready])
+            // The chips and transcript still have to come from
+            // somewhere: emit the knobs now (model/list pages the
+            // picker in over the live app-server) and rebuild the
+            // transcript once the ring re-streams the thread id.
+            configOptions = [
+                AgentConfigOption(id: "model", name: "模型",
+                                  category: nil, currentValue: nil,
+                                  options: []),
+                Self.runtimeModeOption(current: runtimeMode),
+            ]
+            loadModelCatalog()
+            adoptRebuild = true
+            emit([.configChanged(configOptions), .ready])
             completion?(true)
             return
         }
@@ -397,6 +416,7 @@ final class CodexSession: AgentSessioning {
             }
             // Old daemon: the pane's own thread/list is the only source.
             self?.client.request("thread/list", ["limit": 50]) { result in
+
                 guard case .success(let value) = result else {
                     completion([])
                     return
@@ -418,6 +438,34 @@ final class CodexSession: AgentSessioning {
                     (Int($0.updatedAt ?? "") ?? 0) > (Int($1.updatedAt ?? "") ?? 0)
                 })
             }
+        }
+    }
+
+    /// Attach-adoption rebuild: swap the page for the thread's
+    /// authoritative history (thread/read), like omp's attach store
+    /// re-read. Mid-turn adopts keep the live stream instead — the
+    /// read only covers settled turns.
+    private func rebuildAdoptedThread(_ id: String) {
+        guard !isWorking else { return }
+        client.request("thread/read",
+                       ["threadId": id, "includeTurns": true]) { [weak self] result in
+            guard let self else { return }
+            var events: [AgentSessionEvent] = [.transcriptReset]
+            if case .success(let value) = result,
+               let thread = value["thread"] as? [String: Any],
+               let turns = thread["turns"] as? [[String: Any]] {
+                for turn in turns {
+                    guard let items = turn["items"] as? [[String: Any]] else { continue }
+                    for item in items {
+                        events += self.mapper.map(
+                            method: "item/completed",
+                            params: ["item": item, "threadId": id])
+                    }
+                    events += self.mapper.map(method: "turn/completed",
+                                              params: ["turn": turn])
+                }
+            }
+            self.emit(events)
         }
     }
 
