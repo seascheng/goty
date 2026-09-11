@@ -822,7 +822,7 @@ final class CodexSession: AgentSessioning {
                 let summaries = rows.map { row in
                     AgentSessionSummary(
                         sessionId: row.id, cwd: row.cwd,
-                        title: row.title,
+                        title: DaemonSessionRow.clampedTitle(row.title),
                         updatedAt: row.mtimeMs > 0 ? String(row.mtimeMs) : nil,
                         messageCount: nil)
                 }
@@ -937,20 +937,32 @@ final class CodexSession: AgentSessioning {
 
     func load(sessionId: String, completion: ((Bool) -> Void)? = nil) {
         // thread/resume reattaches the server-side thread; the paginated
-        // replay then swaps the page for its authoritative history.
+        // replay then swaps the page for its authoritative history. A
+        // carried model override can poison the resume on a host whose
+        // config lacks that provider ("Model provider `fox` not found",
+        // probed 2026-09-11) — one bare retry keeps the history flowing;
+        // the thread keeps its own model.
         var resumeParams: [String: Any] = ["threadId": sessionId]
         if let modelOverride { resumeParams["model"] = modelOverride }
-        client.request("thread/resume", resumeParams) { [weak self] result in
-            guard let self else { return }
-            self.threadId = sessionId
-            self.sessionId = sessionId
-            _ = result
-            self.replayThreadHistory(sessionId) { [weak self] events in
-                self?.emit(events + [.configChanged(self?.assembleOptions() ?? []),
-                                     .ready])
-                completion?(true)
+        func resume(bare: Bool) {
+            let params: [String: Any] = bare
+                ? ["threadId": sessionId] : resumeParams
+            client.request("thread/resume", params) { [weak self] result in
+                guard let self else { return }
+                if case .failure = result, !bare {
+                    resume(bare: true)
+                    return
+                }
+                self.threadId = sessionId
+                self.sessionId = sessionId
+                self.replayThreadHistory(sessionId) { [weak self] events in
+                    self?.emit(events + [.configChanged(self?.assembleOptions() ?? []),
+                                         .ready])
+                    completion?(true)
+                }
             }
         }
+        resume(bare: false)
     }
 
     /// Accumulator for the paginated replay (async pages can't share an
