@@ -253,9 +253,10 @@ extension AppDelegate {
     /// Workspaces whose remote daemon reports below the store
     /// capability — the server menu shows the upgrade item for these.
     func upgradableDaemonSet() -> Set<UUID> {
-        var out: Set<UUID> = []
+        var out = Set<UUID>()
         for (id, link) in remoteLinks where link.daemon != nil {
-            if (link.reportedCapability ?? 0) < SessionDaemon.storeCapability {
+            if (link.reportedCapability ?? 0) < SessionDaemon.storeCapability
+                || link.binaryStale {
                 out.insert(id)
             }
         }

@@ -43,6 +43,26 @@ final class RemoteDaemonLink {
     /// True between upgradeDaemon() and the boot() that answers it —
     /// onUpgradeResult fires exactly once per attempt.
     private var upgradePending = false
+    /// True when the RUNNING daemon's content-hash binary differs from
+    /// the bundled one while its capability number still passes the
+    /// gates — a same-capability binary swap the number alone can't
+    /// see (2026-09-11, host 5090). Gates the sidebar upgrade item.
+    private(set) var binaryStale = false
+
+    /// Whether the daemon named in `pgrep -af` output IS the expected
+    static func runningBinaryMatches(pgrepOutput: String,
+                                      expectedName: String) -> Bool {
+        for line in pgrepOutput.split(separator: "\n") {
+            for token in line.split(separator: " ") {
+                let name = (token as NSString).lastPathComponent
+                if name.hasPrefix("goty-sessiond-") {
+                    return name == expectedName
+                }
+            }
+        }
+        return true
+    }
+
     /// One upgrade attempt's verdict: the capability the daemon reports
     /// AFTER the kill-and-reboot. Owners surface success/failure from
     /// here — an upgrade that silently no-ops is indistinguishable
@@ -201,6 +221,23 @@ final class RemoteDaemonLink {
         guard capability >= SessionDaemon.storeCapability else {
             NSLog("remote-link %@: daemon capability %d < %d — no store access",
                   host, capability, SessionDaemon.storeCapability)
+            self.daemon = daemon
+            state = .outdated
+            return
+        }
+        // Same-capability binary drift: the number passed, but the
+        // RUNNING binary may be an older build (a daemon uploaded
+        // before a store fix, still reporting the same capability —
+        // 2026-09-11, host 5090 served omp rows to store:"codex").
+        // pgrep's bracket form keeps this ssh's own shell out of the
+        // match; the argv token names the content hash.
+        let expectedName = (binPath as NSString).lastPathComponent
+        let pgrep = ssh("pgrep -af \"[g]oty-sessiond\" 2>/dev/null || true")
+        binaryStale = !Self.runningBinaryMatches(pgrepOutput: pgrep,
+                                                  expectedName: expectedName)
+        if binaryStale {
+            NSLog("remote-link %@: daemon binary drift (running != %@) — outdated",
+                  host, expectedName)
             self.daemon = daemon
             state = .outdated
             return

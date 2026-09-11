@@ -1162,6 +1162,27 @@ enum AgentTest {
               && RuntimeModeMapping.option(current: .supervised).options.count == 4,
               "shared runtimeMode option builder serves every declaring adapter")
 
+        // RemoteDaemonLink binary-drift detection: the capability
+        // number can't see a same-capability binary swap (2026-09-11,
+        // host 5090: cap-9 daemon from an older build served omp rows
+        // to store:"codex"). The RUNNING binary's argv names its hash.
+        check(RemoteDaemonLink.runningBinaryMatches(
+                  pgrepOutput: "3686206 ./goty-sessiond-71b0bf256657 /root/.local/share/goty/sessiond.sock\n",
+                  expectedName: "goty-sessiond-71b0bf256657"),
+              "running binary hash equal → match")
+        check(!RemoteDaemonLink.runningBinaryMatches(
+                  pgrepOutput: "2999353 /root/.local/share/goty/bin/goty-sessiond-eacff6e75420 /root/.local/share/goty/sessiond.sock",
+                  expectedName: "goty-sessiond-71b0bf256657"),
+              "running binary hash differs → drift")
+        check(RemoteDaemonLink.runningBinaryMatches(
+                  pgrepOutput: "",
+                  expectedName: "goty-sessiond-71b0bf256657"),
+              "no pgrep output (daemon argv unreadable) → treat as match")
+        check(RemoteDaemonLink.runningBinaryMatches(
+                  pgrepOutput: "1234 bash -c pgrep -af [g]oty-sessiond\n",
+                  expectedName: "goty-sessiond-71b0bf256657"),
+              "only self-matching shells in output → no daemon line, match")
+
         try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }
         print("agenttest: all passed")
