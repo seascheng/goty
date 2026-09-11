@@ -46,19 +46,59 @@ final class CodexSession: AgentSessioning {
         RuntimeModeMapping.option(current: current)
     }
 
+    /// The three knobs' live state — every configOptions emission
+    /// rebuilds from these (one assembly point, no drift between the
+    /// start/attach/catalog/switch paths).
+    private var modelCurrent: String?
+    private var modelChoices: [AgentConfigChoice] = []
+    /// Reasoning effort picked in the thinking chip; nil = codex's
+    /// own default (turn/start omits the field).
+    private var reasoningEffort: String?
+
+    private func assembleOptions() -> [AgentConfigOption] {
+        [
+            AgentConfigOption(id: "model", name: "模型", category: nil,
+                              currentValue: modelCurrent, options: modelChoices),
+            Self.thinkingOption(current: reasoningEffort ?? "medium"),
+            Self.runtimeModeOption(current: runtimeMode),
+        ]
+    }
+
     /// turn/start params as a pure function (test seam, monocode's
     /// buildTurnStartParams): text input + picked model + tier knobs.
     static func turnParams(threadId: String, text: String,
-                           model: String?, mode: AgentRuntimeMode) -> [String: Any] {
+                           model: String?, mode: AgentRuntimeMode,
+                           effort: String?) -> [String: Any] {
         var params: [String: Any] = [
             "threadId": threadId,
             "input": [["type": "text", "text": text]],
         ]
         if let model { params["model"] = model }
+        if let effort { params["effort"] = effort }
         for (key, value) in RuntimeModeMapping.codexParams(mode) {
             params[key] = value
         }
         return params
+    }
+
+    /// The thinking chip's config option (id "thinking" — the web
+    /// renders it with the omp thinking knob's icon and order).
+    static func thinkingOption(current: String?) -> AgentConfigOption {
+        AgentConfigOption(
+            id: "thinking", name: "思考", category: nil,
+            currentValue: current,
+            options: [
+                AgentConfigChoice(value: "minimal", name: "极简",
+                                  description: "几乎不思考，最快", source: nil),
+                AgentConfigChoice(value: "low", name: "低",
+                                  description: "轻量推理", source: nil),
+                AgentConfigChoice(value: "medium", name: "中",
+                                  description: "默认平衡档", source: nil),
+                AgentConfigChoice(value: "high", name: "高",
+                                  description: "更深的推理", source: nil),
+                AgentConfigChoice(value: "xhigh", name: "极高",
+                                  description: "最大推理深度（部分模型）", source: nil),
+            ])
     }
 
     /// GOTY_CODEX_MODEL debug knob: this machine's relay default model
@@ -127,12 +167,7 @@ final class CodexSession: AgentSessioning {
             // somewhere: emit the knobs now (model/list pages the
             // picker in over the live app-server) and rebuild the
             // transcript once the ring re-streams the thread id.
-            configOptions = [
-                AgentConfigOption(id: "model", name: "模型",
-                                  category: nil, currentValue: nil,
-                                  options: []),
-                Self.runtimeModeOption(current: runtimeMode),
-            ]
+            configOptions = assembleOptions()
             loadModelCatalog()
             adoptRebuild = true
             emit([.configChanged(configOptions), .ready])
@@ -235,13 +270,9 @@ final class CodexSession: AgentSessioning {
             // The model chip ALWAYS exists — a thread/start response
             // without a model field (or a failed model/list) must not
             // leave the pane knob-less.
-            self.configOptions = [
-                AgentConfigOption(id: "model", name: "模型",
-                                  category: nil,
-                                  currentValue: value["model"] as? String,
-                                  options: []),
-                Self.runtimeModeOption(current: self.runtimeMode),
-            ]
+            self.modelCurrent = value["model"] as? String
+            self.modelChoices = []
+            self.configOptions = self.assembleOptions()
             // Model catalog (monocode parity): model/list pages the
             // picker's options in after ready — the thread already
             // works with its default while the catalog loads.
@@ -292,11 +323,9 @@ final class CodexSession: AgentSessioning {
                    idx > 0 {
                     choices.swapAt(0, idx)
                 }
-                let current = self.configOptions.first(where: { $0.id == "model" })?.currentValue
-                self.configOptions = [AgentConfigOption(
-                    id: "model", name: "模型", category: nil,
-                    currentValue: current ?? defaultValue, options: choices)]
-                    + [Self.runtimeModeOption(current: self.runtimeMode)]
+                self.modelChoices = choices
+                self.modelCurrent = self.modelCurrent ?? defaultValue
+                self.configOptions = self.assembleOptions()
                 self.emit([.configChanged(self.configOptions)])
             }
         }
@@ -327,7 +356,8 @@ final class CodexSession: AgentSessioning {
             }
         }
         let turnParams = Self.turnParams(threadId: threadId, text: prompt,
-                                          model: selectedModel, mode: runtimeMode)
+                                          model: selectedModel, mode: runtimeMode,
+                                          effort: reasoningEffort)
         client.request("turn/start", turnParams) { [weak self] _ in
             // turn outcome arrives as turn/completed notification; the
             // request result only acknowledges the turn object.
@@ -365,33 +395,29 @@ final class CodexSession: AgentSessioning {
     }
 
     func setConfigOption(id: String, value: String) {
-        if id == "runtimeMode" {
+        switch id {
+        case "runtimeMode":
             guard let mode = AgentRuntimeMode(rawValue: value) else {
                 emit([.notice("未知的权限档位：\(value)")])
                 return
             }
             runtimeMode = mode
-            // REPLACE the chip entry — appending here duplicated the
-            // knob on every switch (two chips, two open popovers).
-            var options = configOptions.filter { $0.id != "runtimeMode" }
-            options.append(Self.runtimeModeOption(current: mode))
-            configOptions = options
-            emit([.configChanged(configOptions)])
+        case "thinking":
+            guard ["minimal", "low", "medium", "high", "xhigh"].contains(value) else {
+                emit([.notice("未知的思考档位：\(value)")])
+                return
+            }
+            reasoningEffort = value
+        case "model":
+            // Applies on the NEXT turn/start; the chip's currentValue
+            // reflects it immediately.
+            selectedModel = value
+            modelCurrent = value
+        default:
             return
         }
-        guard id == "model" else { return }
-        // Applies on the NEXT turn/start; the chip's currentValue
-        // reflects it immediately.
-        selectedModel = value
-        var options = configOptions.filter { $0.id != "runtimeMode" }
-        if var option = options.first {
-            options[0] = AgentConfigOption(id: option.id, name: option.name,
-                                           category: option.category,
-                                           currentValue: value,
-                                           options: option.options)
-        }
-        options.append(Self.runtimeModeOption(current: runtimeMode))
-        configOptions = options
+        // One assembly point — REPLACE semantics keep each knob single.
+        configOptions = assembleOptions()
         emit([.configChanged(configOptions)])
     }
     func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void) {

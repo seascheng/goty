@@ -1108,7 +1108,7 @@ enum AgentTest {
         // mode API — monocode's per-turn resend) and the chip contract
         // matches the declared capability.
         let tp = CodexSession.turnParams(threadId: "t1", text: "hi",
-                                         model: nil, mode: .auto)
+                                         model: nil, mode: .auto, effort: nil)
         check(tp["threadId"] as? String == "t1"
               && (tp["input"] as? [[String: Any]])?.first?["text"] as? String == "hi"
               && tp["approvalPolicy"] as? String == "on-request"
@@ -1117,7 +1117,7 @@ enum AgentTest {
               && tp["model"] == nil,
               "codex turnParams carries the runtime mode without a model")
         check(CodexSession.turnParams(threadId: "t", text: "x", model: "gpt-5.3",
-                                      mode: .fullAccess)["model"] as? String == "gpt-5.3",
+                                      mode: .fullAccess, effort: nil)["model"] as? String == "gpt-5.3",
               "codex turnParams still carries the picked model")
         let modeOption = CodexSession.runtimeModeOption(current: .autoEdits)
         check(modeOption.id == "runtimeMode" && modeOption.name == "权限"
@@ -1146,6 +1146,24 @@ enum AgentTest {
               && (modeFrame["request"] as? [String: Any])?["mode"] as? String == "auto"
               && !(modeFrame["request_id"] as? String ?? "").isEmpty,
               "claude setPermissionModeFrame shapes the control request")
+
+        // codex thinking knob: effort rides turn/start like the model.
+        let tpEffort = CodexSession.turnParams(threadId: "t", text: "hi",
+                                               model: nil, mode: .auto,
+                                               effort: "high")
+        check(tpEffort["effort"] as? String == "high",
+              "codex turnParams carries the reasoning effort")
+        let noEffort = CodexSession.turnParams(threadId: "t", text: "hi",
+                                                model: nil, mode: .auto,
+                                                effort: nil)
+        check(noEffort["effort"] == nil,
+              "codex turnParams omits effort when unset (codex default)")
+        let thinking = CodexSession.thinkingOption(current: "medium")
+        check(thinking.id == "thinking" && thinking.name == "思考"
+              && thinking.currentValue == "medium"
+              && thinking.options.contains { $0.value == "xhigh" }
+              && thinking.options.count == 5,
+              "codex thinking option lists all five efforts")
 
         // Manifest honesty (happier's invariant-test pattern): an
         // adapter that declares .runtimeModes must surface the chip
