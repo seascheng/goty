@@ -1190,6 +1190,12 @@ enum AgentTest {
                 == "thread/goal/clear"
               && CodexSession.goalParams(threadId: "t", args: "") == nil,
               "goal pause/clear map to their RPCs; bare goal asks for usage")
+        // Attach rebuild: thread/loaded/list discovers the live thread
+        // (the ring replay's orphan result only survives 16MB).
+        check(CodexSession.pickLoadedThreadId(["data": ["thread-7"]]) == "thread-7"
+              && CodexSession.pickLoadedThreadId(["data": []]) == nil
+              && CodexSession.pickLoadedThreadId(["data": ["", "x"]]) == "x",
+              "loaded/list picker takes the first non-empty live thread id")
 
         // Custom prompts: ~/.codex/prompts/*.md, name prefixed
         // "prompts:", frontmatter feeds description + argument-hint.

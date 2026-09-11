@@ -353,13 +353,27 @@ final class CodexSession: AgentSessioning {
             // re-starting (thread/start would fork the conversation).
             // The chips and transcript still have to come from
             // somewhere: emit the knobs now (model/list pages the
-            // picker in over the live app-server) and rebuild the
-            // transcript once the ring re-streams the thread id.
+            // picker in over the live app-server). The thread id comes
+            // from the app-server itself: thread/loaded/list reports
+            // the live threads of THIS process — the ring replay's
+            // orphaned thread/start result only survives while it is
+            // still inside the 16MB window, so a GUI restart on a
+            // long-lived pane would otherwise never rebuild.
             configOptions = assembleOptions()
             loadModelCatalog()
             adoptRebuild = true
             commands = []
             loadCommands()
+            client.request("thread/loaded/list", [:]) { [weak self] result in
+                guard let self, self.adoptRebuild,
+                      let value = try? result.get(),
+                      let id = Self.pickLoadedThreadId(value)
+                else { return }
+                self.adoptRebuild = false
+                self.threadId = id
+                self.sessionId = id
+                self.rebuildAdoptedThread(id)
+            }
             emit([.configChanged(configOptions), .ready])
             completion?(true)
             return
@@ -820,12 +834,20 @@ final class CodexSession: AgentSessioning {
         }
     }
 
+    /// thread/loaded/list reply → the live thread of this pane's own
+    /// app-server process (one codex process per pane, so the first
+    /// entry is ours; paseo's fake pins the same `{data: [id]}` shape).
+    static func pickLoadedThreadId(_ value: [String: Any]) -> String? {
+        (value["data"] as? [String])?.first { !$0.isEmpty }
+    }
+
     /// Attach-adoption rebuild: swap the page for the thread's
     /// authoritative history (thread/read), like omp's attach store
-    /// re-read. Mid-turn adopts keep the live stream instead — the
-    /// read only covers settled turns.
+    /// re-read. A GUI restart lands here with an EMPTY page, so the
+    /// reset is lossless; an in-flight turn keeps streaming — its
+    /// remaining items arrive on the live notification flow after the
+    /// settled turns replay.
     private func rebuildAdoptedThread(_ id: String) {
-        guard !isWorking else { return }
         client.request("thread/read",
                        ["threadId": id, "includeTurns": true]) { [weak self] result in
             guard let self else { return }
