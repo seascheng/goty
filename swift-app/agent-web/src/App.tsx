@@ -326,7 +326,7 @@ function ToolCard({ id }: { id: string }) {
   return (
     <div className={"tool st-" + (call.status ?? "none") + (open ? " open" : "") + (running ? " run" : "")}>
       <button className="tool-head" onClick={() => setOpen(!open)}>
-        <span className={"chevron" + (open ? " up" : "")}>▸</span>
+        <Chevron open={open} />
         <span className="tool-kind" aria-hidden><ToolGlyph kind={kind} /></span>
         <span className="tool-title">{toolDisplayTitle(call)}</span>
         {(running || call.status === "error" || call.status === "pending") && (
@@ -503,6 +503,20 @@ function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking"
     case "messages":
       return <svg {...common}><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" /></svg>;
   }
+}
+
+/// Fold indicator for tool/thought cards. The old glyph was a 10px
+/// text "▸" in the extra-muted color — read as a dot at arm's length
+/// (the screenshot report). An SVG at the Icon family's stroke reads
+/// as a real affordance; `.up` still rotates it open.
+function Chevron({ open }: { open?: boolean }) {
+  return (
+    <span className={"chevron" + (open ? " up" : "")} aria-hidden>
+      <svg width={12} height={12} viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" strokeWidth={2.4}
+        strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
+    </span>
+  );
 }
 
 /// omp-TUI parity for the tool row: label + PRIMARY ARGUMENT —
@@ -945,7 +959,6 @@ function ThoughtView({ text, isTail }: { text: string; isTail: boolean }) {
   // so only the LAST transcript block can still be thinking — every
   // earlier thought card is already settled history (the 2026-09-02
   // report: all cards pulsed "思考中…" in lockstep). The phase itself is
-  // subscribed here because BlockView's memo ignores phase flips.
   const thinking = useSyncExternalStore(
     (onChange) => store.subscribe(onChange),
     () => store.working && store.phase === "thinking",
@@ -961,7 +974,7 @@ function ThoughtView({ text, isTail }: { text: string; isTail: boolean }) {
       <button className="thought-head" onClick={() => setOpen(!open)}>
         <span className={"thought-dot" + (live ? " live" : "")} aria-hidden />
         <span className="thought-label">{live ? "思考中…" : "思考过程"}</span>
-        <span className={"chevron" + (open ? " up" : "")} aria-hidden>▸</span>
+        <Chevron open={open} />
       </button>
       {open && (
         <div className="thought agent-reasoning agent-markdown">

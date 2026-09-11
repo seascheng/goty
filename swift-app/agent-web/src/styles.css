@@ -374,7 +374,11 @@ body {
   border-radius: 6px;
 }
 .tool-head:hover { background: var(--surface1); }
-.chevron { color: var(--fg-extra-muted); font-size: 10px; transition: transform 0.12s; }
+.chevron {
+  color: var(--fg-muted); display: inline-flex; align-items: center;
+  transition: transform 0.12s;
+}
+.chevron svg { display: block; }
 .chevron.up { transform: rotate(90deg); }
 .tool-kind {
   width: 14px; height: 14px; flex: none;
@@ -835,8 +839,6 @@ body {
   color: var(--foreground); font-size: 12px;
 }
 .dock-head:hover { background: var(--surface2); }
-.dock-head .chevron { color: var(--fg-extra-muted); font-size: 10px; transition: transform 0.12s; }
-.dock-plan:not(.folded) .dock-head .chevron { transform: rotate(90deg); }
 .plan-phase { padding: 0 12px 2px; }
 .plan-phase-name {
   font-size: 10.5px; color: var(--fg-extra-muted);
@@ -916,9 +918,6 @@ body {
 .hist-act { font-size: 11px; flex: 1; justify-content: center; }
 .hist-providers { padding: 4px 0 0; }
 
-/* plan dock: open state is capped + scrollable — a 20-item plan must
-   not eat the pane; the head button folds it to one row. */
-.dock-plan .chevron.up { transform: rotate(90deg); }
 
 /* queued follow-up messages: visible outbox above the composer —
    the badge count alone hid what the user typed */
