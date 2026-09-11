@@ -1208,6 +1208,17 @@ enum AgentTest {
                   == "继续完善球员身份判定",
               "session title clamps to one 80-char line")
 
+        // History replay uses a FRESH mapper: the live instance's dedupe
+        // sets hold the ring-replayed ids and would swallow the whole
+        // transcript (the "only error lines" history bug).
+        let itemParams: [String: Any] = [
+            "item": ["id": "i1", "type": "userMessage",
+                     "content": [["type": "text", "text": "正文"]]] as [String: Any]]
+        let liveMapper = CodexFrameMapper()
+        _ = liveMapper.map(method: "item/completed", params: itemParams)
+        check(liveMapper.map(method: "item/completed", params: itemParams).isEmpty
+              && CodexFrameMapper().map(method: "item/completed", params: itemParams).count == 1,
+              "a deduped live mapper drops the replay; a fresh instance emits it")
         // Custom prompts: ~/.codex/prompts/*.md, name prefixed
         // "prompts:", frontmatter feeds description + argument-hint.
         let promptHome = NSTemporaryDirectory() + "/goty-codexhome-\(UUID().uuidString.prefix(6))"

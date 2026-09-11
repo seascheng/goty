@@ -810,48 +810,64 @@ final class CodexSession: AgentSessioning {
         emit([.configChanged(configOptions)])
     }
     func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void) {
-        // Store listing FIRST (daemon capability 7, store:"codex"): the
-        // rollout files are the authority and cover sessions created in
-        // OTHER processes — the TUI, a previous pane. thread/list only
-        // knows THIS app-server's in-memory threads and its preview is
-        // the thread's FIRST prompt, so the picker disagreed with the
-        // TUI's own history (2026-09-11 5090 basketball_analysis report).
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            if let (rows, _) = self?.daemon.agentStoreSummaries(cwd: self?.cwd,
-                                                                store: "codex") {
-                let summaries = rows.map { row in
-                    AgentSessionSummary(
-                        sessionId: row.id, cwd: row.cwd,
-                        title: DaemonSessionRow.clampedTitle(row.title),
-                        updatedAt: row.mtimeMs > 0 ? String(row.mtimeMs) : nil,
-                        messageCount: nil)
+        // The TUI's OWN picker reads app-server thread/list (tui
+        // resume_picker: archived=false, sort_key, id-dedupe across
+        // fork rows) — the GUI uses the SAME API on its live
+        // app-server so the two lists agree (2026-09-11: the daemon's
+        // sqlite+rollout scan listed fork dupes and raw titles the TUI
+        // never shows). Daemon scan stays as the fallback for an
+        // unresponsive app-server.
+        self.client.request(
+            "thread/list",
+            ["archived": false, "sort_key": "updated_at", "limit": 50]
+        ) { [weak self] result in
+            guard let self else { return }
+            if case .success(let value) = result,
+               let threads = value["data"] as? [[String: Any]], !threads.isEmpty {
+                let wanted = self.cwd
+                var seen = Set<String>()
+                var summaries: [AgentSessionSummary] = []
+                for thread in threads {
+                    guard let id = thread["id"] as? String,
+                          !seen.contains(id) else { continue }
+                    seen.insert(id)
+                    let threadCwd = thread["cwd"] as? String
+                    if let wanted, let threadCwd,
+                       !threadCwd.hasPrefix(wanted) { continue }
+                    let name = (thread["name"] as? String) ?? ""
+                    let title = !name.isEmpty
+                        ? name
+                        : (thread["preview"] as? String ?? "")
+                    let updated = (thread["updatedAt"] as? Int)
+                        ?? (thread["recencyAt"] as? Int)
+                    summaries.append(AgentSessionSummary(
+                        sessionId: id, cwd: threadCwd,
+                        title: DaemonSessionRow.clampedTitle(title),
+                        updatedAt: updated.map { String($0) },
+                        messageCount: nil))
                 }
-                DispatchQueue.main.async { completion(summaries) }
+                completion(summaries)
                 return
             }
-            // Old daemon: the pane's own thread/list is the only source.
-            self?.client.request("thread/list", ["limit": 50]) { result in
-
-                guard case .success(let value) = result else {
+            // Fallback: the daemon's sqlite/rollout scan.
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else {
                     completion([])
                     return
                 }
-                let threads = value["data"] as? [[String: Any]] ?? []
-                let wanted = self?.cwd
-                let summaries = threads.compactMap { thread -> AgentSessionSummary? in
-                    guard let id = thread["id"] as? String else { return nil }
-                    let threadCwd = thread["cwd"] as? String
-                    if let wanted, let threadCwd, !threadCwd.hasPrefix(wanted) { return nil }
-                    let updated = thread["updatedAt"] as? Int
-                    return AgentSessionSummary(
-                        sessionId: id, cwd: threadCwd,
-                        title: (thread["preview"] as? String).map { String($0.prefix(80)) },
-                        updatedAt: updated.map { String($0) },
-                        messageCount: nil)
+                if let (rows, _) = self.daemon.agentStoreSummaries(cwd: self.cwd,
+                                                                    store: "codex") {
+                    let summaries = rows.map { row in
+                        AgentSessionSummary(
+                            sessionId: row.id, cwd: row.cwd,
+                            title: DaemonSessionRow.clampedTitle(row.title),
+                            updatedAt: row.mtimeMs > 0 ? String(row.mtimeMs) : nil,
+                            messageCount: nil)
+                    }
+                    DispatchQueue.main.async { completion(summaries) }
+                    return
                 }
-                completion(summaries.sorted {
-                    (Int($0.updatedAt ?? "") ?? 0) > (Int($1.updatedAt ?? "") ?? 0)
-                })
+                completion([])
             }
         }
     }
@@ -882,6 +898,12 @@ final class CodexSession: AgentSessioning {
     /// cursor runs dry. Same mapper as the live flow replays each item.
     private func replayThreadHistory(_ id: String,
                                      done: @escaping ([AgentSessionEvent]) -> Void) {
+        // A FRESH mapper: the live instance's dedupe sets already hold
+        // every ring-replayed item id, so replaying through it drops
+        // every message as a duplicate and only the (ungated) turn
+        // error lines survive — the "only error messages, no body"
+        // history bug. The replay owns its own dedupe state.
+        let mapper = CodexFrameMapper()
         client.request("thread/read", ["threadId": id]) { [weak self] result in
             guard let self else { return }
             let box = Box()
@@ -897,7 +919,8 @@ final class CodexSession: AgentSessioning {
                     self.reasoningEffort = effort
                 }
             }
-            self.collectTurns(threadId: id, cursor: nil, box: box) {
+            self.collectTurns(threadId: id, cursor: nil, box: box,
+                              mapper: mapper) {
                 if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
                     print("CODEX_REPLAY id=\(id.prefix(8)) turns=\(box.turnCount) events=\(box.events.count)")
                 }
@@ -907,7 +930,8 @@ final class CodexSession: AgentSessioning {
     }
 
     private func collectTurns(threadId: String, cursor: String?,
-                              box: Box, done: @escaping () -> Void) {
+                              box: Box, mapper: CodexFrameMapper,
+                              done: @escaping () -> Void) {
         var params: [String: Any] = ["threadId": threadId]
         if let cursor { params["cursor"] = cursor }
         client.request("thread/turns/list", params) { [weak self] result in
@@ -919,16 +943,16 @@ final class CodexSession: AgentSessioning {
             for turn in value["data"] as? [[String: Any]] ?? [] {
                 box.turnCount += 1
                 for item in turn["items"] as? [[String: Any]] ?? [] {
-                    box.events += self.mapper.map(
+                    box.events += mapper.map(
                         method: "item/completed",
                         params: ["item": item, "threadId": threadId])
                 }
-                box.events += self.mapper.map(method: "turn/completed",
-                                              params: ["turn": turn])
+                box.events += mapper.map(method: "turn/completed",
+                                         params: ["turn": turn])
             }
             if let next = value["nextCursor"] as? String, !next.isEmpty {
                 self.collectTurns(threadId: threadId, cursor: next,
-                                  box: box, done: done)
+                                  box: box, mapper: mapper, done: done)
             } else {
                 done()
             }
