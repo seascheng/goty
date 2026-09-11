@@ -590,12 +590,27 @@ fn list_skills_from(project: Option<&Path>, home: Option<&Path>) -> Vec<protocol
             Err(_) => return,
         };
         for entry in entries {
-            let path = entry.path().join("SKILL.md");
-            let Ok(raw) = std::fs::read_to_string(&path) else {
+            let path = entry.path();
+            // Two shapes, both listed by the agent TUIs: `<name>/SKILL.md`
+            // (the skills convention) and loose `<name>.md` prompts
+            // (claude's command files sitting right in the dir).
+            let raw = if path.is_dir() {
+                std::fs::read_to_string(path.join("SKILL.md"))
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                std::fs::read_to_string(&path)
+            } else {
                 continue;
             };
+            let Ok(raw) = raw else { continue };
             let (name, description, body) = parse_skill_markdown(&raw);
-            let Some(name) = name else { continue };
+            let fallback = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| *stem != "SKILL")
+                .map(String::from);
+            let Some(name) = name.or(fallback) else {
+                continue;
+            };
             if !seen.insert(name.clone()) {
                 continue;
             }
@@ -615,19 +630,14 @@ fn list_skills_from(project: Option<&Path>, home: Option<&Path>) -> Vec<protocol
             &mut seen,
         );
         add_dir(&project.join(".codex/skills"), "codex", &mut out, &mut seen);
-        add_dir(
-            &project.join(".claude/skills"),
-            "claude",
-            &mut out,
-            &mut seen,
-        );
-        add_dir(&project.join(".pi/skills"), "pi", &mut out, &mut seen);
-        add_dir(&project.join(".omp/skills"), "omp", &mut out, &mut seen);
     }
     if let Some(home) = home {
         add_dir(&home.join(".codex/skills"), "codex", &mut out, &mut seen);
-        add_dir(&home.join(".claude/skills"), "claude", &mut out, &mut seen);
         add_dir(&home.join(".agents/skills"), "agents", &mut out, &mut seen);
+        // codex 0.154's host roots also read the claude dir (verified
+        // on host 5090: its / menu lists review/qa/checkpoint from
+        // ~/.claude/skills; omp/.omp skills are NOT in its view).
+        add_dir(&home.join(".claude/skills"), "claude", &mut out, &mut seen);
     }
     out
 }
@@ -651,7 +661,14 @@ fn parse_skill_markdown(raw: &str) -> (Option<String>, Option<String>, String) {
         if let Some(value) = line.strip_prefix("name:") {
             name = Some(value.trim().trim_matches('"').to_string());
         } else if let Some(value) = line.strip_prefix("description:") {
-            description = Some(value.trim().trim_matches('"').to_string());
+            let value = value.trim().trim_matches('"').to_string();
+            // YAML block-scalar markers (`description: |`) — the codex
+            // TUI shows NO description for these skills, and we match
+            // that instead of displaying the marker verbatim.
+            if !value.is_empty() && !matches!(value.as_str(), "|" | ">" | "|-" | ">-" | "|+" | ">+")
+            {
+                description = Some(value);
+            }
         }
     }
     (name, description, body)
@@ -1355,6 +1372,24 @@ mod tests {
             protocol::from_json(br#"{"store":"omp","session_id":"s1","tail_bytes":524288}"#)?;
         assert_eq!(new.tail_bytes, Some(524_288));
         Ok(())
+    }
+
+    #[test]
+    fn skill_description_block_scalar_shows_nothing() {
+        // The codex TUI shows NO description for `description: |`
+        // skills (it renders the marker as an empty placeholder) — we
+        // match: no description line at all. A plain single-line
+        // description still displays.
+        let (name, description, body) =
+            parse_skill_markdown("---\nname: qa\ndescription: |\n  hidden lines\n---\nBody.");
+        assert_eq!(name.as_deref(), Some("qa"));
+        assert_eq!(description, None);
+        assert_eq!(body, "Body.");
+
+        let (_, description, _) = parse_skill_markdown(
+            "---\nname: research-report\ndescription: Summarize results.\n---\nBody.",
+        );
+        assert_eq!(description.as_deref(), Some("Summarize results."));
     }
 
     #[test]
