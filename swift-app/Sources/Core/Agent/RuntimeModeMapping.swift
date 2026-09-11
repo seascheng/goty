@@ -31,6 +31,19 @@ enum RuntimeModeMapping {
         }
     }
 
+    /// The runtimeMode chip's config option — shared by every adapter
+    /// that declares `.runtimeModes` (options = all four tiers).
+    static func option(current: AgentRuntimeMode) -> AgentConfigOption {
+        AgentConfigOption(
+            id: "runtimeMode", name: "权限", category: "权限",
+            currentValue: current.rawValue,
+            options: AgentRuntimeMode.allCases.map { mode in
+                AgentConfigChoice(value: mode.rawValue, name: mode.displayName,
+                                  description: mode.hint, source: nil)
+            })
+    }
+
+
     /// thread/start params: same tier plus the STRING sandbox spelling.
     static func codexThreadParams(_ mode: AgentRuntimeMode) -> [String: Any] {
         var params = codexParams(mode)

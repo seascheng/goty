@@ -147,6 +147,17 @@ enum AgentRuntimeMode: String, CaseIterable {
         case .fullAccess: return "全部放行，不再询问（谨慎）"
         }
     }
+    /// Reverse of RuntimeModeMapping.claudeSpawn — adopts a mode the
+    /// process reports in its system/init frame.
+    init?(claudeMode: String) {
+        switch claudeMode {
+        case "default", "plan": self = .supervised
+        case "acceptEdits": self = .autoEdits
+        case "auto": self = .auto
+        case "bypassPermissions": self = .fullAccess
+        default: return nil
+        }
+    }
 }
 
 /// One background async-job row (agent extension report → daemon LIST).

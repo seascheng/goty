@@ -43,13 +43,7 @@ final class CodexSession: AgentSessioning {
 
     /// The runtimeMode chip's config option (options = all four tiers).
     static func runtimeModeOption(current: AgentRuntimeMode) -> AgentConfigOption {
-        AgentConfigOption(
-            id: "runtimeMode", name: "权限", category: "权限",
-            currentValue: current.rawValue,
-            options: AgentRuntimeMode.allCases.map { mode in
-                AgentConfigChoice(value: mode.rawValue, name: mode.displayName,
-                                  description: mode.hint, source: nil)
-            })
+        RuntimeModeMapping.option(current: current)
     }
 
     /// turn/start params as a pure function (test seam, monocode's

@@ -1128,6 +1128,25 @@ enum AgentTest {
               },
               "codex runtimeMode option lists every tier as a choice")
 
+        // claude adapter: mid-session permission-mode switch over the
+        // control protocol (paseo setPermissionMode parity) + cold
+        // respawn carries the mode as a spawn arg.
+        let (_, autoEditArgs) = ClaudeSession.shellCommand(model: nil, resume: nil,
+                                                           mode: .autoEdits)
+        check(autoEditArgs[1].contains("--permission-mode acceptEdits"),
+              "claude spawn carries --permission-mode acceptEdits")
+        let (_, bypassArgs) = ClaudeSession.shellCommand(model: nil, resume: nil,
+                                                         mode: .fullAccess)
+        check(bypassArgs[1].contains("--permission-mode bypassPermissions")
+              && bypassArgs[1].contains("--allow-dangerously-skip-permissions"),
+              "claude bypass spawn carries the mode and its danger flag")
+        let modeFrame = ClaudeSession.setPermissionModeFrame(.auto)
+        check(modeFrame["type"] as? String == "control_request"
+              && (modeFrame["request"] as? [String: Any])?["subtype"] as? String == "set_permission_mode"
+              && (modeFrame["request"] as? [String: Any])?["mode"] as? String == "auto"
+              && !(modeFrame["request_id"] as? String ?? "").isEmpty,
+              "claude setPermissionModeFrame shapes the control request")
+
         try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }
         print("agenttest: all passed")

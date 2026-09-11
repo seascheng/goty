@@ -20,6 +20,10 @@ final class ClaudeSession: AgentSessioning {
     private(set) var configOptions: [AgentConfigOption] = []
     private(set) var commands: [AgentSlashCommand] = []
 
+    /// Permission tier. Mid-session switches ride the control protocol;
+    /// cold respawns carry it as a spawn arg.
+    private var runtimeMode: AgentRuntimeMode = .supervised
+
     private let paneId: String
     private let environment: [String: String]
     private let daemon: SessionDaemon
@@ -104,7 +108,8 @@ final class ClaudeSession: AgentSessioning {
     /// bash process substitution feeds claude a PIPE stdin (cat
     /// forwards the PTY), keeping the single-process multi-turn stream
     /// while satisfying the non-TTY check.
-    static func shellCommand(model: String?, resume: String?) -> (String, [String]) {
+    static func shellCommand(model: String?, resume: String?,
+                             mode: AgentRuntimeMode) -> (String, [String]) {
         var cmd = "exec claude --print --input-format stream-json "
             + "--output-format stream-json --verbose "
             // Delta stream: without it claude buffers each message and
@@ -117,7 +122,11 @@ final class ClaudeSession: AgentSessioning {
             // can_use_tool control_request frames in handleFrame (and the
             // permission card) only arrive with it. Verified against
             // claude 2.1.236; matches happier's raw stream-json query.
-            + "--permission-prompt-tool stdio"
+            + "--permission-prompt-tool stdio "
+            + "--permission-mode \(RuntimeModeMapping.claudeSpawn(mode).mode)"
+        for arg in RuntimeModeMapping.claudeSpawn(mode).extraArgs {
+            cmd += " \(arg)"
+        }
         if let model, model.allSatisfy({ c in c.isLetter || c.isNumber || ".-_".contains(c) }) {
             cmd += " --model \(model)"
         }
@@ -128,17 +137,14 @@ final class ClaudeSession: AgentSessioning {
         return ("/bin/bash", ["-c", cmd])
     }
 
-    private func argv(resume: String?) -> [String] {
-        var args = ["--print", "--input-format", "stream-json",
-                    "--output-format", "stream-json", "--verbose",
-                    "--include-partial-messages"]
-        if let modelOverride {
-            args += ["--model", modelOverride]
-        }
-        if let resume {
-            args += ["--resume", resume]
-        }
-        return args
+    /// Mid-session permission-mode switch: the stream-json control
+    /// protocol (paseo drives the same surface through the SDK's
+    /// setPermissionMode). One-way fire; claude confirms by behaving.
+    static func setPermissionModeFrame(_ mode: AgentRuntimeMode) -> [String: Any] {
+        ["type": "control_request",
+         "request_id": UUID().uuidString,
+         "request": ["subtype": "set_permission_mode",
+                     "mode": RuntimeModeMapping.claudeSpawn(mode).mode]]
     }
 
     func connect(completion: ((Bool) -> Void)? = nil) {
@@ -181,14 +187,13 @@ final class ClaudeSession: AgentSessioning {
         pane?.close()
         pane = nil
         connected = true
-        // claude has no handshake — but a fresh spawn must carry --resume
-        // or the conversation context is gone with the old process.
         openPane(resume: lastSessionId ?? resumeSessionId, completion: completion)
     }
 
     private func openPane(resume: String?, completion: ((Bool) -> Void)?) {
         let (shell, shellArgs) = ClaudeSession.shellCommand(model: modelOverride,
-                                                             resume: resume)
+                                                             resume: resume,
+                                                             mode: runtimeMode)
         guard let opened = daemon.openPaneWithAttachment(
             id: paneId, cwd: cwd, shell: shell, args: shellArgs,
             environment: environment, grid: grid,
@@ -380,8 +385,26 @@ final class ClaudeSession: AgentSessioning {
     }
 
     func setConfigOption(id: String, value: String) {
-        // v1: model switching means a respawn — read-only display for
-        // now (configChanged already surfaced the current model).
+        guard id == "runtimeMode" else {
+            // v1: model switching means a respawn — read-only display
+            // for now (configChanged already surfaced the current
+            // model).
+            return
+        }
+        guard let mode = AgentRuntimeMode(rawValue: value) else {
+            emit([.notice("未知的权限档位：\(value)")])
+            return
+        }
+        runtimeMode = mode
+        if connected {
+            // Live process: switch it now (control protocol). A cold
+            // pane just stores the mode — the next spawn carries it.
+            channel.send(Self.setPermissionModeFrame(mode))
+            emit([.notice("权限模式已切换：\(mode.displayName)")])
+        }
+        configOptions = configOptions.filter { $0.id != "runtimeMode" }
+            + [RuntimeModeMapping.option(current: runtimeMode)]
+        emit([.configChanged(configOptions)])
     }
 
     func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void) {
@@ -495,7 +518,9 @@ final class ClaudeSession: AgentSessioning {
     private var pendingMidTurn: [(text: String, images: [AgentImage])] = []
 
     var capabilities: AgentCapabilities {
-        [.steer, .sessions]
+        // .runtimeModes: 权限 chip — control-protocol switch live,
+        // spawn arg on respawn.
+        [.steer, .sessions, .runtimeModes]
     }
 
     func steer(_ text: String, images: [AgentImage]) {
@@ -514,6 +539,7 @@ final class ClaudeSession: AgentSessioning {
         pendingMidTurn = []
         for item in queued { send(item.text, images: item.images) }
     }
+
     private func handleFrame(_ frame: [String: Any], replay: Bool) {
         let events = mapper.map(frame)
         if let sid = mapper.sessionId { sessionId = sid }
@@ -522,6 +548,17 @@ final class ClaudeSession: AgentSessioning {
                                                category: nil, currentValue: model,
                                                options: [])]
         }
+        // system/init reports the process's OWN permission mode — adopt
+        // it as truth (a resumed session may boot in a different mode
+        // than our default), then the chip reflects it.
+        if frame["type"] as? String == "system",
+           (frame["subtype"] as? String) == "init",
+           let reported = frame["permissionMode"] as? String,
+           let mode = AgentRuntimeMode(claudeMode: reported) {
+            runtimeMode = mode
+        }
+        configOptions = configOptions.filter { $0.id != "runtimeMode" }
+            + [RuntimeModeMapping.option(current: runtimeMode)]
         if replay {
             // History rebuilds the transcript only — never the turn
             // state (adapter isWorking stays false for replayed chunks).
