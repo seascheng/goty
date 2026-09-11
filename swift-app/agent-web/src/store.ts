@@ -101,7 +101,7 @@ const AgentCommandSchema = z.object({
 });
 export type AgentCommand = z.infer<typeof AgentCommandSchema>;
 
-const IncomingEventSchema = z.discriminatedUnion("type", [
+export const IncomingEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("userMessage"), text: z.string() }),
   z.object({ type: z.literal("queueMessage"), text: z.string() }),
   /// Pane-owned outbox actions (Swift is the queue authority; the
@@ -522,7 +522,9 @@ class Store {
         this.push({ kind: "user", text: event.text });
         break;
       case "userChunk":
-        this.userTail(event.text); break;
+        this.userTail(event.text);
+        this.retry = null;   // live user-side echo — the turn is streaming
+        break;
       case "agentChunk":
         if (event.text) this.tail("agent").text += event.text;
         // A chunk after a retry schedule means the retried call is
@@ -571,10 +573,18 @@ class Store {
         break;
       }
       case "thoughtChunk":
-        if (event.text) this.tail("thought").text += event.text; break;
+        if (event.text) this.tail("thought").text += event.text;
+        // The retried call is streaming its THINKING — the backoff is
+        // over even though no text chunk has landed yet (the "streaming
+        // thoughts under a live 等待响应 banner" zombie, 2026-09-10).
+        this.retry = null;
+        break;
       case "toolCall": {
         // tool_call_update omits title/kind/rawInput — merge over the
         // initial tool_call instead of clobbering them with null.
+        // A tool moving also proves the retried call resolved (backoff
+        // runs no tools) — same zombie clear as the chunk cases.
+        this.retry = null;
         const prev = this.tools.get(event.id);
         const call: ToolCall = {
           id: event.id,

@@ -36,6 +36,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
     /// session(_:didEmit:) — adapters stay dialect-shaped, the host owns
     /// the machine (paseo's rule: one derivation serves live and replay).
     private(set) var turnState: AgentTurnState = .starting
+    /// omp's live auto-retry schedule (transient frames the page
+    /// rebuild cannot recover). Held ONLY so a reattach mid-backoff
+    /// re-shows the countdown with its remaining time; cleared when
+    /// the turn settles/errors or the pane swaps sessions.
+    private var lastRetrySchedule: (attempt: Int, maxAttempts: Int,
+                                    endsAt: Date, errorText: String?)?
     /// Tools currently pending/in_progress in this pane's stream (main
     /// agent AND subagents). The turn phase is 执行中 while ANY tool is
     /// open — a single scalar flipped per-event flapped 执行中/思考中
@@ -116,6 +122,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
         case .starting:
             break // pushed explicitly at init, before the page exists
         case .idle:
+            lastRetrySchedule = nil
             bridge.push(["type": "working", "value": false])
             bridge.push(["type": "phase", "value": NSNull()])
         case .thinking:
@@ -128,6 +135,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
             bridge.push(["type": "working", "value": true])
             bridge.push(["type": "phase", "value": "awaitingPermission"])
         case .errored(let reason):
+            lastRetrySchedule = nil
             bridge.push(["type": "working", "value": false])
             bridge.push(["type": "phase", "value": NSNull()])
             bridge.push(["type": "error", "text": reason])
@@ -544,6 +552,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
             guard let self else { return }
             // A load swaps the conversation under the pane: the page
             // starts from the replayed history alone.
+            self.lastRetrySchedule = nil   // the swapped-out turn's retry is not this pane's state
             self.bridge.push(["type": "clearTranscript"])
             self.session.load(sessionId: sessionId) { [weak self] _ in
                 DispatchQueue.main.async { self?.refreshSessionTitle() }
@@ -1001,8 +1010,13 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                      .runtimeStatus, .notice, .statusFlash, .sessionTitle,
                      .backgroundJobs, .subagentUpdate, .entryMark,
                      .openURL, .sessionStats, .historyTruncated,
-                     .transcriptPrepend, .error, .retryScheduled:
+                     .transcriptPrepend, .error:
                     break
+                case .retryScheduled(let attempt, let maxAttempts,
+                                     let delayMs, let errorText):
+                    lastRetrySchedule = (attempt, maxAttempts,
+                                         Date().addingTimeInterval(TimeInterval(delayMs) / 1000),
+                                         errorText)
                 case .transcriptReset:
                     // Adapter rebuild incoming (death healing): drop the
                     // dead ring's transcript or the fresh history load
@@ -1046,6 +1060,22 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                         self.bridge.push(["type": "queueMessage", "text": item.text])
                     }
                     self.drainOutbox()
+                    // A live-turn reattach mid-auto-retry: the schedule
+                    // is TRANSIENT (omp frames — the store rebuild can't
+                    // recover it), so re-show it with the REMAINING wait
+                    // (negative delay → the page's 等待响应 phase). The
+                    // first chunk or turn end clears it as usual.
+                    if self.session.isWorking,
+                       let schedule = self.lastRetrySchedule {
+                        let remainingMs = Int(schedule.endsAt.timeIntervalSinceNow * 1000)
+                        self.bridge.push([
+                            "type": "retryScheduled",
+                            "attempt": schedule.attempt,
+                            "maxAttempts": schedule.maxAttempts,
+                            "delayMs": remainingMs,
+                            "errorText": schedule.errorText ?? NSNull(),
+                        ])
+                    }
                     // Handshake settled the session id — new sessions have
                     // no title yet, adopted ones (reattach) may.
                     self.onSessionId?(self.session.sessionId)

@@ -27,12 +27,20 @@ pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 ///   "pi") — every agent family's session store is reachable the same
 ///   way, so no adapter reads the GUI's filesystem as if it were the
 ///   host's.
+/// - 9 = SESSION_FILE takes `tail_bytes` — the daemon serves a store
+///   file's last N bytes instead of the whole thing. Sessions outgrow
+///   the 16MB frame cap (a 17MB basketball-analysis session on host
+///   5090, 2026-09-10): the whole-file reply ERRORS, every fallback
+///   reads the wrong machine, and remote history renders empty while
+///   the resumed agent's own plan still shows. The client's windowed
+///   parse only ever wants the tail anyway. Old daemons ignore the
+///   field (serde), so the request stays compatible either way.
 ///
 /// Daemons are singleton and detached (sessions outlive the GUI), so
 /// a host can keep serving an old build indefinitely — this is the only
 /// way the client can tell (2026-08-24: remote workspaces silently
 /// lost agent logo/status to exactly this).
-pub const CAPABILITY: u8 = 8;
+pub const CAPABILITY: u8 = 9;
 
 pub mod kind {
     pub const SPAWN: u8 = 1;
@@ -93,12 +101,17 @@ pub struct SessionListReply {
     pub sessions: Vec<SessionSummaryRow>,
 }
 
-/// Capability 7-8: one store file's full bytes (the authoritative
-/// transcript omp's TUI renders from). `store` as above.
+/// Capability 7-9: one store file's bytes (the authoritative transcript
+/// omp's TUI renders from). `store` as above; `tail_bytes` (capability
+/// 9) serves only the last N bytes — over-cap files, windowed loads.
+/// Old daemons ignore `tail_bytes` (serde default), so the payload
+/// shape is one request for every generation.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionFileRequest {
     pub store: Option<String>,
     pub session_id: String,
+    #[serde(default)]
+    pub tail_bytes: Option<u64>,
 }
 
 /// Capability 9: write a prefix fork of one omp store file at an

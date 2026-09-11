@@ -216,7 +216,14 @@ final class SessionDaemon {
     /// the DAEMON's machine — remote panes read their history and
     /// resume paths through the tunnel. Below this level (or on any
     /// error) callers must fall back to the local filesystem read.
-    static let storeCapability = 7
+    ///
+    /// Capability 9 adds SESSION_FILE `tail_bytes` (see
+    /// storeFilePayload): sessions outgrow the 16MB frame cap and the
+    /// whole-file reply ERRORS — remote history rendered empty while
+    /// the resumed agent's own plan still showed (2026-09-10, host
+    /// 5090: a 17MB basketball_analysis session). Below 9 the remote
+    /// daemon is upgradable; over-cap sessions stay empty until then.
+    static let storeCapability = 9
 
     /// One-shot request/reply over a fresh connection (the daemon serves
     /// a single first frame per connection). Runs on the caller's queue.
@@ -259,19 +266,31 @@ final class SessionDaemon {
     /// camelCase drift here fails the daemon's from_json — the request
     /// connection just closes (EOF) and every local-store fallback
     /// misses on a REMOTE pane, so history loads come up empty while
-    /// the resumed agent's own state (plan, todos) still shows (the
-    /// 2026-09-02 empty-remote-history report).
-    static func storeFilePayload(sessionId: String, store: String) -> [String: Any] {
-        ["session_id": sessionId, "store": store]
+    /// the resumed agent's own state (plan, todos) still shows.
+    static func storeFilePayload(sessionId: String, store: String,
+                                 tailBytes: UInt64? = nil) -> [String: Any] {
+        var payload: [String: Any] = ["session_id": sessionId, "store": store]
+        // Capability 9. Old daemons ignore the extra key (serde), so
+        // the request is safe against every generation.
+        if let tailBytes { payload["tail_bytes"] = tailBytes }
+        return payload
     }
 
     static func storeForkPayload(sessionId: String, entryId: String) -> [String: Any] {
         ["session_id": sessionId, "entry_id": entryId]
     }
 
-    func agentStoreFile(sessionId: String, store: String = "omp") -> Data? {
+    /// `tailBytes` (capability 9): serve only the file's last N bytes
+    /// instead of the whole thing — the windowed history parse wants
+    /// the tail, and over-cap files can't cross the wire whole.
+    /// The cut may land mid-line; the caller's seam search skips the
+    /// torn head line like any non-entry line.
+    func agentStoreFile(sessionId: String, store: String = "omp",
+                        tailBytes: UInt64? = nil) -> Data? {
         guard let request = try? JSONSerialization.data(
-                withJSONObject: Self.storeFilePayload(sessionId: sessionId, store: store)),
+                withJSONObject: Self.storeFilePayload(sessionId: sessionId,
+                                                      store: store,
+                                                      tailBytes: tailBytes)),
               let data = storeRoundTrip(kind: SessionFrame.sessionFile,
                                         payload: request,
                                         replyKind: SessionFrame.sessionFileReply)

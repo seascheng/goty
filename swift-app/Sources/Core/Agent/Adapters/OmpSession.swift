@@ -263,6 +263,36 @@ final class OmpSession: PiSession {
             completion: @escaping (StoredSessionHistory?) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return completion(nil) }
+            // Daemon tail first (capability 9, remote panes): a store
+            // file can OUTGROW the 16MB frame cap, and then the
+            // whole-file reply errors — every fallback reads a
+            // different machine's disk and remote history renders
+            // empty while the resumed agent's own plan still shows
+            // (2026-09-10, host 5090). Local panes keep the direct
+            // file read below (no socket hop, unchanged semantics).
+            // The windowed parse only wants the tail anyway; an old
+            // daemon ignores tail_bytes and answers with the whole
+            // file, which the same seam logic handles.
+            if self.daemon.isRemote,
+               let tail = self.daemon.agentStoreFile(
+                    sessionId: sid,
+                    tailBytes: UInt64(Self.tailLoadThresholdBytes)),
+               let text = String(data: tail, encoding: .utf8),
+               !text.isEmpty {
+                let sliced = OmpSessionStore.daemonTailSlice(text)
+                let loaded = OmpSessionStore.parse(sliced.slice)
+                let anchor = sliced.firstEntryId
+                DispatchQueue.main.async {
+                    self.historyAnchorEntryId = anchor
+                }
+                completion(StoredSessionHistory(events: loaded.events,
+                                                openTools: loaded.openTools,
+                                                aborted: loaded.aborted,
+                                                firstEntryId: anchor))
+                return
+            }
+            // Local pane (or an unreachable daemon): read the file the
+            // GUI can see, tail-first past the byte window.
             guard let raw = self.storeRaw(sid) else { return completion(nil) }
             var loaded: OmpSessionStore.Loaded
             if raw.utf8.count > Self.tailLoadThresholdBytes {
@@ -298,6 +328,11 @@ final class OmpSession: PiSession {
             self.olderLoadInFlight = true
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { return }
+                // Full-file semantics: parseOlder wants everything
+                // before the anchor. An over-cap REMOTE file can't
+                // cross the wire whole — the fetch misses and the page
+                // gets an empty prepend (the sentinel clears; the tail
+                // window it already holds is what's reachable).
                 let events = self.storeRaw(sid).map {
                     OmpSessionStore.parseOlder($0, beforeEntryId: anchor).events
                 }
@@ -643,9 +678,24 @@ final class OmpSession: PiSession {
         guard sid == sessionId else { return }
         let known = markedEntryIds
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self, let raw = self.storeRaw(sid) else { return }
-            let slice = raw.utf8.count > Self.tailLoadThresholdBytes
-                ? OmpSessionStore.tailSlice(raw).slice : raw
+            guard let self else { return }
+            // The marks the page still needs live in the file's tail;
+            // remote panes fetch the tail by BYTES (over-cap files
+            // can't cross the wire whole — same cap as the history
+            // load). Falls back to the full local read.
+            var slice: String
+            if self.daemon.isRemote,
+               let tail = self.daemon.agentStoreFile(
+                    sessionId: sid,
+                    tailBytes: UInt64(Self.tailLoadThresholdBytes)),
+               let text = String(data: tail, encoding: .utf8), !text.isEmpty {
+                slice = OmpSessionStore.daemonTailSlice(text).slice
+            } else if let raw = self.storeRaw(sid) {
+                slice = raw.utf8.count > Self.tailLoadThresholdBytes
+                    ? OmpSessionStore.tailSlice(raw).slice : raw
+            } else {
+                return
+            }
             let fresh = OmpSessionStore
                 .freshEntryMarks(from: OmpSessionStore.parse(slice),
                                  known: known)

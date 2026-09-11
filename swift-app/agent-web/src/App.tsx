@@ -1311,13 +1311,24 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
                 onClick={() => postToHost({ type: "reconnect" })}>重试</button>
             </span>
           )}
-          {store.retry && (
-            <span className="cstat retry" title={store.retry.errorText
-              ? `模型限流，自动重试中\n\n${store.retry.errorText}`
-              : "模型限流，自动重试中；可稍后手动重发"}>
-              <span className="spin" />重试中 {store.retry.attempt}/{store.retry.maxAttempts} · {Math.max(0, Math.ceil((store.retry.endsAt - retryNow) / 1000))}s
-            </span>
-          )}
+          {store.retry && (() => {
+            // Two phases, both agent-driven: the countdown is omp's
+            // backoff before it re-issues the call; at zero the retry
+            // request is IN FLIGHT (an overloaded server can sit on it
+            // for a long time before the next auto_retry or the first
+            // chunks arrive — "0s" forever read like a stuck timer).
+            const remain = Math.ceil((store.retry.endsAt - retryNow) / 1000);
+            const phase = remain > 0
+              ? ` · ${remain}s`
+              : ` · 等待响应 ${Math.max(0, -remain)}s`;
+            return (
+              <span className="cstat retry" title={store.retry.errorText
+                ? `模型/服务端错误，agent 自动退避重试\n\n${store.retry.errorText}`
+                : "模型/服务端错误，agent 自动退避重试；可稍后手动重发"}>
+                <span className="spin" />重试中 {store.retry.attempt}/{store.retry.maxAttempts}{phase}
+              </span>
+            );
+          })()}
         </div>
         )}
         {(attach.length > 0 || attachNote != null) && (
@@ -1623,7 +1634,7 @@ function StatusLine() {
     chips.push(<span key="compact" className="cstat warn" title="上下文压缩中"><span className="spin" />压缩中…</span>);
   }
   if (chips.length === 0) return null;
-  return <div className="composer-status">{chips}</div>;
+  return <div className="composer-status in-transcript">{chips}</div>;
 }
 
 export function App() {
@@ -1950,9 +1961,12 @@ export function App() {
             // The turn-action row belongs at the END of a turn's LLM
             // output, not on every entryId-stamped fragment before it
             // (thought/tool interleaving splits one message into many
-            // agent blocks). Last content block of the turn only — copy
-            // works even before an entry id lands; branch gates itself.
+            // agent blocks). Last content block of a SETTLED turn only
+            // — a running turn must not flash copy/branch mid-stream
+            // (the screenshot report); working flips false on settle
+            // and the parent re-renders, flipping showBranch on.
             showBranch={block.kind === "agent"
+              && !store.working
               && (i + 1 >= visible.length
                   || (visible[i + 1].kind !== "agent"
                       && visible[i + 1].kind !== "thought"

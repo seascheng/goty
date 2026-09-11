@@ -501,7 +501,83 @@ enum AgentTest {
             if case .turnEnded(let stop) = $0 { return stop == "failed" }
             return false
         }), "turn/completed maps turnEnded failed")
-        check(codexMapper.notificationsIgnored >= 5, "reconnect chatter ignored (\(codexMapper.notificationsIgnored))")
+        // 0.153 tags the assistant reply `agentMessage` (content
+        // blocks); 0.147-era docs said assistantMessage. Both must
+        // render as TEXT, deduped per item id.
+        do {
+            let m = CodexFrameMapper()
+            let frame: [String: Any] = [
+                "item": ["type": "agentMessage", "id": "i1",
+                         "content": [["type": "text", "text": "HELLO_AGENT"]]]
+            ]
+            let legacy: [String: Any] = [
+                "item": ["type": "assistantMessage", "id": "i2",
+                         "content": [["type": "text", "text": "OLD_TAG"]]]
+            ]
+            var events: [AgentSessionEvent] = []
+            events += m.map(method: "item/started", params: frame)
+            events += m.map(method: "item/completed", params: frame)
+            events += m.map(method: "item/completed", params: legacy)
+            let texts = events.compactMap { event -> String? in
+                if case .messageChunk(let t) = event { return t }
+                return nil
+            }
+            check(texts == ["HELLO_AGENT", "OLD_TAG"],
+                  "agentMessage/assistantMessage render as text, started+completed dedup to one")
+        }
+        // 0.153 streams agentMessage deltas; the completed item must
+        // not repeat the whole text after them.
+        do {
+            let m = CodexFrameMapper()
+            var chunks: [String] = []
+            for delta in ["HEL", "LO_", "CODEX"] {
+                chunks += m.map(method: "item/agentMessage/delta",
+                                params: ["itemId": "m1", "delta": delta])
+                    .compactMap { event -> String? in
+                        if case .messageChunk(let t) = event { return t }
+                        return nil
+                    }
+            }
+            let completed = m.map(method: "item/completed", params: [
+                "item": ["type": "agentMessage", "id": "m1",
+                         "text": "HELLO_CODEX"]])
+                .compactMap { event -> String? in
+                    if case .messageChunk(let t) = event { return t }
+                    return nil
+                }
+            check(chunks == ["HEL", "LO_", "CODEX"]
+                  && completed.isEmpty,
+                  "agentMessage deltas stream and the completed item does not repeat them")
+        }
+        // turn/aborted (turn/interrupt) ends the turn without
+        // turn/completed; token usage maps `last` (never cumulative
+        // `total`) as the context-window measure.
+        do {
+            let m = CodexFrameMapper()
+            var events: [AgentSessionEvent] = []
+            events += m.map(method: "turn/aborted", params: [:])
+            events += m.map(method: "thread/tokenUsage/updated", params: [
+                "tokenUsage": [
+                    "last": ["totalTokens": 12_000],
+                    "total": ["totalTokens": 900_000],
+                    "modelContextWindow": 200_000,
+                ]])
+            if case .turnEnded(let stop)? = events.first {
+                check(stop == "interrupted", "turn/aborted maps turnEnded interrupted")
+            } else {
+                check(false, "turn/aborted maps turnEnded interrupted")
+            }
+            let usage = events.dropFirst().compactMap { event -> AgentSessionEvent? in
+                if case .usageUpdate = event { return event }
+                return nil
+            }.first
+            if case .usageUpdate(let used?, let size?, _, _, _, _)? = usage {
+                check(used == 12_000 && size == 200_000,
+                      "token usage maps last.totalTokens + window, not cumulative total")
+            } else {
+                check(false, "token usage maps last.totalTokens + window, not cumulative total")
+            }
+        }
         check(CodexFrameMapper.textOf([["type": "text", "text": "a"], ["type": "text", "text": "b"]]) == "ab",
               "codex content text join")
         print("— missed-settle heal (/compact stuck-working regression) —")
@@ -786,9 +862,45 @@ enum AgentTest {
         let filePayload = SessionDaemon.storeFilePayload(sessionId: "S", store: "omp")
         check(Array(filePayload.keys.sorted()) == ["session_id", "store"],
               "SESSION_FILE payload uses the daemon's snake_case keys")
+        let tailPayload = SessionDaemon.storeFilePayload(sessionId: "S", store: "omp",
+                                                         tailBytes: 524_288)
+        check(Array(tailPayload.keys.sorted()) == ["session_id", "store", "tail_bytes"]
+              && (tailPayload["tail_bytes"] as? UInt64) == 524_288,
+              "SESSION_FILE tail request carries the byte window (capability 9)")
         let forkPayload = SessionDaemon.storeForkPayload(sessionId: "S", entryId: "E")
         check(Array(forkPayload.keys.sorted()) == ["entry_id", "session_id"],
               "SESSION_FORK payload uses the daemon's snake_case keys")
+
+        // Daemon tail seam (capability 9): the byte cut can land
+        // mid-line and the file head is absent — the seam lands on the
+        // first USER entry, a torn head line is skipped like any
+        // non-entry line, and an old daemon's whole-file reply slices
+        // through the same rule (2026-09-10: over-cap remote files
+        // rendered empty while the plan still showed).
+        do {
+            func line(_ id: String, _ role: String) -> String {
+                "{\"type\":\"message\",\"id\":\"\(id)\",\"message\":{\"role\":\"\(role)\"}}"
+            }
+            let whole = ["{\"type\":\"title\",\"v\":1,\"title\":\"t\"}",
+                         "{\"type\":\"session\",\"version\":3,\"id\":\"s\"}",
+                         line("u1", "user"), line("a1", "assistant"),
+                         line("u2", "user"), line("a2", "assistant")]
+                .joined(separator: "\n")
+            let (slice, anchor) = OmpSessionStore.daemonTailSlice(whole)
+            check(anchor == "u1" && slice.hasPrefix(line("u1", "user")),
+                  "whole-file reply cuts at the first user entry, headers dropped")
+            // Torn head: the cut landed inside what would have been an
+            // assistant line — unparseable, skipped; the seam is u2.
+            let torn = "\"role\":\"assistant\"}}\n" + whole.dropFirst(whole.utf8.count / 2)
+            let (tornSlice, tornAnchor) = OmpSessionStore.daemonTailSlice(String(torn))
+            check(tornAnchor == "u2" && tornSlice.hasPrefix(line("u2", "user")),
+                  "torn head line is skipped, seam lands on the next user entry")
+            // No user entry in the window: keep everything, no anchor.
+            let assistantOnly = line("a1", "assistant") + "\n" + line("a2", "assistant")
+            let (kept, keptAnchor) = OmpSessionStore.daemonTailSlice(assistantOnly)
+            check(kept == assistantOnly && keptAnchor == nil,
+                  "window without a user entry keeps its contents")
+        }
 
         // pi tail-first window (omp parity): a small session renders in
         // full; a big one cuts at a USER-message boundary with an anchor

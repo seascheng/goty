@@ -15,6 +15,9 @@ import Foundation
 /// silently dropped.
 final class CodexFrameMapper {
     private var emittedText: Set<String> = []
+    /// Item ids whose text already streamed via
+    /// item/agentMessage/delta — their completed item must not repeat it.
+    private var streamedText: Set<String> = []
     private var itemTitles: [String: String] = [:]
 
     /// Integrity accounting (agenttest asserts these).
@@ -30,16 +33,45 @@ final class CodexFrameMapper {
         case "item/started", "item/completed":
             return mapItem(params,
                            completed: method == "item/completed")
+        case "item/agentMessage/delta":
+            // 0.153 streams the assistant text token-by-token; the
+            // completed item repeats the WHOLE text, so a delta-streamed
+            // item must not re-emit it (monocode parity).
+            guard let id = params["itemId"] as? String,
+                  let delta = params["delta"] as? String, !delta.isEmpty
+            else {
+                notificationsIgnored += 1
+                return []
+            }
+            streamedText.insert(id)
+            return [.messageChunk(delta)]
         case "turn/completed":
             return mapTurnCompleted(params)
-        case "error":
-            // Retry chatter ("Reconnecting... 1/5") — the definitive
-            // failure lands on turn/completed with the last error.
+        case "turn/aborted":
+            // User interrupt (turn/interrupt): the turn is over even
+            // though no turn/completed follows.
+            return [.turnEnded(stopReason: "interrupted")]
+        case "thread/tokenUsage/updated":
+            // monocode parity: `last` is the context-window measure
+            // (`total` is cumulative spend across compactions and runs
+            // past the window — never a size).
+            if let usage = params["tokenUsage"] as? [String: Any],
+               let last = usage["last"] as? [String: Any] {
+                let used = last["totalTokens"] as? Int
+                let window = usage["modelContextWindow"] as? Int
+                if used != nil || window != nil {
+                    return [.usageUpdate(used: used, size: window,
+                                         input: nil, output: nil,
+                                         costAmount: nil, costCurrency: nil)]
+                }
+            }
             notificationsIgnored += 1
             return []
-        case "thread/started", "thread/status/changed", "turn/started",
+        case "error", "thread/started", "thread/status/changed", "turn/started",
              "warning", "mcpServer/startupStatus/updated",
              "remoteControl/status/changed":
+            // Retry chatter ("Reconnecting... 1/5") and lifecycle noise —
+            // the definitive failure lands on turn/completed.
             notificationsIgnored += 1
             return []
         default:
@@ -61,11 +93,16 @@ final class CodexFrameMapper {
             guard !text.isEmpty, !emittedText.contains(id) else { return [] }
             emittedText.insert(id)
             return [.userMessage(text)]
-        case "reasoning":
+        case "agentMessage", "assistantMessage":
+            // 0.153 tags the assistant's reply `agentMessage` (the
+            // 0.147-era docs said assistantMessage — accept both).
+            // Deltas already delivered the text: the completed item
+            // repeats it whole and must not re-render.
+            if streamedText.contains(id) { return [] }
             let text = CodexFrameMapper.textOf(item["text"] ?? item["content"])
             guard !text.isEmpty, !emittedText.contains(id) else { return [] }
             emittedText.insert(id)
-            return [.thoughtChunk(text)]
+            return [.messageChunk(text)]
         case "commandExecution":
             let command = (item["command"] as? [String: Any])?["command"] as? String
                 ?? (item["command"] as? String) ?? ""

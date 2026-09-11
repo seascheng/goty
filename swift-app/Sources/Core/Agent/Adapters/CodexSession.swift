@@ -28,6 +28,12 @@ final class CodexSession: AgentSessioning {
     private var pane: PaneSession?
     private var connected = false
     private var threadId: String?
+    /// Live turn id (turn/started) — turn/steer's expectedTurnId. The
+    /// steer is fenced to this exact turn; cleared when the turn ends.
+    private var activeTurnId: String?
+    /// Model the user picked from the models chip (applies to the next
+    /// turn/start — monocode passes the model per turn).
+    private var selectedModel: String?
     /// GOTY_CODEX_MODEL debug knob: this machine's relay default model
     /// is unusable for text; tests override without config surgery.
     private var modelOverride: String? {
@@ -91,7 +97,7 @@ final class CodexSession: AgentSessioning {
     }
 
     private func openTransport() -> SessionDaemon.OpenPaneResult? {
-        daemon.openPaneWithAttachment(
+        let opened = daemon.openPaneWithAttachment(
             id: paneId, cwd: cwd, shell: "codex", args: ["app-server"],
             environment: environment, grid: grid,
             noEcho: true, ringBytes: 16_777_216,
@@ -103,6 +109,15 @@ final class CodexSession: AgentSessioning {
                 self.connected = false
                 self.delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
             })
+        guard let opened else { return nil }
+        // The reader thread was never started here — initialize went
+        // out into a pane nobody read (pane was never assigned either),
+        // so the handshake hung forever: the pane showed 正在启动 Codex…
+        // for every session, ever. Claude and Pi start theirs; codex
+        // must too.
+        pane = opened.session
+        opened.session.start()
+        return opened
     }
 
     private func handshake(_ completion: ((Bool) -> Void)?) {
@@ -173,6 +188,10 @@ final class CodexSession: AgentSessioning {
                                                         category: nil,
                                                         currentValue: model, options: [])]
             }
+            // Model catalog (monocode parity): model/list pages the
+            // picker's options in after ready — the thread already
+            // works with its default while the catalog loads.
+            self.loadModelCatalog()
             var readyEvents: [AgentSessionEvent] = [.configChanged(self.configOptions), .ready]
             // v1 command directory: /compact maps to thread/compact/start
             // (codex exposes no command-list RPC; skills arrive later).
@@ -186,6 +205,50 @@ final class CodexSession: AgentSessioning {
             completion?(true)
         }
     }
+
+    /// `model/list` → the models chip's option list (paged by cursor,
+    /// default first — monocode's catalog rules). Failure is silent:
+    /// the chip keeps the thread's current model only.
+    private func loadModelCatalog() {
+        var choices: [AgentConfigChoice] = []
+        var defaultValue: String?
+        func page(_ cursor: String?) {
+            client.request("model/list", cursor.map { ["cursor": $0] } ?? [:]) {
+                [weak self] result in
+                guard let self, case .success(let value) = result else { return }
+                for row in (value["data"] as? [[String: Any]]) ?? [] {
+                    guard let id = row["id"] as? String else { continue }
+                    if row["isDefault"] as? Bool == true { defaultValue = id }
+                    let displayName = (row["displayName"] as? String)
+                        ?? (row["name"] as? String) ?? id
+                    let source = (row["provider"] as? String)
+                        ?? (row["modelProvider"] as? String)
+                    choices.append(AgentConfigChoice(value: id, name: displayName,
+                                                     description: nil, source: source))
+                }
+                if let next = value["nextCursor"] as? String, !next.isEmpty {
+                    page(next)
+                    return
+                }
+                guard !choices.isEmpty else { return }
+                // Default model leads the picker (monocode
+                // orderDefaultFirst).
+                if let defaultValue,
+                   let idx = choices.firstIndex(where: { $0.value == defaultValue }),
+                   idx > 0 {
+                    choices.swapAt(0, idx)
+                }
+                let current = self.configOptions.first?.currentValue
+                self.configOptions = [AgentConfigOption(
+                    id: "model", name: "模型", category: nil,
+                    currentValue: current ?? defaultValue, options: choices)]
+                self.emit([.configChanged(self.configOptions)])
+            }
+        }
+        page(nil)
+    }
+
+
 
     func send(_ text: String, images: [AgentImage]) {
         guard let threadId, !isWorking else { return }
@@ -208,10 +271,14 @@ final class CodexSession: AgentSessioning {
                 emit([.notice("⚠︎ 一张图片未能保存，已跳过")])
             }
         }
-        client.request("turn/start", [
+        var turnParams: [String: Any] = [
             "threadId": threadId,
             "input": [["type": "text", "text": prompt]],
-        ]) { [weak self] _ in
+        ]
+        // The models chip's pick applies to THIS turn (monocode passes
+        // the model per turn/start).
+        if let selectedModel { turnParams["model"] = selectedModel }
+        client.request("turn/start", turnParams) { [weak self] _ in
             // turn outcome arrives as turn/completed notification; the
             // request result only acknowledges the turn object.
             _ = self
@@ -248,31 +315,62 @@ final class CodexSession: AgentSessioning {
     }
 
     func setConfigOption(id: String, value: String) {
-        // v1: display-only (configChanged reports the active model).
+        guard id == "model" else { return }
+        // Applies on the NEXT turn/start; the chip's currentValue
+        // reflects it immediately.
+        selectedModel = value
+        if var option = configOptions.first {
+            configOptions = [AgentConfigOption(id: option.id, name: option.name,
+                                               category: option.category,
+                                               currentValue: value,
+                                               options: option.options)]
+            emit([.configChanged(configOptions)])
+        }
     }
 
     func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void) {
-        client.request("thread/list", ["limit": 50]) { [weak self] result in
-            guard let self, case .success(let value) = result else {
-                completion([])
+        // Store listing FIRST (daemon capability 7, store:"codex"): the
+        // rollout files are the authority and cover sessions created in
+        // OTHER processes — the TUI, a previous pane. thread/list only
+        // knows THIS app-server's in-memory threads and its preview is
+        // the thread's FIRST prompt, so the picker disagreed with the
+        // TUI's own history (2026-09-11 5090 basketball_analysis report).
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            if let (rows, _) = self?.daemon.agentStoreSummaries(cwd: self?.cwd,
+                                                                store: "codex") {
+                let summaries = rows.map { row in
+                    AgentSessionSummary(
+                        sessionId: row.id, cwd: row.cwd,
+                        title: row.title,
+                        updatedAt: row.mtimeMs > 0 ? String(row.mtimeMs) : nil,
+                        messageCount: nil)
+                }
+                DispatchQueue.main.async { completion(summaries) }
                 return
             }
-            let threads = value["data"] as? [[String: Any]] ?? []
-            let wanted = self.cwd
-            let summaries = threads.compactMap { thread -> AgentSessionSummary? in
-                guard let id = thread["id"] as? String else { return nil }
-                let threadCwd = thread["cwd"] as? String
-                if let wanted, let threadCwd, !threadCwd.hasPrefix(wanted) { return nil }
-                let updated = thread["updatedAt"] as? Int
-                return AgentSessionSummary(
-                    sessionId: id, cwd: threadCwd,
-                    title: (thread["preview"] as? String).map { String($0.prefix(80)) },
-                    updatedAt: updated.map { String($0) },
-                    messageCount: nil)
+            // Old daemon: the pane's own thread/list is the only source.
+            self?.client.request("thread/list", ["limit": 50]) { result in
+                guard case .success(let value) = result else {
+                    completion([])
+                    return
+                }
+                let threads = value["data"] as? [[String: Any]] ?? []
+                let wanted = self?.cwd
+                let summaries = threads.compactMap { thread -> AgentSessionSummary? in
+                    guard let id = thread["id"] as? String else { return nil }
+                    let threadCwd = thread["cwd"] as? String
+                    if let wanted, let threadCwd, !threadCwd.hasPrefix(wanted) { return nil }
+                    let updated = thread["updatedAt"] as? Int
+                    return AgentSessionSummary(
+                        sessionId: id, cwd: threadCwd,
+                        title: (thread["preview"] as? String).map { String($0.prefix(80)) },
+                        updatedAt: updated.map { String($0) },
+                        messageCount: nil)
+                }
+                completion(summaries.sorted {
+                    (Int($0.updatedAt ?? "") ?? 0) > (Int($1.updatedAt ?? "") ?? 0)
+                })
             }
-            completion(summaries.sorted {
-                (Int($0.updatedAt ?? "") ?? 0) > (Int($1.updatedAt ?? "") ?? 0)
-            })
         }
     }
 
@@ -347,17 +445,56 @@ final class CodexSession: AgentSessioning {
     private var pendingMidTurn: [(text: String, images: [AgentImage])] = []
 
     var capabilities: AgentCapabilities {
-        [.steer]
+        // .sessions gates the history chip: thread/list + thread/resume
+        // + thread/read are implemented — the picker and reload work.
+        [.steer, .sessions]
     }
 
+    /// Mid-turn steering, codex-native: `turn/steer` fenced to the live
+    /// turn (expectedTurnId — monocode/happier parity). Falls back to
+    /// the park-and-send queue when the turn id isn't known yet (the
+    /// turn hasn't started streaming) or the thread is idle.
     func steer(_ text: String, images: [AgentImage]) {
-        enqueueMidTurn(text, images: images)
+        guard isWorking, let threadId, let turnId = activeTurnId else {
+            enqueueMidTurn(text, images: images)
+            return
+        }
+        var input: [[String: Any]] = [["type": "text", "text": text]]
+        for image in images {
+            if let path = Self.stageImage(image) {
+                input.append(["type": "local_image", "path": path])
+            }
+        }
+        client.request("turn/steer", [
+            "threadId": threadId,
+            "expectedTurnId": turnId,
+            "input": input,
+        ]) { _ in }
     }
 
     private func enqueueMidTurn(_ text: String, images: [AgentImage]) {
         guard isWorking else { return send(text, images: images) }
         pendingMidTurn.append((text, images))
         emit([.notice("⟳ 消息已排队，本轮结束后发送")])
+    }
+
+    private func handleNotification(method: String, params: [String: Any]) {
+        // Turn lifecycle bookkeeping ahead of the mapper: steer needs
+        // the live turn id, and every terminal clears it.
+        switch method {
+        case "turn/started":
+            activeTurnId = (params["turn"] as? [String: Any])?["id"] as? String
+        case "turn/completed", "turn/aborted":
+            activeTurnId = nil
+        default:
+            break
+        }
+        let events = mapper.map(method: method, params: params)
+        if case .turnEnded = events.last {
+            isWorking = false
+            flushMidTurnQueue()
+        }
+        emit(events)
     }
 
     private func flushMidTurnQueue() {
@@ -367,14 +504,7 @@ final class CodexSession: AgentSessioning {
         for item in queued { send(item.text, images: item.images) }
     }
 
-    private func handleNotification(method: String, params: [String: Any]) {
-        let events = mapper.map(method: method, params: params)
-        if case .turnEnded = events.last {
-            isWorking = false
-            flushMidTurnQueue()
-        }
-        emit(events)
-    }
+
 
     private func handleServerRequest(id: Int, method: String, params: [String: Any]) {
         // Echo artifacts: these are methods WE initiate — a frame with

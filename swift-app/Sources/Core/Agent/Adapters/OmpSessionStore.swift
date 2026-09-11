@@ -468,6 +468,32 @@ enum OmpSessionStore {
         return (slice, anchor)
     }
 
+    /// Tail bytes fetched BYTES-FIRST from the daemon (capability 9):
+    /// the file's last N bytes, so the cut can land mid-line and the
+    /// file's head (title slot, session header) is absent. Cut at the
+    /// first USER entry from the top — a torn head line fails JSON and
+    /// is skipped exactly like any non-entry line, so this also holds
+    /// for an old daemon's whole-file reply. The anchor is the seam
+    /// entry's id; no user entry in the window keeps everything
+    /// (anchor nil, same fallback as tailSlice).
+    static func daemonTailSlice(_ raw: String)
+            -> (slice: String, firstEntryId: String?) {
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count > 2 else { return (raw, nil) }
+        for (i, line) in lines.enumerated() {
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data)
+                      as? [String: Any],
+                  obj["type"] as? String == "message",
+                  (obj["message"] as? [String: Any])?["role"] as? String == "user",
+                  let id = obj["id"] as? String
+            else { continue }
+            // i == 0: the window already starts on a turn seam.
+            return (lines[i...].joined(separator: "\n"), id)
+        }
+        return (raw, nil)
+    }
+
     /// Older portion of a file, EXCLUSIVE of the anchor entry: the
     /// events lines[2..<anchorIndex) produce. Feeds transcriptPrepend.
     static func parseOlder(_ raw: String, beforeEntryId anchor: String) -> Loaded {

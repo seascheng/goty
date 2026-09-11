@@ -289,6 +289,7 @@ fn dispatch(
             let sessions = match request.store.as_deref().unwrap_or("omp") {
                 "claude" => list_claude_sessions(&request.cwd),
                 "pi" => list_pi_sessions(&request.cwd),
+                "codex" => list_codex_sessions(&request.cwd),
                 _ => list_omp_sessions(&request.cwd),
             };
             let reply = protocol::SessionListReply { sessions };
@@ -299,7 +300,7 @@ fn dispatch(
         protocol::kind::SESSION_FILE => {
             let request: protocol::SessionFileRequest = protocol::from_json(&payload)?;
             let store = request.store.as_deref().unwrap_or("omp").to_string();
-            match read_store_file(&store, &request.session_id) {
+            match read_store_file(&store, &request.session_id, request.tail_bytes) {
                 Ok(bytes) => {
                     protocol::write_frame(&stream, protocol::kind::SESSION_FILE_REPLY, &bytes)
                         .map_err(anyhow::Error::from)
@@ -559,6 +560,144 @@ fn list_omp_sessions(cwd_filter: &Option<String>) -> Vec<protocol::SessionSummar
     rows
 }
 
+/// Capability 7: codex rollout listing (`~/.codex/sessions/YYYY/MM/DD/
+/// rollout-*.jsonl`). Title parity with the codex TUI: the LATEST real
+/// user prompt — rollout user records also carry injected context
+/// (AGENTS.md etc.) under role=user, but only real input's
+/// `content_item_kinds` is `["user.text"]`-prefixed.
+fn list_codex_sessions(cwd_filter: &Option<String>) -> Vec<protocol::SessionSummaryRow> {
+    let Some(root) = store_root_path(".codex/sessions").ok() else {
+        return Vec::new();
+    };
+    let dir_entries = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .map(|entries| entries.flatten().collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let mut rows = Vec::new();
+    // Layout: sessions/<year>/<month>/<day>/rollout-*.jsonl — three
+    // nested date levels.
+    for year_dir in dir_entries(&root) {
+        for month_dir in dir_entries(&year_dir.path()) {
+            for day_dir in dir_entries(&month_dir.path()) {
+                for file in dir_entries(&day_dir.path()) {
+                    let path = file.path();
+                    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    if !stem.starts_with("rollout-") || stem.len() < 36 {
+                        continue;
+                    }
+                    let id = &stem[stem.len() - 36..];
+                    // Head: session_meta carries the session's cwd. The
+                    // line ALSO embeds base_instructions (often >100KB),
+                    // so line-JSON parsing on a bounded head always
+                    // fails — scan the field instead.
+                    let Ok(head) = std::fs::File::open(&path).and_then(|mut file| {
+                        use std::io::Read;
+                        let mut head = vec![0u8; 4096];
+                        let read = file.read(&mut head)?;
+                        head.truncate(read);
+                        Ok(String::from_utf8_lossy(&head).into_owned())
+                    }) else {
+                        continue;
+                    };
+                    if !head.contains("\"session_meta\"") {
+                        continue;
+                    }
+                    let session_cwd = json_string_field(&head, "cwd");
+                    if let Some(filter) = cwd_filter
+                        && !session_cwd
+                            .as_deref()
+                            .is_some_and(|cwd| cwd.starts_with(filter.as_str()))
+                    {
+                        continue;
+                    }
+                    // Title: the file's LAST real user prompt, read from
+                    // the tail (bounded) — newest-first parity with the
+                    // TUI list.
+                    let title = read_tail(&path, 64 * 1024).ok().and_then(|tail| {
+                        let text = String::from_utf8_lossy(&tail);
+                        text.rsplit('\n')
+                            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                            .find_map(codex_rollout_user_text)
+                    });
+                    let mtime_ms = file
+                        .metadata()
+                        .and_then(|meta| meta.modified())
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_millis() as u64)
+                        .unwrap_or(0);
+                    rows.push(protocol::SessionSummaryRow {
+                        id: id.to_string(),
+                        cwd: session_cwd,
+                        title,
+                        mtime_ms,
+                        path: path.to_string_lossy().into_owned(),
+                    });
+                }
+            }
+        }
+    }
+    rows.sort_by_key(|row| std::cmp::Reverse(row.mtime_ms));
+    rows
+}
+
+/// The user-visible text of a rollout user record, when it is REAL
+/// input (`content_item_kinds` starts with "user." — injected context
+/// uses "agents_md.", "environment_context", … prefixes instead).
+fn codex_rollout_user_text(line: serde_json::Value) -> Option<String> {
+    let payload = line.get("payload")?;
+    if line.get("type").and_then(|t| t.as_str()) != Some("response_item")
+        || payload.get("role").and_then(|r| r.as_str()) != Some("user")
+    {
+        return None;
+    }
+    let kinds = payload
+        .get("internal_chat_message_metadata_passthrough")?
+        .get("content_item_kinds")?
+        .as_array()?;
+    let real = kinds
+        .iter()
+        .filter_map(|k| k.as_str())
+        .any(|k| k.starts_with("user."));
+    if !real {
+        return None;
+    }
+    payload
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
+        .next()
+        .map(|text| text.chars().take(80).collect::<String>())
+}
+
+/// A quoted string field scanned out of (possibly truncated) JSON text —
+/// the session_meta line embeds the whole base instructions, so full
+/// line parsing never works on a bounded head read.
+fn json_string_field(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let key_at = text.find(&needle)?;
+    let after = &text[key_at + needle.len()..];
+    let colon = after.find(':')?;
+    let rest = after[colon + 1..].trim_start();
+    let mut chars = rest.chars();
+    if chars.next()? != '"' {
+        return None;
+    }
+    let mut out = String::new();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => out.push(chars.next()?),
+            '"' => return Some(out),
+            _ => out.push(ch),
+        }
+    }
+    None
+}
+
 /// Shared plumbing for store listings: walk <root>/<dir>/*.jsonl,
 /// read a bounded head, let the per-store closure extract the row.
 fn list_store(
@@ -716,20 +855,43 @@ fn list_pi_sessions(cwd_filter: &Option<String>) -> Vec<protocol::SessionSummary
     })
 }
 
-/// Capability 7-8: one store file's bytes, located per store layout.
-fn read_store_file(store: &str, session_id: &str) -> anyhow::Result<Vec<u8>> {
+/// Capability 7-9: one store file's bytes, located per store layout.
+/// `tail_bytes` serves only the last N bytes — sessions outgrow the
+/// frame cap, and the client's windowed parse wants the tail anyway.
+fn read_store_file(
+    store: &str,
+    session_id: &str,
+    tail_bytes: Option<u64>,
+) -> anyhow::Result<Vec<u8>> {
     let path = match store {
         "claude" => find_claude_file(session_id)?,
         "pi" => find_suffixed_file(".pi/agent/sessions", session_id)?,
         _ => find_suffixed_file(".omp/agent/sessions", session_id)?,
     };
-    let bytes = std::fs::read(&path)?;
+    let bytes = match tail_bytes {
+        Some(n) => read_tail(&path, n)?,
+        None => std::fs::read(&path)?,
+    };
     anyhow::ensure!(
         bytes.len() <= protocol::MAX_FRAME,
         "{} exceeds the frame cap",
         path.display()
     );
     Ok(bytes)
+}
+
+/// The last `n` bytes of a file (whole file when smaller). The cut can
+/// land mid-line — the client's seam search skips a torn head line the
+/// same way it skips any non-entry line.
+fn read_tail(path: &std::path::Path, n: u64) -> anyhow::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let start = size.saturating_sub(n);
+    let mut buf = vec![0u8; (size - start) as usize];
+    file.seek(SeekFrom::Start(start))?;
+    file.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
 /// `<timestamp>_<sessionId>.jsonl` located by suffix across all cwd
@@ -931,5 +1093,75 @@ mod tests {
         let report = parse_report(&value);
         assert_eq!(report.state, "blocked");
         assert!(report.jobs.is_empty());
+    }
+
+    #[test]
+    fn read_tail_serves_the_last_bytes_and_whole_small_files() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir().join(format!("goty-tail-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("session.jsonl");
+        let body = "header\nuser-one\nassistant-one\nuser-two\n";
+        std::fs::write(&path, body)?;
+
+        // Window smaller than the file: exactly the last n bytes (the
+        // mid-line cut is the CLIENT's to skip, same as any torn line).
+        let tail = read_tail(&path, 10)?;
+        assert_eq!(tail.len(), 10);
+        assert_eq!(String::from_utf8(tail)?, "\nuser-two\n");
+
+        // Window larger than the file: the whole thing.
+        let whole = read_tail(&path, 4096)?;
+        assert_eq!(String::from_utf8(whole)?, body);
+
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn session_file_request_ignores_a_missing_tail_field() -> anyhow::Result<()> {
+        // The capability-8 shape (no tail_bytes) must keep parsing —
+        // one payload shape for every daemon generation.
+        let old: protocol::SessionFileRequest =
+            protocol::from_json(br#"{"store":"omp","session_id":"s1"}"#)?;
+        assert_eq!(old.session_id, "s1");
+        assert!(old.tail_bytes.is_none());
+
+        let new: protocol::SessionFileRequest =
+            protocol::from_json(br#"{"store":"omp","session_id":"s1","tail_bytes":524288}"#)?;
+        assert_eq!(new.tail_bytes, Some(524_288));
+        Ok(())
+    }
+
+    #[test]
+    fn codex_rollout_title_takes_only_real_user_input() {
+        // Injected context (AGENTS.md etc.) rides role=user too, but its
+        // content_item_kinds is prefixed — only "user." kinds are real
+        // prompts, and the TUI's title is the LATEST of those.
+        let injected = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "# AGENTS.md instructions"}],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["agents_md. text='# AGENTS.md instructions'"]
+                }
+            }
+        });
+        let real = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "继续完善球员身份判定"}],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["user.text"]
+                }
+            }
+        });
+        assert_eq!(codex_rollout_user_text(injected.clone()), None);
+        assert_eq!(
+            codex_rollout_user_text(real).as_deref(),
+            Some("继续完善球员身份判定")
+        );
     }
 }
