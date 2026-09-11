@@ -167,6 +167,26 @@ enum WebUITest {
         let cw = Int(evalJS("String(document.querySelector('.transcript').clientWidth)") ?? "-1") ?? -1
         check(preStyle == "pre-wrap" && sw >= 0 && sw <= cw,
               "thought code block folds long lines (style=\(preStyle) sw=\(sw) cw=\(cw))")
+        // The two-layer-scroll report: a TALL markdown table inside
+        // streamdown's table-wrapper must NOT become its own scroll
+        // container (overflow-x:auto computes overflow-y to auto per
+        // spec) — the transcript is the only scroller.
+        let tallRows = (1...60).map { "| row \($0) | value \($0) |" }.joined(separator: "\n")
+        _ = evalJS("window.__gotyStore.apply({type:'agentChunk', text:'| a | b |\\n|---|---|\\n\(tallRows)'})")
+        pump(0.6)
+        let tableJS = evalJS("(() => { const w = document.querySelector('.agent [data-streamdown=\"table-wrapper\"]');"
+          + " if (!w) return JSON.stringify({missing:true});"
+          + " const cs = getComputedStyle(w);"
+          + " return JSON.stringify({oy: cs.overflowY, rows: w.querySelectorAll('tr').length,"
+          + " sh: w.scrollHeight, ch: w.clientHeight}); })()") ?? ""
+        check(tableJS.contains("\"oy\":\"visible\"")
+              && tableJS.contains("\"rows\":61")
+              && !tableJS.contains("\"missing\":true"),
+              "tall table renders fully inside the wrapper (\(tableJS))")
+        let noInnerScroll = evalJS("(() => { const w = document.querySelector('.agent [data-streamdown=\"table-wrapper\"]');"
+          + " return JSON.stringify({scrollable: w.scrollHeight > w.clientHeight + 1}); })()") ?? ""
+        check(noInnerScroll.contains("\"scrollable\":false"),
+              "tall table wrapper is not an inner scroller (\(noInnerScroll))")
         // Tool card updates must re-render WITHOUT a click (BlockView
         // memoizes on block/call identity — the store used to swap only
         // the tools Map, freezing cards at mount-time 运行中) and a

@@ -285,7 +285,14 @@ body {
    context in WKWebView, fullscreen fights the pane). Only the wrapper's
    buttons hide; the table itself renders untouched. */
 .agent [data-streamdown="table-wrapper"] button { display: none !important; }
-.agent [data-streamdown="table-wrapper"] { overflow-x: auto; }
+.agent [data-streamdown="table-wrapper"] { overflow: visible; }
+/* NO scroll on the wrapper: overflow-x:auto also computes overflow-y to
+   auto (visible→auto per spec when the other axis is non-visible), so a
+   TALL table grew its own inner scrollbar and fought the transcript's
+   scroll (the two-layer-scroll report). Tables show in full; a wide
+   table shrinks and wraps instead of scrolling sideways. */
+.agent [data-streamdown="table-wrapper"] table { max-width: 100%; }
+.agent td, .agent th { overflow-wrap: anywhere; }
 /* streamdown's internal tailwind classes (.border/.divide-y) leak into
    the generated CSS and paint a second frame + stray row lines around
    the table. The goty grid comes from the cells alone — strip every
@@ -799,6 +806,10 @@ body {
 }
 .dock-wrap.on { grid-template-rows: 1fr; margin: 0 20px 4px; }
 .dock-wrap .dock { min-height: 0; }
+/* The wrapper stays mounted for the 0fr↔1fr animation; a collapsed
+   dock still PAINTS its 1px border at zero height — the stray hairline
+   above the composer (2026-09-11 codex pane report). */
+.dock-wrap:not(.on) .dock { border-color: transparent; }
 .dock {
   flex: none;
   border: 1px solid var(--border);
