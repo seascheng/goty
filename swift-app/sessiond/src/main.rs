@@ -571,18 +571,27 @@ fn list_omp_sessions(cwd_filter: &Option<String>) -> Vec<protocol::SessionSummar
     rows
 }
 
-/// Capability 10: skill/prompt files — the same discovery monocode
+/// Capability 10: CODEX's own skill roots, verbatim from the agent's
+/// loader (codex-rs ext/skills/src/host_roots.rs
+/// `resolve_skill_roots_with_home_dir`):
+/// - Repo: `<cwd>/.codex/skills` plus `.agents/skills` in EVERY
+///   directory from cwd up to the project root (nested repos too)
+/// - User: `~/.codex/skills` (deprecated but kept) and `~/.agents/skills`
+///
+/// NOT other agents' dirs — a codex pane lists only what the codex
+/// agent itself loads. First name wins (repo scope beats user scope,
+/// matching the loader's dedupe order).
 fn list_skills(cwd_filter: &Option<String>) -> Vec<protocol::SkillRow> {
-    let project = cwd_filter.as_deref().map(Path::new);
+    let cwd = cwd_filter.as_deref().map(Path::new);
     let home = store_root_path("").ok();
-    list_skills_from(project, home.as_deref())
+    list_skills_from(cwd, home.as_deref())
 }
 
-fn list_skills_from(project: Option<&Path>, home: Option<&Path>) -> Vec<protocol::SkillRow> {
+fn list_skills_from(cwd: Option<&Path>, home: Option<&Path>) -> Vec<protocol::SkillRow> {
     let mut out: Vec<protocol::SkillRow> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let add_dir = |dir: &Path,
-                   source: &str,
+                   scope: &str,
                    out: &mut Vec<protocol::SkillRow>,
                    seen: &mut std::collections::HashSet<String>| {
         let entries = match std::fs::read_dir(dir) {
@@ -590,24 +599,14 @@ fn list_skills_from(project: Option<&Path>, home: Option<&Path>) -> Vec<protocol
             Err(_) => return,
         };
         for entry in entries {
-            let path = entry.path();
-            // Two shapes, both listed by the agent TUIs: `<name>/SKILL.md`
-            // (the skills convention) and loose `<name>.md` prompts
-            // (claude's command files sitting right in the dir).
-            let raw = if path.is_dir() {
-                std::fs::read_to_string(path.join("SKILL.md"))
-            } else if path.extension().is_some_and(|ext| ext == "md") {
-                std::fs::read_to_string(&path)
-            } else {
+            // One shape only: <name>/SKILL.md (the codex skills loader's
+            // convention — loose .md files are another agent's format).
+            let path = entry.path().join("SKILL.md");
+            let Ok(raw) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let Ok(raw) = raw else { continue };
             let (name, description, body) = parse_skill_markdown(&raw);
-            let fallback = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|stem| *stem != "SKILL")
-                .map(String::from);
+            let fallback = entry.file_name().into_string().ok();
             let Some(name) = name.or(fallback) else {
                 continue;
             };
@@ -617,27 +616,32 @@ fn list_skills_from(project: Option<&Path>, home: Option<&Path>) -> Vec<protocol
             out.push(protocol::SkillRow {
                 name,
                 description,
-                source: source.to_string(),
+                source: scope.to_string(),
                 body,
             });
         }
     };
-    if let Some(project) = project {
-        add_dir(
-            &project.join(".agents/skills"),
-            "agents",
-            &mut out,
-            &mut seen,
-        );
-        add_dir(&project.join(".codex/skills"), "codex", &mut out, &mut seen);
+    // Repo roots (loader order): the project root's .codex/skills
+    // (project layer — root = nearest ancestor holding .git, codex's
+    // default project-root marker), then .agents/skills in EVERY
+    // directory between the project root and the cwd.
+    if let Some(cwd) = cwd {
+        let ancestors: Vec<&Path> = cwd.ancestors().collect();
+        let root_idx = ancestors
+            .iter()
+            .position(|dir| dir.join(".git").is_dir())
+            .unwrap_or(ancestors.len() - 1);
+        if let Some(root) = ancestors.get(root_idx) {
+            add_dir(&root.join(".codex/skills"), "repo", &mut out, &mut seen);
+        }
+        for dir in ancestors[..=root_idx].iter().rev() {
+            add_dir(&dir.join(".agents/skills"), "repo", &mut out, &mut seen);
+        }
     }
+    // User roots.
     if let Some(home) = home {
-        add_dir(&home.join(".codex/skills"), "codex", &mut out, &mut seen);
-        add_dir(&home.join(".agents/skills"), "agents", &mut out, &mut seen);
-        // codex 0.154's host roots also read the claude dir (verified
-        // on host 5090: its / menu lists review/qa/checkpoint from
-        // ~/.claude/skills; omp/.omp skills are NOT in its view).
-        add_dir(&home.join(".claude/skills"), "claude", &mut out, &mut seen);
+        add_dir(&home.join(".codex/skills"), "user", &mut out, &mut seen);
+        add_dir(&home.join(".agents/skills"), "user", &mut out, &mut seen);
     }
     out
 }
@@ -1489,41 +1493,66 @@ mod tests {
     }
 
     #[test]
-    fn skills_list_reads_project_and_user_dirs() -> anyhow::Result<()> {
+    fn skills_list_walks_codex_roots_exactly() -> anyhow::Result<()> {
+        // Roots verbatim from ext/skills/src/host_roots.rs: cwd's
+        // .codex/skills + .agents/skills in every ancestor, then the
+        // two user-level roots. Other agents' dirs (.claude, .omp)
+        // are NOT codex's territory and must never appear.
         let dir = std::env::temp_dir().join(format!("goty-skills-{}", std::process::id()));
         let project = dir.join("proj");
+        let nested = project.join("apps/web"); // cwd, two levels down
         let home = dir.join("home");
-        std::fs::create_dir_all(project.join(".codex/skills/deploy"))?;
+        std::fs::create_dir_all(project.join(".git"))?; // project-root marker
+        std::fs::create_dir_all(&nested)?;
         std::fs::create_dir_all(project.join(".agents/skills/shared"))?;
+        std::fs::create_dir_all(project.join(".codex/skills/deploy"))?;
+        std::fs::create_dir_all(nested.join(".agents/skills/nested"))?;
         std::fs::create_dir_all(home.join(".codex/skills/personal"))?;
+        std::fs::create_dir_all(home.join(".agents/skills/shared"))?;
+        std::fs::create_dir_all(project.join(".claude/skills/review"))?;
         std::fs::write(
             project.join(".codex/skills/deploy/SKILL.md"),
             "---\nname: deploy\ndescription: Deploy the app\n---\nDeploy now.",
         )?;
         std::fs::write(
             project.join(".agents/skills/shared/SKILL.md"),
-            "---\nname: shared\ndescription: Project wins\n---\nProject body.",
+            "---\nname: shared\ndescription: Repo wins\n---\nRepo body.",
+        )?;
+        std::fs::write(
+            nested.join(".agents/skills/nested/SKILL.md"),
+            "---\nname: nested\n---\nNested body.",
         )?;
         std::fs::write(
             home.join(".codex/skills/personal/SKILL.md"),
             "---\nname: personal\n---\nPersonal body.",
         )?;
-        // A user-level skill shadowed by the project's name loses.
-        std::fs::create_dir_all(home.join(".agents/skills/shared"))?;
         std::fs::write(
             home.join(".agents/skills/shared/SKILL.md"),
             "---\nname: shared\n---\nUser body.",
         )?;
+        std::fs::write(
+            project.join(".claude/skills/review/SKILL.md"),
+            "---\nname: review\n---\nClaude-only body.",
+        )?;
 
-        let skills = crate::list_skills_from(Some(project.as_path()), Some(home.as_path()));
+        let cwd = nested.as_path();
+        let skills = crate::list_skills_from(Some(cwd), Some(home.as_path()));
         let by_name = |n: &str| skills.iter().find(|s| s.name == n);
         assert_eq!(
             by_name("shared").map(|s| s.body.as_str()),
-            Some("Project body.")
+            Some("Repo body."),
+            "repo scope shadows user scope for the same name"
         );
+        assert!(by_name("deploy").is_some(), "cwd .codex/skills");
+        assert!(by_name("nested").is_some(), "ancestor .agents/skills");
         assert_eq!(
             by_name("personal").map(|s| s.source.as_str()),
-            Some("codex")
+            Some("user"),
+            "user-level root carries the user scope"
+        );
+        assert!(
+            by_name("review").is_none(),
+            ".claude/skills is another agent's territory — never listed"
         );
         std::fs::remove_dir_all(&dir)?;
         Ok(())
