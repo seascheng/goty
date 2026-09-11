@@ -1073,6 +1073,37 @@ enum AgentTest {
             check(false, "kind-loss fixture threw: \(error)")
         }
 
+        // RuntimeMode mapping parity (monocode codexProtocol.ts:20 /
+        // claudeProtocol.ts:244; paseo claude control-plane notes).
+        check(RuntimeModeMapping.codexParams(.supervised)["approvalPolicy"] as? String == "untrusted"
+              && (RuntimeModeMapping.codexParams(.supervised)["sandboxPolicy"] as? [String: Any])?["type"] as? String == "readOnly"
+              && RuntimeModeMapping.codexParams(.supervised)["approvalsReviewer"] as? String == "user",
+              "runtimeMode supervised → codex untrusted/read-only/user reviewer")
+        check(RuntimeModeMapping.codexParams(.autoEdits)["approvalPolicy"] as? String == "on-request"
+              && (RuntimeModeMapping.codexParams(.autoEdits)["sandboxPolicy"] as? [String: Any])?["type"] as? String == "workspaceWrite",
+              "runtimeMode autoEdits → codex on-request/workspace-write")
+        check(RuntimeModeMapping.codexParams(.auto)["approvalsReviewer"] as? String == "auto_review",
+              "runtimeMode auto → codex auto_review reviewer")
+        check(RuntimeModeMapping.codexParams(.fullAccess)["approvalPolicy"] as? String == "never"
+              && (RuntimeModeMapping.codexParams(.fullAccess)["sandboxPolicy"] as? [String: Any])?["type"] as? String == "dangerFullAccess",
+              "runtimeMode fullAccess → codex never/danger-full-access")
+        let threadP = RuntimeModeMapping.codexThreadParams(.autoEdits)
+        check(threadP["sandbox"] as? String == "workspace-write"
+              && threadP["approvalPolicy"] as? String == "on-request",
+              "codexThreadParams adds the thread/start string sandbox")
+        check(RuntimeModeMapping.claudeSpawn(.supervised).mode == "default"
+              && RuntimeModeMapping.claudeSpawn(.supervised).extraArgs.isEmpty
+              && RuntimeModeMapping.claudeSpawn(.autoEdits).mode == "acceptEdits"
+              && RuntimeModeMapping.claudeSpawn(.autoEdits).extraArgs.isEmpty
+              && RuntimeModeMapping.claudeSpawn(.auto).mode == "auto",
+              "claudeSpawn maps supervised/autoEdits/auto to permission modes")
+        let bypass = RuntimeModeMapping.claudeSpawn(.fullAccess)
+        check(bypass.mode == "bypassPermissions"
+              && bypass.extraArgs == ["--allow-dangerously-skip-permissions"],
+              "claudeSpawn fullAccess needs the bypass flag")
+        check(AgentRuntimeMode.allCases.allSatisfy { !$0.displayName.isEmpty && !$0.hint.isEmpty },
+              "every runtime mode has display name and hint")
+
         try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }
         print("agenttest: all passed")

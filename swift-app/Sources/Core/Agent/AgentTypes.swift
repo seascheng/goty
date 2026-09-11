@@ -119,6 +119,36 @@ struct AgentRuntimeStatus: Equatable {
     var isStreaming: Bool?
 }
 
+/// The dialect-neutral permission/sandbox tier (monocode's RuntimeMode
+/// consensus, paseo's per-provider modes). Adapters that declare
+/// `.runtimeModes` map it onto their native knobs: codex rides
+/// approvalPolicy+sandboxPolicy on every turn/start, claude switches
+/// permission-mode over the control protocol (respawn arg when cold).
+enum AgentRuntimeMode: String, CaseIterable {
+    case supervised
+    case autoEdits
+    case auto
+    case fullAccess
+
+    var displayName: String {
+        switch self {
+        case .supervised: return "supervised"
+        case .autoEdits: return "auto-edits"
+        case .auto: return "auto"
+        case .fullAccess: return "full-access"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .supervised: return "命令和文件改动都先问"
+        case .autoEdits: return "自动批准编辑，其余先问"
+        case .auto: return "审批器自动过常规操作，危险操作仍会问"
+        case .fullAccess: return "全部放行，不再询问（谨慎）"
+        }
+    }
+}
+
 /// One background async-job row (agent extension report → daemon LIST).
 /// `startTime` is epoch ms; elapsed time is the GUI's to tick.
 struct AgentJobSnapshot: Equatable {
