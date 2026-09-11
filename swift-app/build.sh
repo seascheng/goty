@@ -16,7 +16,9 @@ cargo build --release --manifest-path sessiond/Cargo.toml
 # Remote workspace server: static musl build (zig cc), uploaded to hosts
 # over ssh by RemoteDaemonLink. Config lives in sessiond/.cargo, so build
 # from that directory; target config discovery is cwd-based.
-(cd sessiond && cargo build --release --target x86_64-unknown-linux-musl)
+(cd sessiond && CC_x86_64_unknown_linux_musl="$PWD/.zig-cc-c" \
+    AR_x86_64_unknown_linux_musl="$PWD/.zig-ar" \
+    cargo build --release --target x86_64-unknown-linux-musl)
 
 # Brand icon table is generated from Assets/AgentIcons/*.png. Always
 # regenerate: mtime-based skipping missed asset swaps with preserved

@@ -566,6 +566,133 @@ fn list_omp_sessions(cwd_filter: &Option<String>) -> Vec<protocol::SessionSummar
 /// (AGENTS.md etc.) under role=user, but only real input's
 /// `content_item_kinds` is `["user.text"]`-prefixed.
 fn list_codex_sessions(cwd_filter: &Option<String>) -> Vec<protocol::SessionSummaryRow> {
+    // Authority: codex's OWN session store (`~/.codex/state_5.sqlite`,
+    // `threads` table) — the same names the TUI resume picker shows.
+    // The rollout scan below is the fallback for threads the DB has
+    // not backfilled yet (and supplies titles where the DB's is
+    // empty), keyed by rollout_path.
+    let db_rows = match read_codex_state_threads(cwd_filter) {
+        Some(rows) => rows,
+        None => {
+            eprintln!("codex state db unreadable — falling back to rollout scan");
+            Vec::new()
+        }
+    };
+    let scanned = scan_codex_rollouts(cwd_filter);
+    merge_codex_rows(db_rows, scanned)
+}
+
+fn merge_codex_rows(
+    db_rows: Vec<protocol::SessionSummaryRow>,
+    scanned: Vec<protocol::SessionSummaryRow>,
+) -> Vec<protocol::SessionSummaryRow> {
+    if db_rows.is_empty() {
+        return scanned;
+    }
+    // DB rows lead; the scan only (a) fills an EMPTY db title by
+    // rollout path and (b) contributes rollouts the DB has not
+    // backfilled. A scanned row whose path a DB row already covers is
+    // a resume fork carrying a DIFFERENT id (filename-tail uuid) —
+    // dropping it keeps one row per conversation.
+    let by_path: std::collections::HashMap<String, String> = scanned
+        .iter()
+        .filter_map(|row| row.title.clone().map(|t| (row.path.clone(), t)))
+        .collect();
+    let mut rows = db_rows;
+    for row in &mut rows {
+        if row.title.as_deref().unwrap_or("").is_empty() {
+            row.title = by_path.get(&row.path).cloned();
+        }
+    }
+    let covered: std::collections::HashSet<&str> =
+        rows.iter().map(|row| row.path.as_str()).collect();
+    let mut extra: Vec<protocol::SessionSummaryRow> = scanned
+        .into_iter()
+        .filter(|row| !row.path.is_empty() && !covered.contains(row.path.as_str()))
+        .collect();
+    extra.dedup_by_key(|row| row.id.clone());
+    rows.extend(extra);
+    rows.sort_by_key(|row| std::cmp::Reverse(row.mtime_ms));
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|row| seen.insert(row.id.clone()));
+    rows
+}
+
+/// codex's own thread store: `state_5.sqlite` `threads(id, title, cwd,
+/// rollout_path, …)`. Read-only WAL-safe open; None when the DB is
+/// absent/unreadable (older codex) — callers fall back to the rollout
+fn read_codex_state_threads(
+    cwd_filter: &Option<String>,
+) -> Option<Vec<protocol::SessionSummaryRow>> {
+    let db = store_root_path(".codex").ok()?.join("state_5.sqlite");
+    if !db.exists() {
+        return None;
+    }
+    read_codex_threads_from(&db, cwd_filter)
+}
+
+fn read_codex_threads_from(
+    db: &Path,
+    cwd_filter: &Option<String>,
+) -> Option<Vec<protocol::SessionSummaryRow>> {
+    let con = rusqlite::Connection::open_with_flags(
+        format!("file:{}?mode=ro", db.display()),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .ok()?;
+    let mut stmt = con
+        .prepare("SELECT id, name, title, archived, cwd, rollout_path FROM threads")
+        .ok()?;
+    let queried = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0).unwrap_or_default(),
+                row.get::<_, Option<String>>(1).ok().flatten(),
+                row.get::<_, Option<String>>(2).ok().flatten(),
+                row.get::<_, Option<i64>>(3).ok().flatten().unwrap_or(0),
+                row.get::<_, Option<String>>(4).ok().flatten(),
+                row.get::<_, Option<String>>(5).ok().flatten(),
+            ))
+        })
+        .ok()?;
+    let mut out = Vec::new();
+    for entry in queried.flatten() {
+        let (id, name, title, archived, cwd, rollout) = entry;
+        if id.is_empty() || archived != 0 {
+            continue;
+        }
+        if let Some(filter) = cwd_filter
+            && !cwd
+                .as_deref()
+                .is_some_and(|cwd| cwd.starts_with(filter.as_str()))
+        {
+            continue;
+        }
+        let path = rollout.unwrap_or_default();
+        let mtime_ms = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        // TUI parity: `name` is the conversation's own name (user-set
+        // or generated); `title` is just the first prompt — the
+        // fallback when no name exists yet.
+        let title = name
+            .filter(|t| !t.is_empty())
+            .or_else(|| title.filter(|t| !t.is_empty()));
+        out.push(protocol::SessionSummaryRow {
+            id,
+            cwd,
+            title,
+            path,
+            mtime_ms,
+        });
+    }
+    Some(out)
+}
+
+fn scan_codex_rollouts(cwd_filter: &Option<String>) -> Vec<protocol::SessionSummaryRow> {
     let Some(root) = store_root_path(".codex/sessions").ok() else {
         return Vec::new();
     };
@@ -1163,5 +1290,107 @@ mod tests {
             codex_rollout_user_text(real).as_deref(),
             Some("继续完善球员身份判定")
         );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn row(
+        id: &str,
+        title: Option<&str>,
+        path: &str,
+        mtime_ms: u64,
+    ) -> protocol::SessionSummaryRow {
+        protocol::SessionSummaryRow {
+            id: id.to_string(),
+            cwd: Some("/w".into()),
+            title: title.map(String::from),
+            mtime_ms,
+            path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn codex_state_db_titles_lead_and_scan_fills_gaps() {
+        // The DB carries codex's OWN names (what the TUI shows); the
+        // rollout scan only fills an EMPTY db title by rollout path.
+        let db = vec![
+            row("t1", Some("你是可用的么"), "/p/a.jsonl", 100),
+            row("t2", None, "/p/b.jsonl", 200),
+            row("t3", Some(""), "/p/d.jsonl", 150),
+        ];
+        let scanned = vec![
+            row("t1", Some("继续吧"), "/p/a.jsonl", 100),
+            row("t2", Some("扫描兜底标题"), "/p/b.jsonl", 200),
+            // Resume fork: same rollout path as t3's DB row but the
+            // filename-tail id — must NOT survive as a second row.
+            row("fork-of-t3", Some("旧标题"), "/p/d.jsonl", 150),
+            // A rollout the DB never backfilled: kept.
+            row("t4", Some("未迁移"), "/p/e.jsonl", 50),
+        ];
+        let merged = merge_codex_rows(db, scanned);
+        assert_eq!(merged.len(), 4);
+        assert_eq!(merged[0].title.as_deref(), Some("扫描兜底标题"));
+        assert_eq!(merged[1].id, "t3");
+        assert_eq!(merged[1].title.as_deref(), Some("旧标题"));
+        assert_eq!(merged[2].title.as_deref(), Some("你是可用的么"));
+        assert_eq!(merged[3].title.as_deref(), Some("未迁移"));
+        assert!(!merged.iter().any(|r| r.id == "fork-of-t3"));
+
+        // No DB at all (older codex): the scan IS the listing.
+        assert_eq!(
+            merge_codex_rows(vec![], vec![row("t9", Some("仅扫描"), "/p/x.jsonl", 1)]).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn codex_state_db_reads_titles_and_filters_cwd() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir().join(format!("goty-codex-state-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let db = dir.join("state_5.sqlite");
+        let con = rusqlite::Connection::open(&db)?;
+        con.execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, title TEXT, archived INTEGER, \
+             cwd TEXT, rollout_path TEXT)",
+            [],
+        )?;
+        let rollout = dir.join("r1.jsonl");
+        std::fs::write(&rollout, "{}")?;
+        // name beats title; title is the first-prompt fallback.
+        con.execute(
+            "INSERT INTO threads (id, name, title, archived, cwd, rollout_path) \
+             VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+            rusqlite::params![
+                "t1",
+                "继续完善球员身份判定",
+                "继续吧",
+                "/w/proj",
+                rollout.to_str()
+            ],
+        )?;
+        con.execute(
+            "INSERT INTO threads (id, name, title, archived, cwd, rollout_path) \
+             VALUES (?1, NULL, ?2, 0, ?3, ?4)",
+            rusqlite::params!["t2", "首条消息", "/w/proj2", ""],
+        )?;
+        // Archived threads never show; wrong-cwd threads filter out.
+        con.execute(
+            "INSERT INTO threads (id, name, title, archived, cwd, rollout_path) \
+             VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+            rusqlite::params!["t3", "已归档", "x", "/w/proj", ""],
+        )?;
+        con.execute(
+            "INSERT INTO threads (id, name, title, archived, cwd, rollout_path) \
+             VALUES (?1, NULL, ?2, 0, ?3, ?4)",
+            rusqlite::params!["t4", "别的目录", "/elsewhere", ""],
+        )?;
+        let rows = crate::read_codex_threads_from(&db, &Some("/w".to_string())).unwrap_or_default();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "t1");
+        assert_eq!(rows[0].title.as_deref(), Some("继续完善球员身份判定"));
+        assert_eq!(rows[1].id, "t2");
+        assert_eq!(rows[1].title.as_deref(), Some("首条消息"));
+        assert!(rows[0].mtime_ms > 0);
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 }

@@ -1,0 +1,14 @@
+#!/bin/sh
+# C compiler for the linux-musl target (libsqlite3-sys bundled build).
+# The cc crate detects zig cc as clang-family and appends
+# --target=<rust-triple>; zig only accepts its own triple spelling —
+# rewrite the args before exec.
+args=""
+for a in "$@"; do
+    case "$a" in
+        --target=x86_64-unknown-linux-musl) a="--target=x86_64-linux-musl" ;;
+        -target) a="-target" ;; # handled below via following arg
+    esac
+    args="$args $(printf %s "$a" | sed "s/^x86_64-unknown-linux-musl$/x86_64-linux-musl/")"
+done
+exec zig cc -target x86_64-linux-musl $args

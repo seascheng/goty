@@ -1,0 +1,4 @@
+#!/bin/sh
+# GNU-style ar for the musl target: the cc crate passes member lists
+# via @response-file, which BSD ar silently ignores (empty archive).
+exec zig ar "$@"
