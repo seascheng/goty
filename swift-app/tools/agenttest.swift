@@ -1196,6 +1196,17 @@ enum AgentTest {
               && CodexSession.pickLoadedThreadId(["data": []]) == nil
               && CodexSession.pickLoadedThreadId(["data": ["", "x"]]) == "x",
               "loaded/list picker takes the first non-empty live thread id")
+        // codex auto-titles can swallow whole conversations (46,635
+        // chars probed in state_5.sqlite on 5090) — clamp to one line.
+        let long = String(repeating: "对话内容", count: 100)
+        check(DaemonSessionRow.clampedTitle(long)?.count == 81
+              && DaemonSessionRow.clampedTitle(long)?.hasSuffix("…") == true
+              && DaemonSessionRow.clampedTitle("第一行\n第二行很长很长") == "第一行"
+              && DaemonSessionRow.clampedTitle(nil) == nil
+              && DaemonSessionRow.clampedTitle("  \n  ") == nil
+              && DaemonSessionRow.clampedTitle("继续完善球员身份判定")
+                  == "继续完善球员身份判定",
+              "session title clamps to one 80-char line")
 
         // Custom prompts: ~/.codex/prompts/*.md, name prefixed
         // "prompts:", frontmatter feeds description + argument-hint.

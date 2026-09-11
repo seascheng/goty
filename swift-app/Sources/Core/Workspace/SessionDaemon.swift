@@ -79,9 +79,24 @@ struct DaemonSessionRow: Decodable {
     }
 
     var summary: AgentSessionSummary {
-        AgentSessionSummary(sessionId: id, cwd: cwd, title: title,
+        AgentSessionSummary(sessionId: id, cwd: cwd,
+                            title: Self.clampedTitle(title),
                             updatedAt: String(Int(mtimeMs / 1000)),
                             messageCount: nil)
+    }
+
+    /// codex's auto-titles occasionally swallow whole conversations (a
+    /// 46,635-char title was probed in state_5.sqlite on host 5090,
+    /// 2026-09-11) — first newline cuts, then one display line's worth.
+    static func clampedTitle(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let firstLine = raw.split(separator: "\n", maxSplits: 1,
+                                  omittingEmptySubsequences: false)[0]
+        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed.count > 80
+            ? String(trimmed.prefix(80)).trimmingCharacters(in: .whitespaces) + "…"
+            : trimmed
     }
 }
 
