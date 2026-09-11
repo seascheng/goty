@@ -81,6 +81,9 @@ final class RemoteDaemonLink {
     private var booting = false
     private let queue = DispatchQueue(label: "goty.remote-link", qos: .userInitiated)
     private var retryDelay: TimeInterval = 1
+    /// One scheduled boot-retry at a time (pane attach loops otherwise
+    /// pile a new retry onto every failure).
+    private var retryScheduled = false
 
     init(host: String) {
         self.host = host
@@ -89,7 +92,8 @@ final class RemoteDaemonLink {
     /// Idempotent: safe to call from every layout pass until ready.
     func start() {
         queue.async { [weak self] in
-            guard let self, !self.booting, self.daemon == nil, !self.stopping else { return }
+            guard let self, !self.booting, !self.retryScheduled,
+                  self.daemon == nil, !self.stopping else { return }
             self.booting = true
             self.boot()
         }
@@ -127,10 +131,15 @@ final class RemoteDaemonLink {
         defer { booting = false }
         guard !stopping else { return }
 
-        // Step 1 — reachability, fast: a 1s TCP probe against the resolved
-        // endpoint (following ProxyJump one hop). No ssh timeouts involved;
-        // an unreachable host is declared failed immediately.
-        guard Self.reachable(sshHost: host, depth: 0) else {
+        // Step 1 — liveness via a REAL ssh round-trip (BatchMode,
+        // 4s connect timeout). A hand-rolled TCP+banner probe reads
+        // EHOSTUNREACH on process-name-split TUNs (2026-09-11, host
+        // 5090: `ssh` itself connected in 0.4s while the GUI's own
+        // socket got "no route to host" — the tunnel's rules pass the
+        // ssh PROCESS and blackhole everything else). The ssh path is
+        // also exactly what every later step uses, so the answer is
+        // honest by construction.
+        guard Self.sshAlive(host: host) else {
             scheduleRetry(reason: "host unreachable")
             return
         }
@@ -323,11 +332,22 @@ final class RemoteDaemonLink {
         teardownForward()
         guard !stopping else { return }
         state = .failed
+        // Single-flight: pane attach loops re-enter boot() at their own
+        // cadence; without this gate every failure scheduled ANOTHER
+        // retry and the log showed seven threads storming in parallel
+        // (2026-09-11, host 5090). One scheduled retry is the whole plan.
+        if retryScheduled {
+            NSLog("remote-link %@: %@ — retry already scheduled", host, reason)
+            return
+        }
+        retryScheduled = true
         NSLog("remote-link %@: %@ — retrying in %.0fs", host, reason, retryDelay)
         let delay = retryDelay
         retryDelay = min(retryDelay * 2, 10)
         queue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, !self.stopping, self.daemon == nil else { return }
+            guard let self else { return }
+            self.retryScheduled = false
+            guard !self.stopping, self.daemon == nil else { return }
             self.booting = true
             self.boot()
         }
@@ -352,6 +372,7 @@ final class RemoteDaemonLink {
             self.stopping = false
             self.teardownForward()
             self.daemon = nil
+            self.retryScheduled = false
             self.retryDelay = 1
             self.state = .connecting
             self.booting = true
@@ -408,6 +429,7 @@ final class RemoteDaemonLink {
             }
             self.upgradePending = true
             self.teardownForward()
+            self.retryScheduled = false
             self.retryDelay = 1
             self.booting = true
             self.boot()
@@ -513,6 +535,7 @@ final class RemoteDaemonLink {
         NSLog("remote-link %@: forward exited — rebooting link", host)
         daemon = nil
         teardownForward()
+        retryScheduled = false
         retryDelay = 1
         booting = true
         boot()
@@ -529,93 +552,22 @@ final class RemoteDaemonLink {
         guard let data = FileManager.default.contents(atPath: path) else { return "unknown" }
         return String(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined().prefix(12))
     }
-    // MARK: - Reachability (no ssh involved)
 
-    /// Resolve the ssh alias locally (`ssh -G` never touches the network),
-    /// then verify the ssh SERVICE answers. Proxy TUNs (Clash etc.) accept
-    /// every TCP handshake locally — a bare connect proves nothing on this
-    /// class of machine — so the probe must read the server's identification
-    /// string. ProxyJump chains are followed one hop: the link cannot come
-    /// up unless the jump host answers anyway.
-    private static func reachable(sshHost: String, depth: Int) -> Bool {
-        guard depth < 3 else { return false }
+    /// One real ssh execution decides liveness: exit 0 = alive. This
+    /// rides the same network path as every later ssh call (agents,
+    /// uploads, forwards), so ProxyCommands, process-split TUNs and
+    /// odd routing all resolve exactly the way the real traffic will.
+    private static func sshAlive(host: String) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = ["-G", sshHost]
+        process.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
+                             "-o", "StrictHostKeyChecking=accept-new",
+                             host, "true"]
         process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        let pipe = Pipe()
-        process.standardOutput = pipe
         do { try process.run() } catch { return false }
-        let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return false }
-
-        var fields: [String: String] = [:]
-        for line in out.split(separator: "\n") {
-            let parts = line.split(separator: " ", maxSplits: 1)
-            if parts.count == 2 { fields[String(parts[0])] = String(parts[1]).trimmingCharacters(in: .whitespaces) }
-        }
-        if let jump = fields["proxyjump"], jump.lowercased() != "none", !jump.isEmpty {
-            return reachable(sshHost: jump, depth: depth + 1)
-        }
-        let hostname = fields["hostname"] ?? sshHost
-        let port = UInt16(fields["port"] ?? "22") ?? 22
-        return sshServiceAnswers(host: hostname, port: port)
-    }
-    /// Connect (1s) and read the server banner (1.5s). A banner that starts
-    /// with "SSH-" is the only honest proof the far side is alive; refused,
-    /// blackholed, and proxy-faked connects all read as unreachable.
-    private static func sshServiceAnswers(host: String, port: UInt16) -> Bool {
-        var hints = addrinfo()
-        hints.ai_socktype = SOCK_STREAM
-        var info: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, String(port), &hints, &info) == 0, let first = info else {
-            return false
-        }
-        defer { freeaddrinfo(info) }
-
-        for candidate in sequence(first: first, next: { $0.pointee.ai_next }) {
-            let ai = candidate.pointee
-            let fd = socket(ai.ai_family, ai.ai_socktype, ai.ai_protocol)
-            guard fd >= 0 else { continue }
-            defer { Darwin.close(fd) }
-            let flags = fcntl(fd, F_GETFL, 0)
-            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
-            let rc = Darwin.connect(fd, ai.ai_addr, ai.ai_addrlen)
-            guard rc == 0 || (rc < 0 && errno == EINPROGRESS) else { continue }
-            if rc < 0 {
-                var pollfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-                guard poll(&pollfd, 1, 1000) > 0 else { continue }
-                var error: Int32 = 0
-                var length = socklen_t(MemoryLayout<Int32>.size)
-                getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length)
-                guard error == 0 else { continue }
-            }
-            // Handshake done (possibly by a proxy). Demand the banner.
-            if bannerStarts(with: "SSH-", fd: fd) { return true }
-        }
-        return false
-    }
-
-    /// Reads until the identification line arrives or 1.5s passes.
-    private static func bannerStarts(with prefix: String, fd: Int32) -> Bool {
-        let deadline = Date().addingTimeInterval(1.5)
-        var received = [UInt8]()
-        while Date() < deadline {
-            var pollfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let remaining = max(0, deadline.timeIntervalSinceNow)
-            guard poll(&pollfd, 1, Int32(remaining * 1000)) > 0,
-                  pollfd.revents & Int16(POLLIN) != 0 else { return false }
-            var buffer = [UInt8](repeating: 0, count: 256)
-            let n = recv(fd, &buffer, buffer.count, 0)
-            if n <= 0 { return false }
-            received.append(contentsOf: buffer[0..<n])
-            if received.count > 4, String(decoding: received.prefix(4), as: UTF8.self) == prefix {
-                return true
-            }
-            if received.count > 1024 { return false }
-        }
-        return false
+        return process.terminationStatus == 0
     }
 }

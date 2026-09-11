@@ -373,16 +373,26 @@ final class CodexSession: AgentSessioning {
             commands = []
             loadCommands()
             if let restore = restoredSessionId {
+                if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                    print("CODEX_ATTACH restore=\(restore)")
+                }
                 adoptRebuild = false
                 threadId = restore
                 sessionId = restore
                 rebuildAdoptedThread(restore)
             } else {
                 client.request("thread/loaded/list", [:]) { [weak self] result in
-                    guard let self, self.adoptRebuild,
-                          let value = try? result.get(),
-                          let id = Self.pickLoadedThreadId(value)
-                    else { return }
+                    guard let self, self.adoptRebuild else { return }
+                    guard let value = try? result.get() else {
+                        if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                            print("CODEX_LOADED_LIST failed")
+                        }
+                        return
+                    }
+                    if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                        print("CODEX_LOADED_LIST value=\(value)")
+                    }
+                    guard let id = Self.pickLoadedThreadId(value) else { return }
                     self.adoptRebuild = false
                     self.threadId = id
                     self.sessionId = id
@@ -854,16 +864,29 @@ final class CodexSession: AgentSessioning {
     }
 
     /// Attach-adoption rebuild: swap the page for the thread's
-    /// authoritative history (thread/read), like omp's attach store
-    /// re-read. A GUI restart lands here with an EMPTY page, so the
-    /// reset is lossless; an in-flight turn keeps streaming — its
-    /// remaining items arrive on the live notification flow after the
-    /// settled turns replay.
+    /// authoritative history, like omp's attach store re-read. A GUI
+    /// restart lands here with an EMPTY page, so the reset is lossless;
+    /// an in-flight turn keeps streaming — its remaining items arrive on
+    /// the live notification flow after the settled turns replay.
     private func rebuildAdoptedThread(_ id: String) {
-        client.request("thread/read",
-                       ["threadId": id, "includeTurns": true]) { [weak self] result in
+        replayThreadHistory(id) { [weak self] events in
+            self?.emit(events)
+        }
+    }
+
+    /// Paginated history (0.153+ deprecated includeTurns — a paginated
+    /// thread answers turns:[] to the old flag, probed 2026-09-11 on
+    /// host 5090: 12 turns came back as zero): thread/read for the
+    /// thread metadata (model/effort adoption), then thread/turns/list
+    /// pages — {data:[turn] (oldest→newest), nextCursor} until the
+    /// cursor runs dry. Same mapper as the live flow replays each item.
+    private func replayThreadHistory(_ id: String,
+                                     done: @escaping ([AgentSessionEvent]) -> Void) {
+        client.request("thread/read", ["threadId": id]) { [weak self] result in
             guard let self else { return }
-            var events: [AgentSessionEvent] = [.transcriptReset]
+            let box = Box()
+            box.events = [.transcriptReset]
+            box.turnCount = 0
             if case .success(let value) = result,
                let thread = value["thread"] as? [String: Any] {
                 if let model = thread["model"] as? String {
@@ -873,26 +896,48 @@ final class CodexSession: AgentSessioning {
                    ["minimal", "low", "medium", "high", "xhigh"].contains(effort) {
                     self.reasoningEffort = effort
                 }
-                if let turns = thread["turns"] as? [[String: Any]] {
-                    for turn in turns {
-                        guard let items = turn["items"] as? [[String: Any]] else { continue }
-                        for item in items {
-                            events += self.mapper.map(
-                                method: "item/completed",
-                                params: ["item": item, "threadId": id])
-                        }
-                        events += self.mapper.map(method: "turn/completed",
-                                                  params: ["turn": turn])
-                    }
-                }
             }
-            self.emit(events)
+            self.collectTurns(threadId: id, cursor: nil, box: box) {
+                if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                    print("CODEX_REPLAY id=\(id.prefix(8)) turns=\(box.turnCount) events=\(box.events.count)")
+                }
+                done(box.events)
+            }
+        }
+    }
+
+    private func collectTurns(threadId: String, cursor: String?,
+                              box: Box, done: @escaping () -> Void) {
+        var params: [String: Any] = ["threadId": threadId]
+        if let cursor { params["cursor"] = cursor }
+        client.request("thread/turns/list", params) { [weak self] result in
+            guard let self else { return }
+            guard case .success(let value) = result else {
+                done()
+                return
+            }
+            for turn in value["data"] as? [[String: Any]] ?? [] {
+                box.turnCount += 1
+                for item in turn["items"] as? [[String: Any]] ?? [] {
+                    box.events += self.mapper.map(
+                        method: "item/completed",
+                        params: ["item": item, "threadId": threadId])
+                }
+                box.events += self.mapper.map(method: "turn/completed",
+                                              params: ["turn": turn])
+            }
+            if let next = value["nextCursor"] as? String, !next.isEmpty {
+                self.collectTurns(threadId: threadId, cursor: next,
+                                  box: box, done: done)
+            } else {
+                done()
+            }
         }
     }
 
     func load(sessionId: String, completion: ((Bool) -> Void)? = nil) {
-        // thread/resume reattaches the server-side thread; thread/read
-        // with turns replays items through the same mapper.
+        // thread/resume reattaches the server-side thread; the paginated
+        // replay then swaps the page for its authoritative history.
         var resumeParams: [String: Any] = ["threadId": sessionId]
         if let modelOverride { resumeParams["model"] = modelOverride }
         client.request("thread/resume", resumeParams) { [weak self] result in
@@ -900,36 +945,19 @@ final class CodexSession: AgentSessioning {
             self.threadId = sessionId
             self.sessionId = sessionId
             _ = result
-            self.client.request("thread/read",
-                                ["threadId": sessionId, "includeTurns": true]) { [weak self] result in
-                guard let self else { return }
-                var events: [AgentSessionEvent] = [.transcriptReset]
-                if case .success(let value) = result,
-                   let thread = value["thread"] as? [String: Any] {
-                    if let model = thread["model"] as? String {
-                        self.modelCurrent = model
-                    }
-                    if let effort = thread["reasoningEffort"] as? String,
-                       ["minimal", "low", "medium", "high", "xhigh"].contains(effort) {
-                        self.reasoningEffort = effort
-                    }
-                    if let turns = thread["turns"] as? [[String: Any]] {
-                        for turn in turns {
-                            guard let items = turn["items"] as? [[String: Any]] else { continue }
-                            for item in items {
-                                events += self.mapper.map(
-                                    method: "item/completed",
-                                    params: ["item": item, "threadId": sessionId])
-                            }
-                            events += self.mapper.map(method: "turn/completed",
-                                                      params: ["turn": turn])
-                        }
-                    }
-                }
-                self.emit(events + [.configChanged(self.assembleOptions()), .ready])
+            self.replayThreadHistory(sessionId) { [weak self] events in
+                self?.emit(events + [.configChanged(self?.assembleOptions() ?? []),
+                                     .ready])
                 completion?(true)
             }
         }
+    }
+
+    /// Accumulator for the paginated replay (async pages can't share an
+    /// inout across escaping closures).
+    private final class Box {
+        var events: [AgentSessionEvent] = []
+        var turnCount = 0
     }
 
     func shutdown() {
