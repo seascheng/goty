@@ -1104,6 +1104,30 @@ enum AgentTest {
         check(AgentRuntimeMode.allCases.allSatisfy { !$0.displayName.isEmpty && !$0.hint.isEmpty },
               "every runtime mode has display name and hint")
 
+        // codex adapter: the tier rides every turn/start (no mid-session
+        // mode API — monocode's per-turn resend) and the chip contract
+        // matches the declared capability.
+        let tp = CodexSession.turnParams(threadId: "t1", text: "hi",
+                                         model: nil, mode: .auto)
+        check(tp["threadId"] as? String == "t1"
+              && (tp["input"] as? [[String: Any]])?.first?["text"] as? String == "hi"
+              && tp["approvalPolicy"] as? String == "on-request"
+              && (tp["sandboxPolicy"] as? [String: Any])?["type"] as? String == "workspaceWrite"
+              && tp["approvalsReviewer"] as? String == "auto_review"
+              && tp["model"] == nil,
+              "codex turnParams carries the runtime mode without a model")
+        check(CodexSession.turnParams(threadId: "t", text: "x", model: "gpt-5.3",
+                                      mode: .fullAccess)["model"] as? String == "gpt-5.3",
+              "codex turnParams still carries the picked model")
+        let modeOption = CodexSession.runtimeModeOption(current: .autoEdits)
+        check(modeOption.id == "runtimeMode" && modeOption.name == "权限"
+              && modeOption.currentValue == "autoEdits"
+              && modeOption.options.count == AgentRuntimeMode.allCases.count
+              && modeOption.options.allSatisfy { choice in
+                  AgentRuntimeMode(rawValue: choice.value) != nil
+              },
+              "codex runtimeMode option lists every tier as a choice")
+
         try? FileManager.default.removeItem(atPath: samplePath)
         if failures > 0 { exit(1) }
         print("agenttest: all passed")

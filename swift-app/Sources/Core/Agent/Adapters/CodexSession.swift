@@ -34,6 +34,39 @@ final class CodexSession: AgentSessioning {
     /// Model the user picked from the models chip (applies to the next
     /// turn/start — monocode passes the model per turn).
     private var selectedModel: String?
+    /// Permission/sandbox tier — rides EVERY turn/start (codex has no
+    /// mid-session mode RPC; monocode's per-turn resend).
+    private var runtimeMode: AgentRuntimeMode = .supervised
+    /// Mid-turn sends parked while a turn runs (steer's fallback path).
+    private var pendingMidTurn: [(text: String, images: [AgentImage])] = []
+
+
+    /// The runtimeMode chip's config option (options = all four tiers).
+    static func runtimeModeOption(current: AgentRuntimeMode) -> AgentConfigOption {
+        AgentConfigOption(
+            id: "runtimeMode", name: "权限", category: "权限",
+            currentValue: current.rawValue,
+            options: AgentRuntimeMode.allCases.map { mode in
+                AgentConfigChoice(value: mode.rawValue, name: mode.displayName,
+                                  description: mode.hint, source: nil)
+            })
+    }
+
+    /// turn/start params as a pure function (test seam, monocode's
+    /// buildTurnStartParams): text input + picked model + tier knobs.
+    static func turnParams(threadId: String, text: String,
+                           model: String?, mode: AgentRuntimeMode) -> [String: Any] {
+        var params: [String: Any] = [
+            "threadId": threadId,
+            "input": [["type": "text", "text": text]],
+        ]
+        if let model { params["model"] = model }
+        for (key, value) in RuntimeModeMapping.codexParams(mode) {
+            params[key] = value
+        }
+        return params
+    }
+
     /// GOTY_CODEX_MODEL debug knob: this machine's relay default model
     /// is unusable for text; tests override without config surgery.
     private var modelOverride: String? {
@@ -169,6 +202,9 @@ final class CodexSession: AgentSessioning {
     private func startThread(completion: ((Bool) -> Void)?) {
         var params: [String: Any] = ["cwd": cwd ?? NSHomeDirectory()]
         if let modelOverride { params["model"] = modelOverride }
+        for (key, value) in RuntimeModeMapping.codexThreadParams(runtimeMode) {
+            params[key] = value
+        }
         client.request("thread/start", params) { [weak self] result in
             if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
                 print("CODEX thread/start result: \(result)")
@@ -184,9 +220,14 @@ final class CodexSession: AgentSessioning {
             self.threadId = id
             self.sessionId = id
             if let model = value["model"] as? String {
-                self.configOptions = [AgentConfigOption(id: "model", name: "模型",
-                                                        category: nil,
-                                                        currentValue: model, options: [])]
+                self.configOptions = [
+                    AgentConfigOption(id: "model", name: "模型",
+                                      category: nil,
+                                      currentValue: model, options: []),
+                    Self.runtimeModeOption(current: self.runtimeMode),
+                ]
+            } else {
+                self.configOptions = [Self.runtimeModeOption(current: self.runtimeMode)]
             }
             // Model catalog (monocode parity): model/list pages the
             // picker's options in after ready — the thread already
@@ -238,10 +279,11 @@ final class CodexSession: AgentSessioning {
                    idx > 0 {
                     choices.swapAt(0, idx)
                 }
-                let current = self.configOptions.first?.currentValue
+                let current = self.configOptions.first(where: { $0.id == "model" })?.currentValue
                 self.configOptions = [AgentConfigOption(
                     id: "model", name: "模型", category: nil,
                     currentValue: current ?? defaultValue, options: choices)]
+                    + [Self.runtimeModeOption(current: self.runtimeMode)]
                 self.emit([.configChanged(self.configOptions)])
             }
         }
@@ -271,13 +313,8 @@ final class CodexSession: AgentSessioning {
                 emit([.notice("⚠︎ 一张图片未能保存，已跳过")])
             }
         }
-        var turnParams: [String: Any] = [
-            "threadId": threadId,
-            "input": [["type": "text", "text": prompt]],
-        ]
-        // The models chip's pick applies to THIS turn (monocode passes
-        // the model per turn/start).
-        if let selectedModel { turnParams["model"] = selectedModel }
+        let turnParams = Self.turnParams(threadId: threadId, text: prompt,
+                                          model: selectedModel, mode: runtimeMode)
         client.request("turn/start", turnParams) { [weak self] _ in
             // turn outcome arrives as turn/completed notification; the
             // request result only acknowledges the turn object.
@@ -315,19 +352,30 @@ final class CodexSession: AgentSessioning {
     }
 
     func setConfigOption(id: String, value: String) {
+        if id == "runtimeMode" {
+            guard let mode = AgentRuntimeMode(rawValue: value) else {
+                emit([.notice("未知的权限档位：\(value)")])
+                return
+            }
+            runtimeMode = mode
+            emit([.configChanged(configOptions + [Self.runtimeModeOption(current: mode)])])
+            return
+        }
         guard id == "model" else { return }
         // Applies on the NEXT turn/start; the chip's currentValue
         // reflects it immediately.
         selectedModel = value
-        if var option = configOptions.first {
-            configOptions = [AgentConfigOption(id: option.id, name: option.name,
-                                               category: option.category,
-                                               currentValue: value,
-                                               options: option.options)]
-            emit([.configChanged(configOptions)])
+        var options = configOptions.filter { $0.id != "runtimeMode" }
+        if var option = options.first {
+            options[0] = AgentConfigOption(id: option.id, name: option.name,
+                                           category: option.category,
+                                           currentValue: value,
+                                           options: option.options)
         }
+        options.append(Self.runtimeModeOption(current: runtimeMode))
+        configOptions = options
+        emit([.configChanged(configOptions)])
     }
-
     func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void) {
         // Store listing FIRST (daemon capability 7, store:"codex"): the
         // rollout files are the authority and cover sessions created in
@@ -441,15 +489,13 @@ final class CodexSession: AgentSessioning {
     /// has no steer RPC and the protocol default no-op'd, so a mid-turn
     /// interrupt was dropped silently. Parked, then sent when the turn
     /// settles (send() re-runs its /compact translation then).
-    /// Follow-ups no longer route here: the pane's outbox owns queuing.
-    private var pendingMidTurn: [(text: String, images: [AgentImage])] = []
-
     var capabilities: AgentCapabilities {
         // .sessions gates the history chip: thread/list + thread/resume
         // + thread/read are implemented — the picker and reload work.
-        [.steer, .sessions]
+        // .runtimeModes: the 权限 chip — every turn/start re-sends the
+        // tier knobs (approvalPolicy/sandboxPolicy/approvalsReviewer).
+        [.steer, .sessions, .runtimeModes]
     }
-
     /// Mid-turn steering, codex-native: `turn/steer` fenced to the live
     /// turn (expectedTurnId — monocode/happier parity). Falls back to
     /// the park-and-send queue when the turn id isn't known yet (the

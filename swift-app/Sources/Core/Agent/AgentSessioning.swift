@@ -14,16 +14,18 @@ struct AgentCapabilities: OptionSet {
     static let fork = AgentCapabilities(rawValue: 1 << 3)
     static let export = AgentCapabilities(rawValue: 1 << 4)
     static let stats = AgentCapabilities(rawValue: 1 << 5)
+    static let runtimeModes = AgentCapabilities(rawValue: 1 << 6)
 
     /// Stable names for the web bridge (store.meta.capabilities).
     var names: [String] {
-        var out: [String] = []
+        var out = [String]()
         if contains(.steer) { out.append("steer") }
         if contains(.sessions) { out.append("sessions") }
         if contains(.fastMode) { out.append("fastMode") }
         if contains(.fork) { out.append("fork") }
         if contains(.export) { out.append("export") }
         if contains(.stats) { out.append("stats") }
+        if contains(.runtimeModes) { out.append("runtimeModes") }
         return out
     }
 }
