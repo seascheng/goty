@@ -1161,12 +1161,35 @@ enum AgentTest {
               && catalog[0].skillPath == "/w/.agents/skills/deploy/SKILL.md"
               && catalog.filter { $0.name == "paseo" }.count == 1,
               "skills/list catalog: enabled only, deduped across roots, path kept")
-        // The directory is paseo's UNION: host-translated builtin
-        // (compact) + skills/list + custom prompts — sorted by name.
-        let builtin = CodexSession.builtinCommands()
-        check(builtin.count == 1 && builtin[0].name == "compact"
-              && builtin[0].skillPath == nil && builtin[0].promptPath == nil,
-              "codex builtin directory carries the compact translation entry")
+        // The directory = the TUI's OWN slash menu (codex-rs
+        // slash_command.rs, release-visible set, enum order = popup
+        // order). Skills are NOT flattened in — they live under
+        // /skills and trigger with $name mentions.
+        let tui = CodexSession.tuiCommands()
+        check(tui.count == 56
+              && tui[0].name == "model"
+              && tui.map(\.name).contains("goal")
+              && tui.map(\.name).contains("rename")
+              && tui.map(\.name).contains("skills")
+              && tui.map(\.name).contains("compact")
+              && tui[0].name < tui[tui.count - 1].name,
+              "codex / menu mirrors the TUI command table (goal, rename, skills in; source order)")
+        check(tui.first { $0.name == "goal" }?.inputHint == "<objective>|pause|resume|clear"
+              && tui.first { $0.name == "rename" }?.description == "rename the current thread",
+              "goal carries its subcommand hint; descriptions are the TUI's own")
+
+        // /goal frames (paseo's GoalSubcommand → thread/goal/* RPCs).
+        let goalSet = CodexSession.goalParams(threadId: "t", args: "ship it")
+        check(goalSet?.method == "thread/goal/set"
+              && goalSet?.params["objective"] as? String == "ship it"
+              && goalSet?.params["status"] as? String == "active",
+              "goal <objective> sets an active goal")
+        check(CodexSession.goalParams(threadId: "t", args: "pause")?.params["status"]
+                as? String == "paused"
+              && CodexSession.goalParams(threadId: "t", args: "clear")?.method
+                == "thread/goal/clear"
+              && CodexSession.goalParams(threadId: "t", args: "") == nil,
+              "goal pause/clear map to their RPCs; bare goal asks for usage")
 
         // Custom prompts: ~/.codex/prompts/*.md, name prefixed
         // "prompts:", frontmatter feeds description + argument-hint.
@@ -1201,16 +1224,16 @@ enum AgentTest {
                 "---\ndescription: x\n---\nBody line.") == "Body line.",
               "frontmatter strip leaves the body")
 
-        // matchSkill: /name rest → the directory entry (skillPath
-        // present); native commands and plain text pass through.
+        // matchSkill: $name rest → the agent-declared skill (the TUI
+        // mention syntax); slash and unknown tokens are not skills.
         let dir = [AgentSlashCommand(name: "deploy", description: nil,
                                      inputHint: nil,
                                      skillPath: "/w/deploy/SKILL.md")]
-        let m = CodexSession.matchSkill("/deploy staging now", commands: dir)
+        let m = CodexSession.matchSkill("$deploy staging now", commands: dir)
         check(m?.command.name == "deploy" && m?.rest == "staging now",
-              "matchSkill splits /name and trailing args")
-        check(CodexSession.matchSkill("/native", commands: dir) == nil,
-              "unknown slash is not a skill — token reaches the agent verbatim")
+              "matchSkill splits $name and trailing args")
+        check(CodexSession.matchSkill("$native", commands: dir) == nil,
+              "unknown $mention is not a skill — text reaches the agent verbatim")
         let modeOption = CodexSession.runtimeModeOption(current: .autoEdits)
         check(modeOption.id == "runtimeMode" && modeOption.name == "权限"
               && modeOption.currentValue == "autoEdits"

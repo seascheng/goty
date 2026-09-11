@@ -16,6 +16,9 @@ final class CodexSession: AgentSessioning {
     private(set) var isWorking = false
     private(set) var configOptions: [AgentConfigOption] = []
     private(set) var commands: [AgentSlashCommand] = []
+    /// The agent's declared skills (skills/list) — invoked with `$name`
+    /// mentions, never listed flat in the / menu.
+    private var skillCommands: [AgentSlashCommand] = []
 
     private let paneId: String
     private let environment: [String: String]
@@ -111,24 +114,74 @@ final class CodexSession: AgentSessioning {
             ])
     }
 
-    /// The command directory — paseo's listCommands() union, verbatim:
-    /// 1. host-translated builtin commands (compact → thread/compact/
-    ///    start; the TUI ships the same command);
-    /// 2. the agent's OWN `skills/list` declaration (enabled-only,
-    ///    deduped across skill roots — execution rides the structured
-    ///    skill input entry, the host reads no bodies);
-    /// 3. codex custom prompts (`~/.codex/prompts/*.md`, name prefixed
-    ///    `prompts:`) — executed by expanding the file per codex's
-    ///    placeholder rules.
-    /// Sorted by name. Older app-servers without skills/list degrade
-    /// to builtin + prompts.
-    static func builtinCommands() -> [AgentSlashCommand] {
-        [
-            AgentSlashCommand(
-                name: "compact",
-                description: "Summarize conversation to prevent hitting the context limit",
-                inputHint: nil),
+    /// The command directory = the TUI's OWN slash menu, verbatim from
+    /// codex-rs tui/src/slash_command.rs (release-visible set, enum
+    /// order = popup order). Skills are NOT flattened in — the TUI
+    /// lists them under `/skills` and invokes them with a `$name`
+    /// mention; custom prompts (`~/.codex/prompts/*.md`) ride after
+    /// the builtins (paseo's listCodexCustomPrompts).
+    static func tuiCommands() -> [AgentSlashCommand] {
+        let table: [(String, String, String?)] = [
+            ("model", "choose what model and reasoning effort to use", nil),
+            ("ide", "include current selection, open files, and other context from your IDE", nil),
+            ("permissions", "choose what Codex is allowed to do", nil),
+            ("keymap", "remap TUI shortcuts", nil),
+            ("vim", "toggle Vim mode for the composer", nil),
+            ("setup-default-sandbox", "set up elevated agent sandbox", nil),
+            ("experimental", "toggle experimental features", nil),
+            ("approve", "approve one retry of a recent auto-review denial", nil),
+            ("memories", "configure memory use and generation", nil),
+            ("skills", "use skills to improve how Codex performs specific tasks", "$name"),
+            ("import", "import setup, this project, and recent chats from Claude Code", nil),
+            ("hooks", "view and manage lifecycle hooks", nil),
+            ("review", "review my current changes and find issues", nil),
+            ("rename", "rename the current thread", "<title>"),
+            ("new", "start a new chat during a conversation", nil),
+            ("archive", "archive this session", nil),
+            ("delete", "permanently delete this session", nil),
+            ("resume", "resume a saved chat", nil),
+            ("fork", "fork the current chat", nil),
+            ("worktree", "start or continue a conversation in a new worktree", nil),
+            ("app", "continue this session in the Desktop app", nil),
+            ("init", "create an AGENTS.md file with instructions for Codex", nil),
+            ("compact", "summarize conversation to prevent hitting the context limit", nil),
+            ("recap", "summarize the current conversation now", nil),
+            ("plan", "switch to Plan mode", nil),
+            ("voice", "start or stop voice; use /voice settings to choose a voice", nil),
+            ("goal", "set or view the goal for a long-running task", "<objective>|pause|resume|clear"),
+            ("agents", "view and switch between all active agent sessions", nil),
+            ("side", "start a side conversation in an ephemeral fork", nil),
+            ("btw", "start a side conversation in an ephemeral fork", nil),
+            ("copy", "copy the last response or part of it", nil),
+            ("export", "export the conversation as markdown", nil),
+            ("raw", "toggle raw scrollback mode for copy-friendly terminal selection", nil),
+            ("diff", "show git diff (including untracked files)", nil),
+            ("mention", "mention a file", nil),
+            ("status", "show current session configuration and token usage", nil),
+            ("cd", "change the current working directory", "<dir>"),
+            ("pwd", "show the current working directory", nil),
+            ("usage", "view account usage or use a usage limit reset", nil),
+            ("debug-config", "show config layers and requirement sources for debugging", nil),
+            ("title", "configure which items appear in the terminal title", nil),
+            ("statusline", "configure which items appear in the status line", nil),
+            ("theme", "choose a syntax highlighting theme", nil),
+            ("pets", "choose or hide the terminal pet", nil),
+            ("mcp", "list configured MCP tools; use /mcp verbose for details", nil),
+            ("apps", "manage apps", nil),
+            ("plugins", "browse plugins", nil),
+            ("logout", "log out of Codex", nil),
+            ("quit", "exit Codex", nil),
+            ("exit", "exit Codex", nil),
+            ("feedback", "send logs to maintainers", nil),
+            ("ps", "list background terminals", nil),
+            ("stop", "stop all background terminals", nil),
+            ("clear", "clear the terminal and start a new chat", nil),
+            ("personality", "choose a communication style for Codex", nil),
+            ("subagents", "switch between this session's subagents", nil),
         ]
+        return table.map {
+            AgentSlashCommand(name: $0.0, description: $0.1, inputHint: $0.2)
+        }
     }
 
     static func parseSkillCatalog(groups: [[String: Any]]) -> [AgentSlashCommand] {
@@ -205,11 +258,13 @@ final class CodexSession: AgentSessioning {
         client.request("skills/list", params) { [weak self] result in
             guard let self else { return }
             let groups = (try? result.get())?["data"] as? [[String: Any]] ?? []
-            let skills = Self.parseSkillCatalog(groups: groups)
+            // Skills live OUTSIDE the / menu (the TUI shows them under
+            // /skills and invokes via $name mentions); keep the list
+            // for the $ trigger.
+            self.skillCommands = Self.parseSkillCatalog(groups: groups)
             let prompts = Self.scanCustomPrompts(
                 codexHome: NSHomeDirectory() + "/.codex")
-            self.commands = (Self.builtinCommands() + skills + prompts)
-                .sorted { $0.name < $1.name }
+            self.commands = Self.tuiCommands() + prompts
             self.emit([.commandsChanged(self.commands)])
         }
     }
@@ -468,32 +523,29 @@ final class CodexSession: AgentSessioning {
 
     func send(_ text: String, images: [AgentImage]) {
         guard let threadId, !isWorking else { return }
-        // Slash execution, paseo's three paths: host-translated
-        // builtin (compact → thread/compact/start), skills (structured
-        // input entry, the agent reads SKILL.md itself), custom
-        // prompts (file body expanded per codex placeholder rules).
-        // Native tokens reach the agent verbatim.
+        // Slash = the TUI's command table. Host-translated RPCs run
+        // out of band (compact, goal); commands the GUI carries as
+        // chips say so; the rest admit they're not wired. Skills are
+        // NOT slash commands — a `$name` mention rides the structured
+        // input entry (the agent reads SKILL.md itself). Custom
+        // prompts expand per codex's placeholder rules.
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let builtin = Self.matchCommand(trimmed, commands: Self.builtinCommands()) {
-            switch builtin.command.name {
-            case "compact":
-                client.request("thread/compact/start", ["threadId": threadId]) { _ in }
-            default:
-                break
+        if trimmed.hasPrefix("/") {
+            if let m = Self.matchCommand(trimmed, commands: Self.tuiCommands()) {
+                executeTuiCommand(m.command.name, args: m.rest, threadId: threadId)
+                return
             }
-            return
         }
         var prompt = text
         var skill: (name: String, path: String)?
         if trimmed.hasPrefix("/") {
-            if let match = Self.matchSkill(trimmed, commands: commands) {
-                skill = (name: match.command.name, path: match.command.skillPath ?? "")
-                prompt = match.rest.isEmpty
-                    ? "$\(match.command.name)"
-                    : "$\(match.command.name) \(match.rest)"
-            } else if let match = Self.matchPrompt(trimmed, commands: commands) {
+            if let match = Self.matchPrompt(trimmed, commands: commands) {
                 prompt = Self.expandCustomPrompt(template: match.body, args: match.rest)
             }
+        } else if trimmed.hasPrefix("$"),
+                  let match = Self.matchSkill(trimmed, commands: skillCommands) {
+            skill = (name: match.command.name, path: match.command.skillPath ?? "")
+            prompt = trimmed
         }
         for image in images {
             if let path = Self.stageImage(image) {
@@ -516,21 +568,72 @@ final class CodexSession: AgentSessioning {
         }
     }
 
-    /// `/name rest…` against a host-translated builtin directory.
+    /// Host-translated TUI commands (RPC evidence from paseo's
+    /// executeCompactCommand / executeGoalSubcommand). Commands whose
+    /// TUI surface is a GUI chip here say so; the rest are honestly
+    /// reported as not wired rather than faked.
+    private func executeTuiCommand(_ name: String, args: String, threadId: String) {
+        switch name {
+        case "compact":
+            client.request("thread/compact/start", ["threadId": threadId]) { _ in }
+        case "goal":
+            let goal = Self.goalParams(threadId: threadId, args: args)
+            if let goal {
+                client.request(goal.method, goal.params) { _ in }
+            } else {
+                emit([.notice("用法：/goal <objective>|pause|resume|clear")])
+            }
+        case "model":
+            emit([.notice("模型与推理力度由底部「模型 / 思考」chip 承载")])
+        case "permissions":
+            emit([.notice("权限由底部「权限」chip 承载")])
+        case "skills":
+            let count = skillCommands.count
+            emit([.notice(count > 0
+                  ? "技能以 $ 前缀调用：输入 $ 加技能名（\(count) 个可用）"
+                  : "当前无可用技能")])
+        default:
+            emit([.notice("「/\(name)」暂未接入此 GUI")])
+        }
+    }
+
+    /// `/goal` subcommand → RPC frame (paseo's GoalSubcommand mapping):
+    /// set → thread/goal/set {threadId, objective, status:active};
+    /// pause/resume → status only; clear → thread/goal/clear.
+    /// nil = bare /goal (usage notice).
+    static func goalParams(threadId: String, args: String)
+        -> (method: String, params: [String: Any])? {
+        let rest = args.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch rest {
+        case "":
+            return nil
+        case "pause":
+            return ("thread/goal/set", ["threadId": threadId, "status": "paused"])
+        case "resume":
+            return ("thread/goal/set", ["threadId": threadId, "status": "active"])
+        case "clear":
+            return ("thread/goal/clear", ["threadId": threadId])
+        default:
+            return ("thread/goal/set",
+                    ["threadId": threadId, "objective": rest, "status": "active"])
+        }
+    }
+
+    /// `/name rest…` against a command directory.
     static func matchCommand(_ text: String, commands: [AgentSlashCommand])
         -> (command: AgentSlashCommand, rest: String)? {
         guard text.hasPrefix("/") else { return nil }
-        let body = text.dropFirst()
-        let (name, rest) = Self.splitSlash(body)
+        let (name, rest) = Self.splitSlash(text.dropFirst())
         guard let command = commands.first(where: { $0.name == name }) else { return nil }
         return (command, rest)
     }
 
-    /// `/name rest…` against the skills directory (entries with a
-    /// skillPath). Returns the command and trailing args.
+    /// `$name rest…` against the agent's declared skills (the TUI's
+    /// mention syntax — paseo/happier send the same token in the turn
+    /// text alongside the structured entry).
     static func matchSkill(_ text: String, commands: [AgentSlashCommand])
         -> (command: AgentSlashCommand, rest: String)? {
-        guard text.hasPrefix("/") else { return nil }
+        guard text.hasPrefix("$") else { return nil }
         let (name, rest) = Self.splitSlash(text.dropFirst())
         guard let command = commands.first(where: {
             $0.name == name && $0.skillPath != nil
