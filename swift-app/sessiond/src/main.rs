@@ -113,7 +113,9 @@ fn main() -> anyhow::Result<()> {
                     return;
                 }
                 let len = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
-                if len <= protocol::MAX_FRAME && (1..=11).contains(&head[4]) {
+                if len <= protocol::MAX_FRAME
+                    && (1..=protocol::kind::SKILLS_LIST).contains(&head[4])
+                {
                     let _ = serve(&head, stream, registry);
                 } else if head[0] == b'{' {
                     let _ = serve_report(&head, stream, &registry);
@@ -319,6 +321,15 @@ fn dispatch(
                 }
                 Err(e) => write_error(&stream, format!("session fork: {e}")),
             }
+        }
+        protocol::kind::SKILLS_LIST => {
+            let request: protocol::SkillsListRequest = protocol::from_json(&payload)?;
+            let reply = protocol::SkillsListReply {
+                skills: list_skills(&request.cwd),
+            };
+            let payload = protocol::json(&reply)?;
+            protocol::write_frame(&stream, protocol::kind::SKILLS_LIST_REPLY, &payload)
+                .map_err(anyhow::Error::from)
         }
         protocol::kind::VERSION => {
             // Decimal ASCII, exactly how capability 1 daemons answered —
@@ -558,6 +569,92 @@ fn list_omp_sessions(cwd_filter: &Option<String>) -> Vec<protocol::SessionSummar
     }
     rows.sort_by_key(|row| std::cmp::Reverse(row.mtime_ms));
     rows
+}
+
+/// Capability 10: skill/prompt files — the same discovery monocode
+fn list_skills(cwd_filter: &Option<String>) -> Vec<protocol::SkillRow> {
+    let project = cwd_filter.as_deref().map(Path::new);
+    let home = store_root_path("").ok();
+    list_skills_from(project, home.as_deref())
+}
+
+fn list_skills_from(project: Option<&Path>, home: Option<&Path>) -> Vec<protocol::SkillRow> {
+    let mut out: Vec<protocol::SkillRow> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let add_dir = |dir: &Path,
+                   source: &str,
+                   out: &mut Vec<protocol::SkillRow>,
+                   seen: &mut std::collections::HashSet<String>| {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries.flatten().collect::<Vec<_>>(),
+            Err(_) => return,
+        };
+        for entry in entries {
+            let path = entry.path().join("SKILL.md");
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let (name, description, body) = parse_skill_markdown(&raw);
+            let Some(name) = name else { continue };
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            out.push(protocol::SkillRow {
+                name,
+                description,
+                source: source.to_string(),
+                body,
+            });
+        }
+    };
+    if let Some(project) = project {
+        add_dir(
+            &project.join(".agents/skills"),
+            "agents",
+            &mut out,
+            &mut seen,
+        );
+        add_dir(&project.join(".codex/skills"), "codex", &mut out, &mut seen);
+        add_dir(
+            &project.join(".claude/skills"),
+            "claude",
+            &mut out,
+            &mut seen,
+        );
+        add_dir(&project.join(".pi/skills"), "pi", &mut out, &mut seen);
+        add_dir(&project.join(".omp/skills"), "omp", &mut out, &mut seen);
+    }
+    if let Some(home) = home {
+        add_dir(&home.join(".codex/skills"), "codex", &mut out, &mut seen);
+        add_dir(&home.join(".claude/skills"), "claude", &mut out, &mut seen);
+        add_dir(&home.join(".agents/skills"), "agents", &mut out, &mut seen);
+    }
+    out
+}
+
+/// Split a SKILL.md: frontmatter `name`/`description` + the markdown
+/// body after the closing fence. Missing frontmatter falls back to the
+/// directory name.
+fn parse_skill_markdown(raw: &str) -> (Option<String>, Option<String>, String) {
+    let trimmed = raw.trim_start();
+    let Some(after_fence) = trimmed.strip_prefix("---") else {
+        return (None, None, raw.to_string());
+    };
+    let Some(end) = after_fence.find("\n---") else {
+        return (None, None, raw.to_string());
+    };
+    let front = &after_fence[..end];
+    let body = after_fence[end + 4..].trim_start_matches('\n').to_string();
+    let mut name = None;
+    let mut description = None;
+    for line in front.lines() {
+        if let Some(value) = line.strip_prefix("name:") {
+            name = Some(value.trim().trim_matches('"').to_string());
+        } else if let Some(value) = line.strip_prefix("description:") {
+            description = Some(value.trim().trim_matches('"').to_string());
+        }
+    }
+    (name, description, body)
 }
 
 /// Capability 7: codex rollout listing (`~/.codex/sessions/YYYY/MM/DD/
@@ -1340,6 +1437,61 @@ mod tests {
             merge_codex_rows(vec![], vec![row("t9", Some("仅扫描"), "/p/x.jsonl", 1)]).len(),
             1
         );
+    }
+
+    #[test]
+    fn skill_markdown_parses_frontmatter_and_body() {
+        let raw = "---\nname: ship\ndescription: \"Ship it\"\n---\nDo the thing.";
+        let (name, description, body) = parse_skill_markdown(raw);
+        assert_eq!(name.as_deref(), Some("ship"));
+        assert_eq!(description.as_deref(), Some("Ship it"));
+        assert_eq!(body, "Do the thing.");
+        // No frontmatter: whole file is the body, name comes from the
+        // dir upstream.
+        let (name, _, body) = parse_skill_markdown("just a prompt");
+        assert_eq!(name, None);
+        assert_eq!(body, "just a prompt");
+    }
+
+    #[test]
+    fn skills_list_reads_project_and_user_dirs() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir().join(format!("goty-skills-{}", std::process::id()));
+        let project = dir.join("proj");
+        let home = dir.join("home");
+        std::fs::create_dir_all(project.join(".codex/skills/deploy"))?;
+        std::fs::create_dir_all(project.join(".agents/skills/shared"))?;
+        std::fs::create_dir_all(home.join(".codex/skills/personal"))?;
+        std::fs::write(
+            project.join(".codex/skills/deploy/SKILL.md"),
+            "---\nname: deploy\ndescription: Deploy the app\n---\nDeploy now.",
+        )?;
+        std::fs::write(
+            project.join(".agents/skills/shared/SKILL.md"),
+            "---\nname: shared\ndescription: Project wins\n---\nProject body.",
+        )?;
+        std::fs::write(
+            home.join(".codex/skills/personal/SKILL.md"),
+            "---\nname: personal\n---\nPersonal body.",
+        )?;
+        // A user-level skill shadowed by the project's name loses.
+        std::fs::create_dir_all(home.join(".agents/skills/shared"))?;
+        std::fs::write(
+            home.join(".agents/skills/shared/SKILL.md"),
+            "---\nname: shared\n---\nUser body.",
+        )?;
+
+        let skills = crate::list_skills_from(Some(project.as_path()), Some(home.as_path()));
+        let by_name = |n: &str| skills.iter().find(|s| s.name == n);
+        assert_eq!(
+            by_name("shared").map(|s| s.body.as_str()),
+            Some("Project body.")
+        );
+        assert_eq!(
+            by_name("personal").map(|s| s.source.as_str()),
+            Some("codex")
+        );
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 
     #[test]

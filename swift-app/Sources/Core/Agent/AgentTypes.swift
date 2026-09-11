@@ -327,20 +327,28 @@ struct AgentSlashCommand {
     let name: String
     let description: String?
     let inputHint: String?
+    /// File-backed skills/prompts (codex & friends): the SKILL.md body
+    /// the HOST injects as the prompt — the agent never parses the
+    /// slash token itself. nil = native command (the token reaches the
+    /// agent verbatim).
+    let promptBody: String?
 
     init?(raw: [String: Any]) {
         guard let name = raw["name"] as? String else { return nil }
         self.name = name
         self.description = raw["description"] as? String
         self.inputHint = (raw["input"] as? [String: Any])?["hint"] as? String
+        self.promptBody = nil
     }
 
     /// Explicit memberwise (failable wire init suppresses the
     /// synthesized one) — native adapters build commands directly.
-    init(name: String, description: String?, inputHint: String?) {
+    init(name: String, description: String?, inputHint: String?,
+         promptBody: String? = nil) {
         self.name = name
         self.description = description
         self.inputHint = inputHint
+        self.promptBody = promptBody
     }
     static func list(_ raw: Any?) -> [AgentSlashCommand] {
         (raw as? [[String: Any]] ?? []).compactMap { AgentSlashCommand(raw: $0) }

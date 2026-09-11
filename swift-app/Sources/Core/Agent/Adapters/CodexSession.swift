@@ -64,6 +64,44 @@ final class CodexSession: AgentSessioning {
         ]
     }
 
+    /// Host-side builtin command set (the TUI's translatable core):
+    /// /compact is the one true RPC; file-backed skills join after the
+    /// daemon's SKILLS_LIST lands.
+    static func builtinCommands() -> [AgentSlashCommand] {
+        [
+            AgentSlashCommand(name: "compact",
+                              description: "压缩对话以释放上下文",
+                              inputHint: nil),
+            AgentSlashCommand(name: "init",
+                              description: "为当前项目生成 AGENTS.md",
+                              inputHint: nil,
+                              promptBody: """
+                              Please analyze this codebase and create an AGENTS.md \
+                              file with: build/test/lint commands, code style \
+                              conventions, architecture notes, and repo-specific \
+                              gotchas. Keep it concise and actionable.
+                              """),
+        ]
+    }
+
+    /// Capability-10 SKILLS_LIST over the daemon (project + user skill
+    /// dirs on the daemon's machine — the only correct view for remote
+    /// panes). Builtin commands always win the name.
+    private func loadSkillCommands() {
+        guard let rows = daemon.skillsList(cwd: cwd) else { return }
+        let builtin = Set(Self.builtinCommands().map { $0.name })
+        let skills = rows
+            .filter { !$0.name.isEmpty && !builtin.contains($0.name) }
+            .map { row in
+                AgentSlashCommand(name: row.name,
+                                  description: row.description,
+                                  inputHint: nil,
+                                  promptBody: row.body)
+            }
+        commands = Self.builtinCommands() + skills
+        emit([.commandsChanged(commands)])
+    }
+
     /// turn/start params as a pure function (test seam, monocode's
     /// buildTurnStartParams): text input + picked model + tier knobs.
     static func turnParams(threadId: String, text: String,
@@ -170,7 +208,9 @@ final class CodexSession: AgentSessioning {
             configOptions = assembleOptions()
             loadModelCatalog()
             adoptRebuild = true
-            emit([.configChanged(configOptions), .ready])
+            commands = Self.builtinCommands()
+            loadSkillCommands()
+            emit([.configChanged(configOptions), .commandsChanged(commands), .ready])
             completion?(true)
             return
         }
@@ -278,14 +318,11 @@ final class CodexSession: AgentSessioning {
             // works with its default while the catalog loads.
             self.loadModelCatalog()
             var readyEvents: [AgentSessionEvent] = [.configChanged(self.configOptions), .ready]
-            // v1 command directory: /compact maps to thread/compact/start
-            // (codex exposes no command-list RPC; skills arrive later).
-            let compact = AgentSlashCommand(
-                name: "compact",
-                description: "压缩对话以释放上下文",
-                inputHint: nil)
-            self.commands = [compact]
-            readyEvents.append(.commandsChanged([compact]))
+            // v1 command directory: builtins now, file skills right
+            // after (daemon SKILLS_LIST — codex has no command RPC).
+            self.commands = Self.builtinCommands()
+            readyEvents.append(.commandsChanged(self.commands))
+            self.loadSkillCommands()
             self.emit(readyEvents)
             completion?(true)
         }
@@ -337,17 +374,14 @@ final class CodexSession: AgentSessioning {
     func send(_ text: String, images: [AgentImage]) {
         guard let threadId, !isWorking else { return }
         // Builtin slash handling: app-server takes raw text; /compact
-        // is ours to translate.
-        if text.trimmingCharacters(in: .whitespacesAndNewlines) == "/compact" {
+        // is ours to translate, everything else with a promptBody is
+        // host-injected (the agent never parses the slash token).
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "/compact" {
             client.request("thread/compact/start", ["threadId": threadId]) { _ in }
             return
         }
-        isWorking = true
-        // turn/start input carries text blocks only (no base64 image
-        // block in the app-server dialect we bind to) — tty7's
-        // convention instead: stage the bytes next to the agent and
-        // name the paths; codex loads readable image paths as images.
-        var prompt = text
+        var prompt = Self.expandSlash(text, commands: commands)
         for image in images {
             if let path = Self.stageImage(image) {
                 prompt += "\n\(path)"
@@ -381,6 +415,26 @@ final class CodexSession: AgentSessioning {
         } catch {
             return nil
         }
+    }
+
+    /// Pure form of the send() slash expansion (test seam): a command
+    /// with a promptBody replaces the token with body + trailing args;
+    /// native commands and plain text pass through verbatim.
+    static func expandSlash(_ text: String,
+                            commands: [AgentSlashCommand]) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/") else { return text }
+        let body = trimmed.dropFirst()
+        let (name, rest) = if let space = body.firstIndex(where: { $0 == " " || $0 == "\n" }) {
+            (String(body[..<space]),
+             String(body[body.index(after: space)...])
+                .trimmingCharacters(in: .whitespacesAndNewlines))
+        } else {
+            (String(body), "")
+        }
+        guard let command = commands.first(where: { $0.name == name }),
+              let promptBody = command.promptBody else { return text }
+        return rest.isEmpty ? promptBody : promptBody + "\n\n" + rest
     }
 
     func cancel() {

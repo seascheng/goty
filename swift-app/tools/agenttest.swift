@@ -1165,6 +1165,32 @@ enum AgentTest {
               && thinking.options.count == 5,
               "codex thinking option lists all five efforts")
 
+        // codex command directory: builtins + skill prompt expansion.
+        let builtins = CodexSession.builtinCommands()
+        check(builtins.contains { $0.name == "compact" }
+              && builtins.contains { $0.name == "init" && $0.promptBody != nil },
+              "codex builtin commands include compact and init (with prompt body)")
+        check(CodexSession.expandSlash(
+                  "/deploy staging now", commands: [
+                      AgentSlashCommand(name: "deploy", description: nil,
+                                        inputHint: nil, promptBody: "Deploy BODY."),
+                  ]) == "Deploy BODY.\n\nstaging now",
+              "slash with promptBody expands to body + args")
+        check(CodexSession.expandSlash(
+                  "/deploy", commands: [
+                      AgentSlashCommand(name: "deploy", description: nil,
+                                        inputHint: nil, promptBody: "Deploy BODY."),
+                  ]) == "Deploy BODY.",
+              "slash without args expands to the bare body")
+        check(CodexSession.expandSlash(
+                  "/native arg", commands: [
+                      AgentSlashCommand(name: "native", description: nil,
+                                        inputHint: nil),
+                  ]) == "/native arg",
+              "native command without a body passes through verbatim")
+        check(CodexSession.expandSlash("plain text", commands: []) == "plain text",
+              "non-slash text is untouched")
+
         // Manifest honesty (happier's invariant-test pattern): an
         // adapter that declares .runtimeModes must surface the chip
         // contract (runtimeMode option), and one that doesn't must
