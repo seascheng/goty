@@ -903,7 +903,7 @@ final class CodexSession: AgentSessioning {
             self.client.request("thread/read",
                                 ["threadId": sessionId, "includeTurns": true]) { [weak self] result in
                 guard let self else { return }
-                var events: [AgentSessionEvent] = []
+                var events: [AgentSessionEvent] = [.transcriptReset]
                 if case .success(let value) = result,
                    let thread = value["thread"] as? [String: Any] {
                     if let model = thread["model"] as? String {
