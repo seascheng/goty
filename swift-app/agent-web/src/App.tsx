@@ -71,7 +71,7 @@ function wordSegments(oldLine: string, newLine: string): {
   return { del, ins };
 }
 
-const KNOB_ORDER: Record<string, number> = { model: 0, runtimeMode: 1, thinking: 2, mode: 3 };
+const KNOB_ORDER: Record<string, number> = { model: 0, speed: 1, runtimeMode: 2, thinking: 3, mode: 4 };
 
 const CTX_COLLAPSE = 10;
 
@@ -474,7 +474,7 @@ function SubagentLine({ rows }: { rows: { id: string; state?: string | null;
 /// popover. Selection posts `setConfig`; the OK response re-syncs the
 /// whole knob list, so this component is stateless about current values.
 /// Minimal 24px stroke icons (lucide-style geometry, no dependency).
-function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking"
+function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking" | "speed"
   | "stop" | "send" | "folder" | "branch" | "copy" | "check" | "messages" }) {
   const common = { width: 13, height: 13, viewBox: "0 0 24 24", fill: "none",
                    stroke: "currentColor", strokeWidth: 2,
@@ -486,6 +486,8 @@ function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking"
       return <svg {...common}><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z" /></svg>;
     case "mode":
       return <svg {...common}><circle cx="12" cy="12" r="9" /><path d="M15.5 8.5 10 10l-1.5 5.5L14 13.5z" /></svg>;
+    case "speed":
+      return <svg {...common}><path d="M3.34 19a10 10 0 1 1 17.32 0" /><path d="m12 14 4-6" /><path d="m12 14-4-6" /></svg>;
     case "thinking":
       return <svg {...common}><path d="M3 12h4l3-8 4 16 3-8h4" /></svg>;
     case "stop":
@@ -1455,7 +1457,7 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
             .sort((a, b) => (KNOB_ORDER[a.id] ?? 9) - (KNOB_ORDER[b.id] ?? 9))
             .map((option) => (
             <ConfigChip key={option.id} option={option}
-              icon={<Icon kind={option.id === "thinking" ? "thinking" : option.id === "mode" || option.id === "runtimeMode" ? "mode" : "model"} />}
+              icon={<Icon kind={option.id === "thinking" ? "thinking" : option.id === "mode" || option.id === "runtimeMode" ? "mode" : option.id === "speed" ? "speed" : "model"} />}
               open={openPop === option.id}
               onToggle={() => setOpenPop(openPop === option.id ? null : option.id)}
               onPick={(value) => pickConfig(option.id, value)} />
