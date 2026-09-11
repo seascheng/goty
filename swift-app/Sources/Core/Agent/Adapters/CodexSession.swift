@@ -111,14 +111,26 @@ final class CodexSession: AgentSessioning {
             ])
     }
 
-    /// The command directory: `skills/list` — the agent's OWN
-    /// declaration, exactly what the TUI's / menu shows (paseo's
-    /// loadSkills + enabledCodexSkills, happier's pluginAndSkillCatalog):
-    /// names, descriptions, paths; disabled skills never list; multiple
-    /// skill roots dedupe by name. The host invents no entries and
-    /// never reads SKILL.md bodies — execution rides the structured
-    /// input entry. Older app-servers without the method degrade to an
-    /// empty directory.
+    /// The command directory — paseo's listCommands() union, verbatim:
+    /// 1. host-translated builtin commands (compact → thread/compact/
+    ///    start; the TUI ships the same command);
+    /// 2. the agent's OWN `skills/list` declaration (enabled-only,
+    ///    deduped across skill roots — execution rides the structured
+    ///    skill input entry, the host reads no bodies);
+    /// 3. codex custom prompts (`~/.codex/prompts/*.md`, name prefixed
+    ///    `prompts:`) — executed by expanding the file per codex's
+    ///    placeholder rules.
+    /// Sorted by name. Older app-servers without skills/list degrade
+    /// to builtin + prompts.
+    static func builtinCommands() -> [AgentSlashCommand] {
+        [
+            AgentSlashCommand(
+                name: "compact",
+                description: "Summarize conversation to prevent hitting the context limit",
+                inputHint: nil),
+        ]
+    }
+
     static func parseSkillCatalog(groups: [[String: Any]]) -> [AgentSlashCommand] {
         var byName: [String: AgentSlashCommand] = [:]
         var order: [String] = []
@@ -139,13 +151,65 @@ final class CodexSession: AgentSessioning {
         return order.compactMap { byName[$0] }
     }
 
-    private func loadSkillCommands() {
+    /// `~/.codex/prompts/*.md` — codex's custom-prompt mechanism (the
+    /// GUI machine's home; a remote pane's app-server lives on its own
+    /// host, where this scan simply finds nothing). Name prefixed
+    /// `prompts:` so it never shadows a skill. Local-only read: this
+    /// is the agent's own directory, not a host fabrication.
+    static func scanCustomPrompts(codexHome: String) -> [AgentSlashCommand] {
+        let dir = (codexHome as NSString).appendingPathComponent("prompts")
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        return files.compactMap { file -> AgentSlashCommand? in
+            guard file.hasSuffix(".md") else { return nil }
+            let name = String(file.dropLast(3))
+            guard !name.isEmpty else { return nil }
+            let path = (dir as NSString).appendingPathComponent(file)
+            guard let raw = try? String(contentsOfFile: path, encoding: .utf8)
+                else { return nil }
+            let meta = parseFrontMatter(raw)
+            return AgentSlashCommand(
+                name: "prompts:\(name)",
+                description: meta["description"] ?? "Custom prompt",
+                inputHint: meta["argument-hint"] ?? meta["argument_hint"],
+                promptPath: path)
+        }
+    }
+
+    /// Frontmatter `key: value` pairs from a prompt/skill markdown
+    /// file (paseo's parseFrontMatter: simple line scan, quotes
+    /// stripped). Empty when the file has no `---` fence.
+    static func parseFrontMatter(_ raw: String) -> [String: String] {
+        var lines = raw.split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else { return [:] }
+        lines.removeFirst()
+        var out: [String: String] = [:]
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == "---" { break }
+            guard let idx = trimmed.firstIndex(of: ":") else { continue }
+            let key = String(trimmed[..<idx]).trimmingCharacters(in: .whitespaces)
+            var value = String(trimmed[trimmed.index(after: idx)...])
+                .trimmingCharacters(in: .whitespaces)
+            value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            if !key.isEmpty, !value.isEmpty {
+                out[key] = value
+            }
+        }
+        return out
+    }
+
+    private func loadCommands() {
         var params: [String: Any] = [:]
         if let cwd { params["cwds"] = [cwd] }
         client.request("skills/list", params) { [weak self] result in
             guard let self else { return }
             let groups = (try? result.get())?["data"] as? [[String: Any]] ?? []
-            self.commands = Self.parseSkillCatalog(groups: groups)
+            let skills = Self.parseSkillCatalog(groups: groups)
+            let prompts = Self.scanCustomPrompts(
+                codexHome: NSHomeDirectory() + "/.codex")
+            self.commands = (Self.builtinCommands() + skills + prompts)
+                .sorted { $0.name < $1.name }
             self.emit([.commandsChanged(self.commands)])
         }
     }
@@ -240,7 +304,7 @@ final class CodexSession: AgentSessioning {
             loadModelCatalog()
             adoptRebuild = true
             commands = []
-            loadSkillCommands()
+            loadCommands()
             emit([.configChanged(configOptions), .ready])
             completion?(true)
             return
@@ -353,9 +417,9 @@ final class CodexSession: AgentSessioning {
             // works with its default while the catalog loads.
             self.loadModelCatalog()
             var readyEvents: [AgentSessionEvent] = [.configChanged(self.configOptions), .ready]
-            // Command directory = the agent's own skills/list
-            // declaration (codex has no separate command RPC).
-            self.loadSkillCommands()
+            // Command directory = builtin translations + the agent's
+            // skills/list + codex custom prompts (paseo's union).
+            self.loadCommands()
             self.emit(readyEvents)
             completion?(true)
         }
@@ -404,23 +468,32 @@ final class CodexSession: AgentSessioning {
 
     func send(_ text: String, images: [AgentImage]) {
         guard let threadId, !isWorking else { return }
-        // /compact is the one host translation (an app-server turn the
-        // TUI owns as a command). Everything else passes through: slash
-        // skills ride the structured input entry, native tokens reach
-        // the agent verbatim.
+        // Slash execution, paseo's three paths: host-translated
+        // builtin (compact → thread/compact/start), skills (structured
+        // input entry, the agent reads SKILL.md itself), custom
+        // prompts (file body expanded per codex placeholder rules).
+        // Native tokens reach the agent verbatim.
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed == "/compact" {
-            client.request("thread/compact/start", ["threadId": threadId]) { _ in }
+        if let builtin = Self.matchCommand(trimmed, commands: Self.builtinCommands()) {
+            switch builtin.command.name {
+            case "compact":
+                client.request("thread/compact/start", ["threadId": threadId]) { _ in }
+            default:
+                break
+            }
             return
         }
         var prompt = text
         var skill: (name: String, path: String)?
-        if trimmed.hasPrefix("/"),
-           let match = Self.matchSkill(trimmed, commands: commands) {
-            skill = (name: match.command.name, path: match.command.skillPath ?? "")
-            prompt = match.rest.isEmpty
-                ? "$\(match.command.name)"
-                : "$\(match.command.name) \(match.rest)"
+        if trimmed.hasPrefix("/") {
+            if let match = Self.matchSkill(trimmed, commands: commands) {
+                skill = (name: match.command.name, path: match.command.skillPath ?? "")
+                prompt = match.rest.isEmpty
+                    ? "$\(match.command.name)"
+                    : "$\(match.command.name) \(match.rest)"
+            } else if let match = Self.matchPrompt(trimmed, commands: commands) {
+                prompt = Self.expandCustomPrompt(template: match.body, args: match.rest)
+            }
         }
         for image in images {
             if let path = Self.stageImage(image) {
@@ -443,24 +516,96 @@ final class CodexSession: AgentSessioning {
         }
     }
 
-    /// `/name rest…` against the directory (pure, test seam): returns
-    /// the matching skill command and the trailing args.
-    static func matchSkill(_ text: String,
-                           commands: [AgentSlashCommand])
+    /// `/name rest…` against a host-translated builtin directory.
+    static func matchCommand(_ text: String, commands: [AgentSlashCommand])
         -> (command: AgentSlashCommand, rest: String)? {
+        guard text.hasPrefix("/") else { return nil }
         let body = text.dropFirst()
-        let (name, rest) = if let space = body.firstIndex(where: { $0 == " " || $0 == "\n" }) {
-            (String(body[..<space]),
-             String(body[body.index(after: space)...])
-                 .trimmingCharacters(in: .whitespacesAndNewlines))
-        } else {
-            (String(body), "")
-        }
+        let (name, rest) = Self.splitSlash(body)
+        guard let command = commands.first(where: { $0.name == name }) else { return nil }
+        return (command, rest)
+    }
+
+    /// `/name rest…` against the skills directory (entries with a
+    /// skillPath). Returns the command and trailing args.
+    static func matchSkill(_ text: String, commands: [AgentSlashCommand])
+        -> (command: AgentSlashCommand, rest: String)? {
+        guard text.hasPrefix("/") else { return nil }
+        let (name, rest) = Self.splitSlash(text.dropFirst())
         guard let command = commands.first(where: {
             $0.name == name && $0.skillPath != nil
         }) else { return nil }
         return (command, rest)
     }
+
+    /// `/name rest…` against the custom-prompt directory: reads the
+    /// file (execution-time read — the file may change after listing)
+    /// and strips frontmatter, leaving the body template.
+    static func matchPrompt(_ text: String, commands: [AgentSlashCommand])
+        -> (command: AgentSlashCommand, body: String, rest: String)? {
+        guard text.hasPrefix("/") else { return nil }
+        let (name, rest) = Self.splitSlash(text.dropFirst())
+        guard let command = commands.first(where: {
+            $0.name == name && $0.promptPath != nil
+        }), let raw = try? String(contentsOfFile: command.promptPath!,
+                                  encoding: .utf8)
+            else { return nil }
+        return (command, Self.stripFrontMatter(raw), rest)
+    }
+
+    /// `/name` and the trailing args (shared splitter).
+    private static func splitSlash(_ body: Substring) -> (String, String) {
+        if let space = body.firstIndex(where: { $0 == " " || $0 == "\n" }) {
+            return (String(body[..<space]),
+                    String(body[body.index(after: space)...])
+                        .trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return (String(body), "")
+    }
+
+    /// The markdown body after a `---` frontmatter fence (empty fence
+    /// or none → the whole raw string).
+    static func stripFrontMatter(_ raw: String) -> String {
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else { return raw }
+        for (offset, line) in lines.enumerated() where offset > 0 {
+            if line.trimmingCharacters(in: .whitespaces) == "---" {
+                return lines[(offset + 1)...].joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return raw
+    }
+
+    /// Codex custom-prompt placeholder expansion (paseo's
+    /// expandCodexCustomPrompt): `$$` escapes a literal `$`;
+    /// `$ARGUMENTS` = all args; `$1`..`$9` = positional tokens;
+    /// `key=value` args substitute `$key` (longest keys first).
+    static func expandCustomPrompt(template: String, args: String) -> String {
+        let trimmedArgs = args.trimmingCharacters(in: .whitespacesAndNewlines)
+        var named: [String: String] = [:]
+        var positional: [String] = []
+        for token in trimmedArgs.split(whereSeparator: { $0 == " " || $0 == "\t" }) {
+            if let idx = token.firstIndex(of: "="), idx > token.startIndex {
+                named[String(token[..<idx])] = String(token[token.index(after: idx)...])
+            } else {
+                positional.append(String(token))
+            }
+        }
+        let dollar = "\u{0}DOLLAR\u{0}"
+        var out = template.replacingOccurrences(of: "$$", with: dollar)
+        out = out.replacingOccurrences(of: "$ARGUMENTS", with: trimmedArgs)
+        for i in 1...9 {
+            out = out.replacingOccurrences(
+                of: "$\(i)",
+                with: positional.count >= i ? positional[i - 1] : "")
+        }
+        for key in named.keys.sorted(by: { $0.count > $1.count }) {
+            out = out.replacingOccurrences(of: "$\(key)", with: named[key] ?? "")
+        }
+        return out.replacingOccurrences(of: dollar, with: "$")
+    }
+
 
     /// Base64 → temp file the codex process can read (it runs on this
     /// Mac — runsOnThisMac default). tty7 models this exact staging.

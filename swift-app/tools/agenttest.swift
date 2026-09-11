@@ -1161,6 +1161,45 @@ enum AgentTest {
               && catalog[0].skillPath == "/w/.agents/skills/deploy/SKILL.md"
               && catalog.filter { $0.name == "paseo" }.count == 1,
               "skills/list catalog: enabled only, deduped across roots, path kept")
+        // The directory is paseo's UNION: host-translated builtin
+        // (compact) + skills/list + custom prompts — sorted by name.
+        let builtin = CodexSession.builtinCommands()
+        check(builtin.count == 1 && builtin[0].name == "compact"
+              && builtin[0].skillPath == nil && builtin[0].promptPath == nil,
+              "codex builtin directory carries the compact translation entry")
+
+        // Custom prompts: ~/.codex/prompts/*.md, name prefixed
+        // "prompts:", frontmatter feeds description + argument-hint.
+        let promptHome = NSTemporaryDirectory() + "/goty-codexhome-\(UUID().uuidString.prefix(6))"
+        let promptDir = promptHome + "/prompts"
+        try? FileManager.default.createDirectory(atPath: promptDir,
+                                                 withIntermediateDirectories: true)
+        try? #"""
+        ---
+        description: Apply an OpenSpec proposal
+        argument-hint: <proposal>
+        ---
+        Apply $1 with care. Args: $ARGUMENTS. Cost $$5. Opt $2.
+        """#.write(toFile: promptDir + "/openspec-apply.md",
+                  atomically: true, encoding: .utf8)
+        let prompts = CodexSession.scanCustomPrompts(
+            codexHome: (promptDir as NSString).deletingLastPathComponent)
+            .filter { $0.name == "prompts:openspec-apply" }
+        check(prompts.count == 1
+              && prompts[0].description == "Apply an OpenSpec proposal"
+              && prompts[0].inputHint == "<proposal>",
+              "prompts scan reads frontmatter and prefixes the name")
+        let expanded = CodexSession.expandCustomPrompt(
+            template: "Apply $1 with care. Args: $ARGUMENTS. Cost $$5. Opt $2.",
+            args: "alpha beta")
+        check(expanded == "Apply alpha with care. Args: alpha beta. Cost $5. Opt beta.",
+              "prompt expansion: $1/$2/$ARGUMENTS/$$ per codex rules")
+        check(CodexSession.expandCustomPrompt(
+                template: "Branch $branch", args: "branch=main") == "Branch main",
+              "prompt expansion: named key=value substitutes $key")
+        check(CodexSession.stripFrontMatter(
+                "---\ndescription: x\n---\nBody line.") == "Body line.",
+              "frontmatter strip leaves the body")
 
         // matchSkill: /name rest → the directory entry (skillPath
         // present); native commands and plain text pass through.
