@@ -601,6 +601,11 @@ final class CodexSession: AgentSessioning {
                                      skill: skill.flatMap {
                                          $0.path.isEmpty ? nil : $0
                                      })
+        // Turn ownership is synchronous here: the host's refusal guard
+        // (no live thread / not working) reads isWorking the moment
+        // send() returns — the 9ef8ac7 rewrite dropped this line and
+        // every send reported 未关联到 agent 会话.
+        isWorking = true
         client.request("turn/start", params) { [weak self] _ in
             // turn outcome arrives as turn/completed notification; the
             // request result only acknowledges the turn object.
