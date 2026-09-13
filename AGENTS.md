@@ -24,6 +24,16 @@ cargo test --manifest-path swift-app/sessiond/Cargo.toml
 Swift side: `swift-app/build.sh` must succeed; treat new Swift warnings as
 errors to fix, not to commit.
 
+## Working rules
+
+- BEFORE implementing any new feature or bug fix, RESEARCH the mature
+  products already on this machine for the same problem — paseo, happier,
+  monocode, gooey-pi under `/Users/seascheng/Downloads/ai_project/` — and
+  the agent's own upstream source (codex-rs etc.). Reuse their proven
+  design; only design from scratch when none of them solves it, and say
+  why. This is binding: no self-invented mechanisms for problems a
+  reference product already solved.
+
 ## Scope
 
 - The session stack is owned end-to-end by this repo: PTYs, sessions,
