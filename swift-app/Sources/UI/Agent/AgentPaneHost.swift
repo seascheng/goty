@@ -388,7 +388,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                 // An adapter with no live session id (attach replay rotated
                 // past the handshake) refuses send() — never leave the
                 // composer stuck "working".
-                if !self.session.isWorking {
+                if !self.session.hasPendingWork {
                     self.setTurnState(.errored("未关联到 agent 会话 — 请点重试"))
                 }
             }
@@ -987,7 +987,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
         session.send(item.message, images: item.images)
         // Same refusal guard as the send path: an adapter with no live
         // session id must not leave the pane stuck "thinking".
-        if !session.isWorking {
+        if !session.hasPendingWork {
             setTurnState(.errored("未关联到 agent 会话 — 请点重试"))
         }
     }

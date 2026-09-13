@@ -41,6 +41,10 @@ protocol AgentSessioning: AnyObject {
     var capabilities: AgentCapabilities { get }
     var sessionId: String? { get }
     var isWorking: Bool { get }
+    /// True while the adapter OWNS sent-but-undelivered work: a running
+    /// turn or sends parked behind an in-flight restore. The host's
+    /// refusal guard reads this instead of isWorking.
+    var hasPendingWork: Bool { get }
     var configOptions: [AgentConfigOption] { get }
     var commands: [AgentSlashCommand] { get }
     /// Working directory — file index and session-store filters.
@@ -125,6 +129,9 @@ extension AgentSessioning {
         completion(nil)
     }
     var lastSessionId: String? { sessionId }
+    /// Default: pending work IS the running turn. Adapters that park
+    /// sends during a restore override this.
+    var hasPendingWork: Bool { isWorking }
     /// true = the adapter consumes `restoredSessionId` itself inside
     /// connect (claude: store replay + --resume respawn) and the caller
     /// must NOT also load() after connect.

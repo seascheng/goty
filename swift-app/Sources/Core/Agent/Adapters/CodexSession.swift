@@ -29,6 +29,11 @@ final class CodexSession: AgentSessioning {
     /// Texts this session just sent — their agent-side userMessage
     /// echoes are suppressed live (the composer showed them already).
     private var pendingEcho: [String] = []
+    /// Sends parked while the thread restore is still in flight; flushed
+    /// the moment the replay lands and the thread id is live.
+    private var pendingSends: [(text: String, images: [AgentImage])] = []
+    /// Parked sends count as owned work — the host's refusal guard.
+    var hasPendingWork: Bool { isWorking || !pendingSends.isEmpty }
     private let paneId: String
     private let environment: [String: String]
     private let daemon: SessionDaemon
@@ -515,11 +520,12 @@ final class CodexSession: AgentSessioning {
             // works with its default while the catalog loads.
             self.loadModelCatalog()
             var readyEvents: [AgentSessionEvent] = [.configChanged(self.configOptions), .ready]
+            self.emit(readyEvents)
+            self.flushPendingSends()
+            completion?(true)
             // Command directory = builtin translations + the agent's
             // skills/list + codex custom prompts (paseo's union).
             self.loadCommands()
-            self.emit(readyEvents)
-            completion?(true)
         }
     }
 
@@ -565,7 +571,16 @@ final class CodexSession: AgentSessioning {
     }
 
     func send(_ text: String, images: [AgentImage]) {
-        guard let threadId, !isWorking else { return }
+        guard let threadId else {
+            // Restore still in flight (attach replay / resume): park the
+            // text instead of refusing — the old refusal read as an error
+            // and forced the manual 重试 detour. Flush fires when the
+            // replay lands.
+            pendingSends.append((text, images))
+            emit([.notice("⟳ 会话恢复中，消息稍后自动发送")])
+            return
+        }
+        guard !isWorking else { enqueueMidTurn(text, images: images); return }
         // Slash = the TUI's command table. Host-translated RPCs run
         // out of band (compact, goal); commands the GUI carries as
         // chips say so; the rest admit they're not wired. Skills are
@@ -980,7 +995,8 @@ final class CodexSession: AgentSessioning {
         }
     }
 
-    /// Map the collected turns (chronological) and open the live gate.
+    /// Map the collected turns (chronological), open the live gate, and
+    /// release any sends parked while the restore was in flight.
     private func finishReplay(box: Box, mapper: CodexFrameMapper,
                               done: @escaping () -> Void) {
         adoptingReplay = false
@@ -995,6 +1011,18 @@ final class CodexSession: AgentSessioning {
                                      params: ["turn": turn])
         }
         done()
+        flushPendingSends()
+    }
+
+    /// Fire the parked sends in order; the first takes the turn, the
+    /// rest park on the mid-turn queue like any follow-up.
+    private func flushPendingSends() {
+        guard threadId != nil, !pendingSends.isEmpty else { return }
+        let sends = pendingSends
+        pendingSends.removeAll()
+        for send in sends {
+            self.send(send.text, images: send.images)
+        }
     }
 
     func load(sessionId: String, completion: ((Bool) -> Void)? = nil) {
