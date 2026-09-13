@@ -1071,6 +1071,14 @@ final class CodexSession: AgentSessioning {
     /// Single source of truth for the manifest (agenttest asserts it).
     static let declaredCapabilities: AgentCapabilities = [.steer, .sessions, .runtimeModes]
 
+    var capabilities: AgentCapabilities {
+        // .sessions gates the history chip: thread/list + thread/resume
+        // + thread/read are implemented — the picker and reload work.
+        // .runtimeModes: the 权限 chip — every turn/start re-sends the
+        // tier knobs (approvalPolicy/sandboxPolicy/approvalsReviewer).
+        Self.declaredCapabilities
+    }
+
     private func handleNotification(method: String, params: [String: Any]) {
         // Live user-echo suppression (pi-mono's rule): the composer
         // already renders the sent text optimistically, so the agent's
