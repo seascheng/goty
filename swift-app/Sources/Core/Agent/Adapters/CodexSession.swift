@@ -1187,6 +1187,13 @@ final class CodexSession: AgentSessioning {
         switch method {
         case "turn/started":
             activeTurnId = (params["turn"] as? [String: Any])?["id"] as? String
+            // A turn can start WITHOUT our send(): a freshly set goal
+            // makes the agent begin working on its own (probed: /goal
+            // → thread/goal/set, then a turn with no user turn in
+            // front). The pane must read as executing for those too —
+            // except during ring replay, whose stale turn/started has
+            // its terminal gated off and would wedge isWorking on.
+            if !adoptingReplay { isWorking = true }
         case "turn/completed", "turn/aborted":
             activeTurnId = nil
         default:
