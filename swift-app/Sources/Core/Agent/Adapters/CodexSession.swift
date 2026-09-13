@@ -977,10 +977,15 @@ final class CodexSession: AgentSessioning {
                 return
             }
             let ordered = Array(page.reversed()) // oldest→newest
-            // No progress (same page again) = the beginning is reached.
+            // No progress (same page again) = the beginning is reached —
+            // small threads ALWAYS land here (their backwardsCursor is
+            // never null), so the item hydration must run on this path
+            // too or the summary items render and the goal turn's
+            // reasoning/agentMessage/commandExecution never appear.
             if let firstId = ordered.first?["id"] as? String,
                firstId == box.oldestTurnId {
-                self.finishReplay(box: box, mapper: mapper, done: done)
+                self.hydrateTurnItems(threadId: threadId, index: 0,
+                                      box: box, mapper: mapper, done: done)
                 return
             }
             box.oldestTurnId = ordered.first?["id"] as? String ?? box.oldestTurnId
