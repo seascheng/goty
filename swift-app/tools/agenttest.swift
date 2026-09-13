@@ -1233,6 +1233,26 @@ enum AgentTest {
         Apply $1 with care. Args: $ARGUMENTS. Cost $$5. Opt $2.
         """#.write(toFile: promptDir + "/openspec-apply.md",
                   atomically: true, encoding: .utf8)
+
+        // Live user-echo suppression (pi-mono rule): the composer echoes
+        // optimistically, the agent's userMessage echo must not re-render.
+        let echoItem: [String: Any] = [
+            "id": "u1",
+            "type": "userMessage",
+            "content": [["type": "text", "text": " 你好 "]],
+        ]
+        let agentItem: [String: Any] = [
+            "id": "a1",
+            "type": "agentMessage",
+            "text": "你好",
+        ]
+        check(CodexSession.liveEchoIndex(pending: ["你好"],
+                                         params: ["item": echoItem]) == 0
+              && CodexSession.liveEchoIndex(pending: ["别的"],
+                                            params: ["item": echoItem]) == nil
+              && CodexSession.liveEchoIndex(pending: ["你好"],
+                                            params: ["item": agentItem]) == nil,
+              "userMessage echo matches a pending sent text; other types never do")
         let prompts = CodexSession.scanCustomPrompts(
             codexHome: (promptDir as NSString).deletingLastPathComponent)
             .filter { $0.name == "prompts:openspec-apply" }

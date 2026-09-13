@@ -26,6 +26,9 @@ final class CodexSession: AgentSessioning {
     /// history notifications are dropped until the authoritative
     /// turns/list replay lands.
     private var adoptingReplay = false
+    /// Texts this session just sent — their agent-side userMessage
+    /// echoes are suppressed live (the composer showed them already).
+    private var pendingEcho: [String] = []
     private let paneId: String
     private let environment: [String: String]
     private let daemon: SessionDaemon
@@ -602,10 +605,12 @@ final class CodexSession: AgentSessioning {
                                          $0.path.isEmpty ? nil : $0
                                      })
         // Turn ownership is synchronous here: the host's refusal guard
-        // (no live thread / not working) reads isWorking the moment
-        // send() returns — the 9ef8ac7 rewrite dropped this line and
-        // every send reported 未关联到 agent 会话.
+        // reads isWorking the moment send() returns; the appended text
+        // is matched against the agent's userMessage echo to suppress
+        // the double render.
         isWorking = true
+        pendingEcho.append(trimmed)
+        if pendingEcho.count > 4 { pendingEcho.removeFirst() }
         client.request("turn/start", params) { [weak self] _ in
             // turn outcome arrives as turn/completed notification; the
             // request result only acknowledges the turn object.
@@ -1066,43 +1071,18 @@ final class CodexSession: AgentSessioning {
     /// Single source of truth for the manifest (agenttest asserts it).
     static let declaredCapabilities: AgentCapabilities = [.steer, .sessions, .runtimeModes]
 
-    var capabilities: AgentCapabilities {
-        // .sessions gates the history chip: thread/list + thread/resume
-        // + thread/read are implemented — the picker and reload work.
-        // .runtimeModes: the 权限 chip — every turn/start re-sends the
-        // tier knobs (approvalPolicy/sandboxPolicy/approvalsReviewer).
-        Self.declaredCapabilities
-    }
-
-    /// Mid-turn steering, codex-native: `turn/steer` fenced to the live
-    /// turn (expectedTurnId — monocode/happier parity). Falls back to
-    /// the park-and-send queue when the turn id isn't known yet (the
-    /// turn hasn't started streaming) or the thread is idle.
-    func steer(_ text: String, images: [AgentImage]) {
-        guard isWorking, let threadId, let turnId = activeTurnId else {
-            enqueueMidTurn(text, images: images)
+    private func handleNotification(method: String, params: [String: Any]) {
+        // Live user-echo suppression (pi-mono's rule): the composer
+        // already renders the sent text optimistically, so the agent's
+        // own userMessage echo must not render again — the "message
+        // shows twice" report. History replays use a fresh mapper and
+        // DO emit user turns (a reloaded page never showed them).
+        if method == "item/started" || method == "item/completed",
+           let idx = Self.liveEchoIndex(pending: pendingEcho,
+                                        params: params) {
+            pendingEcho.remove(at: idx)
             return
         }
-        var input: [[String: Any]] = [["type": "text", "text": text]]
-        for image in images {
-            if let path = Self.stageImage(image) {
-                input.append(["type": "local_image", "path": path])
-            }
-        }
-        client.request("turn/steer", [
-            "threadId": threadId,
-            "expectedTurnId": turnId,
-            "input": input,
-        ]) { _ in }
-    }
-
-    private func enqueueMidTurn(_ text: String, images: [AgentImage]) {
-        guard isWorking else { return send(text, images: images) }
-        pendingMidTurn.append((text, images))
-        emit([.notice("⟳ 消息已排队，本轮结束后发送")])
-    }
-
-    private func handleNotification(method: String, params: [String: Any]) {
         // During attach-adoption the ring replays PRE-ATTACH history
         // notifications (old turns, injected auto-review prompts that
         // never appear in turns/list); the authoritative thread/read +
@@ -1132,6 +1112,44 @@ final class CodexSession: AgentSessioning {
         }
         emit(events)
     }
+
+    /// Match an agent-echoed userMessage against the texts this session
+    /// just sent (pure, test seam). Same trimmed text = our echo.
+    static func liveEchoIndex(pending: [String],
+                              params: [String: Any]) -> Int? {
+        guard let item = params["item"] as? [String: Any],
+              item["type"] as? String == "userMessage" else { return nil }
+        let text = CodexFrameMapper.textOf(item["content"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return pending.firstIndex {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines) == text
+        }
+    }
+    func steer(_ text: String, images: [AgentImage]) {
+        guard isWorking, let threadId, let turnId = activeTurnId else {
+            enqueueMidTurn(text, images: images)
+            return
+        }
+        var input: [[String: Any]] = [["type": "text", "text": text]]
+        for image in images {
+            if let path = Self.stageImage(image) {
+                input.append(["type": "local_image", "path": path])
+            }
+        }
+        client.request("turn/steer", [
+            "threadId": threadId,
+            "expectedTurnId": turnId,
+            "input": input,
+        ]) { _ in }
+    }
+
+    private func enqueueMidTurn(_ text: String, images: [AgentImage]) {
+        guard isWorking else { return send(text, images: images) }
+        pendingMidTurn.append((text, images))
+        emit([.notice("⟳ 消息已排队，本轮结束后发送")])
+    }
+
 
     private func flushMidTurnQueue() {
         guard !pendingMidTurn.isEmpty else { return }
