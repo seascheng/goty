@@ -990,7 +990,58 @@ final class CodexSession: AgentSessioning {
                 self.collectTurns(threadId: threadId, cursor: older,
                                   box: box, mapper: mapper, done: done)
             } else {
-                self.finishReplay(box: box, mapper: mapper, done: done)
+                // Turns complete — hydrate each turn's FULL items (the
+                // turns payload is a SUMMARY view: an interrupted turn
+                // reports items:0 while thread/items/list returns its
+                // reasoning + agentMessage + commandExecution — probed
+                // 2026-09-11 on the 你是可用的么 thread).
+                self.hydrateTurnItems(threadId: threadId, index: 0,
+                                      box: box, mapper: mapper, done: done)
+            }
+        }
+    }
+
+    /// Fetch each turn's FULL item list (thread/items/list, cursor-paged)
+    /// and replace the summary view before mapping.
+    private func hydrateTurnItems(threadId: String, index: Int,
+                                  box: Box, mapper: CodexFrameMapper,
+                                  done: @escaping () -> Void) {
+        guard index < box.rawTurns.count else {
+            finishReplay(box: box, mapper: mapper, done: done)
+            return
+        }
+        guard let turnId = box.rawTurns[index]["id"] as? String else {
+            hydrateTurnItems(threadId: threadId, index: index + 1,
+                             box: box, mapper: mapper, done: done)
+            return
+        }
+        fetchTurnItems(threadId: threadId, turnId: turnId, cursor: nil,
+                       acc: []) { [weak self] items in
+            box.rawTurns[index]["items"] = items
+            self?.hydrateTurnItems(threadId: threadId, index: index + 1,
+                                   box: box, mapper: mapper, done: done)
+        }
+    }
+
+    private func fetchTurnItems(threadId: String, turnId: String,
+                                cursor: String?, acc: [[String: Any]],
+                                done: @escaping ([[String: Any]]) -> Void) {
+        var params: [String: Any] = ["threadId": threadId, "turnId": turnId]
+        if let cursor { params["cursor"] = cursor }
+        client.request("thread/items/list", params) { [weak self] result in
+            guard let self else { return }
+            guard case .success(let value) = result else {
+                done(acc)
+                return
+            }
+            let page = ((value["data"] as? [[String: Any]]) ?? [])
+                .compactMap { $0["item"] as? [String: Any] }
+            let all = acc + page
+            if let next = value["nextCursor"] as? String, !next.isEmpty {
+                self.fetchTurnItems(threadId: threadId, turnId: turnId,
+                                    cursor: next, acc: all, done: done)
+            } else {
+                done(all)
             }
         }
     }

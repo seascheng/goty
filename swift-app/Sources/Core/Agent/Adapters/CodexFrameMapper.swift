@@ -103,6 +103,16 @@ final class CodexFrameMapper {
             guard !text.isEmpty, !emittedText.contains(id) else { return [] }
             emittedText.insert(id)
             return [.messageChunk(text)]
+        case "reasoning":
+            // History items carry summary[] + content[] (the TUI's
+            // ReasoningSummaryCell); raw content wins when present.
+            let content = (item["content"] as? [String])?
+                .joined(separator: "\n\n") ?? ""
+            let summary = (item["summary"] as? [String])?
+                .joined(separator: "\n") ?? ""
+            let text = content.isEmpty ? summary : content
+            guard !text.isEmpty else { return [] }
+            return [.thoughtChunk(text)]
         case "commandExecution":
             let command = (item["command"] as? [String: Any])?["command"] as? String
                 ?? (item["command"] as? String) ?? ""
