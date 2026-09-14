@@ -371,7 +371,7 @@ function PlanPanel({ entries }: { entries: PlanEntry[] }) {
   // transcript (the reported fold jank).
   const open = useSyncExternalStore(
     (onChange) => store.subscribe(onChange),
-    () => store.planDockOpen,
+    () => store.planDockOpen && !store.planFoldedBySettle,
     () => true,
   );
   const done = entries.filter((e) => e.status === "completed").length;
@@ -1888,7 +1888,7 @@ export function App() {
     || store.subagents.length > 0 || store.pendingQueue.length > 0);
   const planOpen = useSyncExternalStore(
     (onChange) => store.subscribe(onChange),
-    () => store.planDockOpen,
+    () => store.planDockOpen && !store.planFoldedBySettle,
     () => true,
   );
   useEffect(() => {
@@ -1919,7 +1919,7 @@ export function App() {
     || store.subagents.length > 0 || store.pendingQueue.length > 0);
   const planOpen = useSyncExternalStore(
     (onChange) => store.subscribe(onChange),
-    () => store.planDockOpen,
+    () => store.planDockOpen && !store.planFoldedBySettle,
     () => true,
   );
   useEffect(() => {

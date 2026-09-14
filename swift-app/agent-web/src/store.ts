@@ -28,6 +28,16 @@ export type Permission = { requestID: string; toolCallTitle?: string | null;
   options: { optionId: string; name: string; kind?: string | null; detail?: string | null }[];
   dialog?: string | null; placeholder?: string | null; defaultValue?: string | null };
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+/// Structural equality for plan snapshots — the dedup key the plan
+/// handler uses to ignore repeated identical snapshots (omp's get_state
+/// polls keep serving the settled all-completed todoPhases).
+function planEntriesEqual(a: PlanEntry[], b: PlanEntry[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  return a.every((e, i) =>
+      e.content === b[i].content && e.priority === b[i].priority
+      && e.status === b[i].status);
+}
 /// A block before it gets its stable identity stamp.
 type BlockInput = DistributiveOmit<Block, "id">;
 export type Block =
@@ -284,6 +294,15 @@ class Store {
   /// Set when the agent clears the plan at turn settle; the stale plan
   /// keeps the dock mounted (scroll-jump guard) until the next turn.
   private planCleared = false;
+  /// A settled FULLY-completed plan also presents FOLDED, on top of
+  /// the user's dock-fold pref (2026-09-14: the finished panel kept
+  /// reappearing open — at settle, on later turns, and after webview
+  /// reloads replaying the stale all-completed snapshot omp's get_state
+  /// serves forever). The user's head click still unfolds it.
+  private planSettledFold = false;
+  /// View-facing: the plan panel must render folded (settled plan +
+  /// the user has not just asked to see it).
+  get planFoldedBySettle(): boolean { return this.planSettledFold; }
   /// Plan-dock fold. Lives in the STORE (not component state) and is
   /// persisted: the dock remounts whenever plan/jobs flush to null and
   /// back, and WKWebView can crash-reload the page — both used to
@@ -299,6 +318,10 @@ class Store {
   private chunkSealed = false;
   togglePlanDock(): void {
     this.planDockOpen = !this.planDockOpen;
+    // The user's click overrides the settle fold — they asked to see
+    // (or hide) this panel; the next settle re-folds if it finishes
+    // all-completed again.
+    this.planSettledFold = false;
     // LOCAL-ONLY update: no revision bump. Folding used to re-render
     // the ENTIRE App (revision snapshot) — during a turn that means
     // contending with per-chunk renders, which is the reported fold
@@ -508,7 +531,7 @@ class Store {
         // A settled plan hides HERE (not at the turn-end null): the
         // dock then unmounts while the user is looking at the composer,
         // never as a mid-read scroll jump.
-        if (this.planCleared) { this.plan = null; this.planCleared = false; }
+        if (this.planCleared) { this.plan = null; this.planCleared = false; this.planSettledFold = false; }
         this.push({ kind: "user", text: event.text }); break;
       case "queueMessage": this.pendingQueue.push(event.text); break;
       // Outbox row actions (Swift-side), text-keyed so the mirror never
@@ -517,8 +540,10 @@ class Store {
       case "queueDelivered":
         // The queued text leaves the dock and lands in the transcript:
         // the host sends it through send()/steer() as it pushes this,
-        // so the block IS the delivery echo.
+        // so the block IS the delivery echo. It opens a turn like
+        // userMessage does — fold a settled plan here too.
         this.dequeue(event.text);
+        if (this.planCleared) { this.plan = null; this.planCleared = false; this.planSettledFold = false; }
         this.push({ kind: "user", text: event.text });
         break;
       case "userChunk":
@@ -622,10 +647,32 @@ class Store {
         // and the whole conversation jumps up by the dock's height
         // (the turn-end flash + scroll jump, reported many times).
         // The last plan stays visible; it hides when the next turn
-        // starts (planCleared → userMessage/working).
+        // starts (planCleared → userMessage/queueDelivered).
         if ((event.entries ?? []).length > 0) {
+          // A snapshot identical to the one already showing carries no
+          // new information — and omp's get_state keeps serving the LAST
+          // all-completed todoPhases forever after settle (the session
+          // model only resets on /new or a fresh plan; the TUI's
+          // tasks.todoClearDelay timer clears a view-local copy the RPC
+          // never sees). Without this guard the 2s poll would resurrect
+          // the plan the turn-end handler just retired, and the dock
+          // would pin a finished 10/10 plan indefinitely. A CHANGED
+          // snapshot (the agent rewrote the plan) still lands.
+          if (this.planCleared && this.plan != null
+              && planEntriesEqual(this.plan.entries, event.entries as PlanEntry[])) {
+            break;
+          }
           this.plan = { entries: event.entries as PlanEntry[] };
-          this.planCleared = false;
+          // An all-completed snapshot while the agent is IDLE is by
+          // definition settled — arm the retirement and present folded
+          // right here, not only via turnEnded: after a webview reload
+          // no turnEnded ever comes, and the replayed stale snapshot
+          // would reopen the finished panel (2026-09-14 report). While
+          // the agent is WORKING the panel stays open for progress.
+          const settled = !this.working
+              && (event.entries as PlanEntry[]).every((e) => e.status === "completed");
+          this.planCleared = settled;
+          this.planSettledFold = settled;
         } else {
           this.planCleared = this.plan != null;
         }
@@ -666,6 +713,19 @@ class Store {
         // outbox and delivers strictly one per turnEnded via
         // queueDelivered (true processing order, one block per settle).
         this.retry = null;
+        // A fully-completed plan retires with the turn: keep the data
+        // (the dock stays mounted — no mid-read scroll jump) but arm
+        // planCleared so the next user block unmounts it, and FOLD the
+        // panel now (planSettledFold — the finished plan reappearing
+        // open was the 2026-09-14 irritation report). omp never clears
+        // its todoPhases on settle (see the plan handler); adapters
+        // that DO send an empty plan arm the same flag through that
+        // path.
+        if (this.plan != null && this.plan.entries.length > 0
+            && this.plan.entries.every((e) => e.status === "completed")) {
+          this.planCleared = true;
+          this.planSettledFold = true;
+        }
         break;
       }
       case "sessions": this.sessions = coerceList(event.sessions, AgentSessionSummarySchema); break;
