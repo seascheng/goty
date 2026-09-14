@@ -909,7 +909,14 @@ final class CodexSession: AgentSessioning {
 
     func respondPermission(requestID: String, optionId: String) {
         guard let id = Int(requestID) else { return }
-        let decision = optionId.hasPrefix("allow") ? "accept" : "decline"
+        // codex CommandExecution/FileChange ApprovalDecision literals:
+        // accept / acceptForSession / decline (schema-verified).
+        let decision: String
+        switch optionId {
+        case "allow_once": decision = "accept"
+        case "allow_session": decision = "acceptForSession"
+        default: decision = "decline"
+        }
         pendingApprovals.removeAll { $0 == id }
         client.respond(id: id, result: ["decision": decision])
     }
@@ -1428,7 +1435,7 @@ final class CodexSession: AgentSessioning {
         } else {
             title = (params["title"] as? String) ?? "codex 请求授权"
         }
-        let prompt = AgentPermissionPrompt.allowOrReject(
+        let prompt = AgentPermissionPrompt.codexApproval(
             requestID: String(id), title: title)
         emit([.permissionRequested(prompt)])
     }

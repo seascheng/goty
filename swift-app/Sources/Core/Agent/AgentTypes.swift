@@ -255,6 +255,21 @@ struct AgentPermissionPrompt {
             AgentPermissionOption(optionId: "reject_once", name: "拒绝", kind: "reject_once"),
         ])
     }
+
+    /// codex approvals: the schema's CommandExecution/FileChange
+    /// ApprovalDecision adds acceptForSession — the TUI's "always allow
+    /// this session", without which on-request policy prompts for
+    /// EVERY command and a pane full of tools parks one-by-one.
+    static func codexApproval(requestID: String, title: String?) -> AgentPermissionPrompt {
+        AgentPermissionPrompt(requestID: requestID, toolCallTitle: title, options: [
+            AgentPermissionOption(optionId: "allow_once", name: "允许",
+                                  kind: "allow_once"),
+            AgentPermissionOption(optionId: "allow_session", name: "本会话总是允许",
+                                  kind: "allow_session"),
+            AgentPermissionOption(optionId: "reject_once", name: "拒绝",
+                                  kind: "reject_once"),
+        ])
+    }
 }
 
 /// One `session/set_config_option`-selectable knob (mode / model /
