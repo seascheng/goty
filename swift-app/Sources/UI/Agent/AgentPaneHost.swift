@@ -1026,6 +1026,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                     // and its reset would otherwise vanish while codex
                     // still waits on it. Re-publish it.
                     if let prompt = self.pendingPrompt {
+                        if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                            print("GOTY_PERM republish after reset requestID=\(prompt.requestID)")
+                        }
                         self.bridge.push(
                             AgentSessionEvent.permissionRequested(prompt)
                                 .jsRepresentation)
@@ -1138,14 +1141,10 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                     DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                         self?.refreshSessionTitle()
                     }
-                case .sessionTitle(let title):
-                    // /rename and omp's post-turn auto-naming push the
-                    // title live; keep the dedup var in sync so a later
-                    // refreshSessionTitle doesn't re-push a stale one.
-                    self.lastSessionTitle = title
-                    self.liveTitleLocked = true
-                    self.onSessionTitle?(title)
                 case .permissionRequested(let prompt):
+                    if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                        print("GOTY_PERM push requestID=\(prompt.requestID) title=\(prompt.toolCallTitle ?? "-")")
+                    }
                     self.pendingPrompt = prompt
                     // NO isWorking gate: a reattach replays the pending
                     // permission request BEFORE the ready event settles
