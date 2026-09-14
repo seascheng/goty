@@ -434,6 +434,64 @@ enum AgentTest {
         check(wait(replayBoundaryDone), "line replay/live callbacks finish")
         check(replaySequence == [true, false], "line callbacks preserve replay/live order")
 
+        print("— agent session execution boundary —")
+        let workStarted = DispatchSemaphore(value: 0)
+        let releaseWork = DispatchSemaphore(value: 0)
+        var workWasOffMain = false
+        var completionWasMain = false
+        var executionDone = false
+        AgentSessionExecution.runOffMain(work: {
+            workWasOffMain = !Thread.isMainThread
+            workStarted.signal()
+            _ = releaseWork.wait(timeout: .now() + 2)
+            return 42
+        }, completion: { value in
+            completionWasMain = Thread.isMainThread && value == 42
+            executionDone = true
+        })
+        check(wait(workStarted), "connection work starts")
+        var markerRan = false
+        DispatchQueue.main.async { markerRan = true }
+        let markerDeadline = Date().addingTimeInterval(0.5)
+        while !markerRan, Date() < markerDeadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        check(markerRan, "blocked connection work does not block main queue")
+        releaseWork.signal()
+        let completionDeadline = Date().addingTimeInterval(1)
+        while !executionDone, Date() < completionDeadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        check(workWasOffMain, "connection work runs off main")
+        check(completionWasMain, "connection completion returns to main")
+
+        let staleStarted = DispatchSemaphore(value: 0)
+        let staleRelease = DispatchSemaphore(value: 0)
+        let gate = AgentConnectionGate()
+        var acceptedConnections: [String] = []
+        var discardedConnections: [String] = []
+        gate.open(work: {
+            staleStarted.signal()
+            _ = staleRelease.wait(timeout: .now() + 2)
+            return "old"
+        }, onStale: { discardedConnections.append($0) },
+           completion: { acceptedConnections.append($0) })
+        check(wait(staleStarted), "old connection attempt starts")
+        gate.open(work: { "new" },
+                  onStale: { discardedConnections.append($0) },
+                  completion: { acceptedConnections.append($0) })
+        let acceptedDeadline = Date().addingTimeInterval(1)
+        while acceptedConnections.isEmpty, Date() < acceptedDeadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        staleRelease.signal()
+        let discardedDeadline = Date().addingTimeInterval(1)
+        while discardedConnections.isEmpty, Date() < discardedDeadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        check(acceptedConnections == ["new"], "only newest connection is accepted")
+        check(discardedConnections == ["old"], "stale connection is discarded")
+
         print("— integrity counters —")
         check(rpcMapper.eventsRouted > 0 && rpcMapper.framesIgnored > 0,
               "mapper counts routed and ignored frames")
