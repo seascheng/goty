@@ -402,6 +402,38 @@ enum AgentTest {
         parserRelease.signal()
         contention.failPending(reason: "test complete")
 
+        print("— LineChannel callback queue + replay metadata —")
+        let lineQueue = DispatchQueue(label: "goty.agenttest.line-callback")
+        let lineKey = DispatchSpecificKey<String>()
+        lineQueue.setSpecific(key: lineKey, value: "line")
+        let lineDone = DispatchSemaphore(value: 0)
+        let lineChannel = LineChannel(callbackQueue: lineQueue)
+        var lineQueueWasCorrect = false
+        var replayFlag = false
+        lineChannel.onFrame = { _, replay in
+            lineQueueWasCorrect = DispatchQueue.getSpecific(key: lineKey) == "line"
+            replayFlag = replay
+            lineDone.signal()
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            lineChannel.feed(Array("{\"type\":\"message\"}\n".utf8), replay: true)
+        }
+        check(wait(lineDone), "line callback finishes")
+        check(lineQueueWasCorrect, "line callback uses configured queue")
+        check(replayFlag, "line callback preserves replay metadata")
+
+        let replayBoundaryDone = DispatchSemaphore(value: 0)
+        let replayBoundary = LineChannel(callbackQueue: lineQueue)
+        var replaySequence: [Bool] = []
+        replayBoundary.onFrame = { _, replay in
+            replaySequence.append(replay)
+            if replaySequence.count == 2 { replayBoundaryDone.signal() }
+        }
+        replayBoundary.feed(Array("{\"type\":\"snapshot\"}\n".utf8), replay: true)
+        replayBoundary.feed(Array("{\"type\":\"live\"}\n".utf8), replay: false)
+        check(wait(replayBoundaryDone), "line replay/live callbacks finish")
+        check(replaySequence == [true, false], "line callbacks preserve replay/live order")
+
         print("— integrity counters —")
         check(rpcMapper.eventsRouted > 0 && rpcMapper.framesIgnored > 0,
               "mapper counts routed and ignored frames")
