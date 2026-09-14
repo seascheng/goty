@@ -766,6 +766,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                           starting: window.__gotyStore.starting,
                           blocks: window.__gotyStore.blocks.length,
                           users: window.__gotyStore.blocks.filter(b => b.kind === 'user').length,
+                          applied: window.__gotyStore.appliedCount,
+                          rejected: window.__gotyStore.rejectedCount,
                           tailKind: window.__gotyStore.blocks[window.__gotyStore.blocks.length-1]?.kind ?? 'none',
                           tailText: ((window.__gotyStore.blocks[window.__gotyStore.blocks.length-1]?.text) ?? '').slice(-100),
                         })
@@ -996,7 +998,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
     func session(_ session: AgentSessioning, didEmit events: [AgentSessionEvent]) {
         // Main-actor by protocol now — no dispatch hop needed.
         for event in events {
-                switch event {
+            switch event {
                 case .ready, .configChanged, .userMessage, .userChunk, .messageChunk, .toolCallUpdate, .chunkBoundary:
                     // First handshake-complete signal cancels the
                     // watchdog (configChanged arrives even when an
@@ -1152,7 +1154,13 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                 default:
                     break
                 }
-        }
+                // EVERY event reaches the page (the switch above only
+                // adds host-side side effects). Lost in the Task 5-8
+                // actor migration: the pane went handshake-healthy but
+                // silent — the starting chip pinned forever, transcript
+                // replays never landed (2026-09-14 omp/codex report).
+                bridge.push(event.jsRepresentation)
+            }
     }
 
     /// WebContent recycles hidden webviews (memory pressure, process
@@ -1194,6 +1202,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
         guard !isReconnecting else { return }
         setTurnState(.errored(reason))
     }
+
+
+    /// WKUIDelegate: WebKit hands <input type="file"> open panels to the
+    /// UI delegate and NEVER shows one itself — the 📎 attach button
+    /// depends on this entirely. Image-only to match the composer's
+    /// ingest contract.
     func webView(_ webView: WKWebView,
                  runOpenPanelWith parameters: WKOpenPanelParameters,
                  initiatedByFrame frame: WKFrameInfo,

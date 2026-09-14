@@ -70,6 +70,11 @@ enum AgentProbe {
 
         let collector = Collector()
         let paneId = "probe-\(key)-\(UUID().uuidString.prefix(8))"
+        // The spawn cwd must exist or the agent binary dies instantly
+        // (chdir) and the probe reports a hang that is really a bad
+        // environment — /tmp gets swept periodically.
+        try? FileManager.default.createDirectory(
+            atPath: "/tmp/probe-cwd", withIntermediateDirectories: true)
         let session = descriptor.make(AgentPaneParams(
             paneId: paneId,
             cwd: "/tmp/probe-cwd",
