@@ -96,15 +96,17 @@ final class JSONRPCChannel {
             if let method = message["method"] as? String {
                 let params = message["params"] as? [String: Any] ?? [:]
                 if let id = message["id"] as? Int {
-                    routed.append((id, method, params))
+                    // A server request replayed from the ring belongs to
+                    // the DEAD process's id space — routing it to
+                    // onRequest creates phantom permission cards whose
+                    // answers respond() to the WRONG live request id.
+                    if replay {
+                        replayRequests.append((id, method, params))
+                    } else {
+                        routed.append((id, method, params))
+                    }
                 } else {
                     notified.append((method, params))
-                }
-                // Replayed client→server requests are the only wire record
-                // of the user's own prompts (ring_input panes) — surface
-                // them for transcript rebuild, never for live completion.
-                if replay {
-                    replayRequests.append((message["id"] as? Int ?? 0, method, params))
                 }
                 continue
             }

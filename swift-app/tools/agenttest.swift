@@ -326,7 +326,17 @@ enum AgentTest {
         // A LIVE prompt request line is this client's own traffic — never
         // surfaced as replay.
         rcPrompt.feed(Array("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"session/prompt\",\"params\":{}}\n".utf8))
-        check(promptReplays.count == 1, "live prompt request does not surface as replay")
+        // A server request replayed from the ring carries the DEAD
+        // process's id space — routing it to onRequest creates phantom
+        // permission cards (5090: approval never seen, tools spinning).
+        var phantomServerRequests = 0
+        rcPrompt.onRequest = { _, _, _ in phantomServerRequests += 1 }
+        rcPrompt.feed(Array("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"kind\":\"command\",\"itemId\":\"exec-x\"}}\n".utf8), replay: true)
+        check(phantomServerRequests == 0 && promptReplays.count == 2,
+              "replayed server request stays out of onRequest")
+        // LIVE approval traffic still reaches onRequest.
+        rcPrompt.feed(Array("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"kind\":\"command\",\"itemId\":\"exec-y\"}}\n".utf8))
+        check(phantomServerRequests == 1, "live server request reaches onRequest")
 
         print("— integrity counters —")
         check(rpcMapper.eventsRouted > 0 && rpcMapper.framesIgnored > 0,
