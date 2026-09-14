@@ -29,6 +29,9 @@ final class CodexSession: AgentSessioning {
     /// Texts this session just sent — their agent-side userMessage
     /// echoes are suppressed live (the composer showed them already).
     private var pendingEcho: [String] = []
+    /// userMessage echo item ids already suppressed (the echo rides
+    /// BOTH item/started and item/completed — one id, one render).
+    private var suppressedEchoIds: Set<String> = []
     /// Sends parked while the thread restore is still in flight; flushed
     /// the moment the replay lands and the thread id is live.
     private var pendingSends: [(text: String, images: [AgentImage])] = []
@@ -1249,10 +1252,24 @@ final class CodexSession: AgentSessioning {
         // shows twice" report. History replays use a fresh mapper and
         // DO emit user turns (a reloaded page never showed them).
         if method == "item/started" || method == "item/completed",
-           let idx = Self.liveEchoIndex(pending: pendingEcho,
-                                        params: params) {
-            pendingEcho.remove(at: idx)
-            return
+           let item = params["item"] as? [String: Any],
+           item["type"] as? String == "userMessage",
+           let itemId = item["id"] as? String {
+            // The echo arrives TWICE (item/started then item/completed,
+            // same id — probed). Consuming one pendingEcho entry per
+            // notification left the second unmatched and rendered: the
+            // "message shows twice" report. Suppress by id: first hit
+            // consumes the pending text, second is a no-op.
+            if suppressedEchoIds.contains(itemId) { return }
+            if let idx = Self.liveEchoIndex(pending: pendingEcho,
+                                             params: params) {
+                pendingEcho.remove(at: idx)
+                suppressedEchoIds.insert(itemId)
+                if suppressedEchoIds.count > 16 {
+                    suppressedEchoIds.remove(suppressedEchoIds.first!)
+                }
+                return
+            }
         }
         // During attach-adoption the ring replays PRE-ATTACH history
         // notifications (old turns, injected auto-review prompts that
@@ -1278,6 +1295,16 @@ final class CodexSession: AgentSessioning {
             // except during ring replay, whose stale turn/started has
             // its terminal gated off and would wedge isWorking on.
             if !adoptingReplay { isWorking = true }
+        case "thread/status/changed":
+            // waitingOnApproval = commands parked on an approval the
+            // user may never have seen (the 5090 report: three tool
+            // cards spinning for minutes while codex waited). Flash it
+            // so the pane explains WHY it is quiet.
+            if let status = params["status"] as? [String: Any],
+               let flags = status["activeFlags"] as? [String],
+               flags.contains("waitingOnApproval") {
+                emit([.statusFlash("⏸ codex 正在等待命令批准…")])
+            }
         case "turn/completed", "turn/aborted":
             activeTurnId = nil
         default:
@@ -1339,6 +1366,9 @@ final class CodexSession: AgentSessioning {
 
 
     private func handleServerRequest(id: Int, method: String, params: [String: Any]) {
+        if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+            print("CODEX_SERVER_REQUEST id=\(id) method=\(method)")
+        }
         // Echo artifacts: these are methods WE initiate — a frame with
         // one of them plus an id is our own request bouncing back past
         // the echo ring, never a codex request. Answering it would
