@@ -30,8 +30,10 @@ final class CodexSession: AgentSessioning {
     /// echoes are suppressed live (the composer showed them already).
     private var pendingEcho: [String] = []
     /// userMessage echo item ids already suppressed (the echo rides
-    /// BOTH item/started and item/completed — one id, one render).
     private var suppressedEchoIds: Set<String> = []
+    /// backwardsCursor of the last items/list page — loadOlderHistory
+    /// continues from here (TUI's ThreadHistoryPagination parity).
+    private var olderItemsCursor: String?
     /// Sends parked while the thread restore is still in flight; flushed
     /// the moment the replay lands and the thread id is live.
     private var pendingSends: [(text: String, images: [AgentImage])] = []
@@ -1017,9 +1019,6 @@ final class CodexSession: AgentSessioning {
         let mapper = CodexFrameMapper()
         client.request("thread/read", ["threadId": id]) { [weak self] result in
             guard let self else { return }
-            let box = Box()
-            box.events = [.transcriptReset]
-            box.turnCount = 0
             if case .success(let value) = result,
                let thread = value["thread"] as? [String: Any] {
                 if let model = thread["model"] as? String {
@@ -1030,126 +1029,124 @@ final class CodexSession: AgentSessioning {
                     self.reasoningEffort = effort
                 }
             }
-            self.collectTurns(threadId: id, cursor: nil, box: box,
-                              mapper: mapper) {
+            self.collectTail(threadId: id, mapper: mapper) { events in
                 if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
-                    print("CODEX_REPLAY id=\(id.prefix(8)) turns=\(box.turnCount) events=\(box.events.count)")
+                    print("CODEX_REPLAY id=\(id.prefix(8)) tailEvents=\(events.count) olderCursor=\(self.olderItemsCursor != nil)")
                 }
-                done(box.events)
+                done(events)
             }
         }
     }
 
-    /// turns/list pages arrive NEWEST→OLDEST and the backward cursor
-    /// walks toward older turns (probed 2026-09-11: a page's data is
-    /// sorted by startedAt descending; requesting past the beginning
-    /// returns the same first page). Collect pages oldest-first: each
-    /// older page is PREPENDED so the final order is chronological.
-    private func collectTurns(threadId: String, cursor: String?,
-                              box: Box, mapper: CodexFrameMapper,
-                              done: @escaping () -> Void) {
-        var params: [String: Any] = ["threadId": threadId]
-        if let cursor { params["cursor"] = cursor }
-        client.request("thread/turns/list", params) { [weak self] result in
+    /// BOUNDED initial history — TUI parity (tui/src/app_server_session/
+    /// history.rs): the last turns/list(limit: INITIAL_HISTORY_TURN_LIMIT)
+    /// plus ONE cross-turn items/list page (limit: 100, newest→oldest).
+    /// The old full walk (every backward page + every turn's items)
+    /// made big remote threads take tens of seconds to first paint;
+    /// older history pages in on scroll via loadOlderHistory — the same
+    /// transcriptPrepend channel omp uses. Both page calls are probed:
+    /// turns/list honors limit; items/list without turnId pages across
+    /// turns newest→oldest with backwardsCursor.
+    private static let initialTurnLimit = 5
+    private static let itemPageLimit = 100
+
+    private func collectTail(threadId: String, mapper: CodexFrameMapper,
+                             done: @escaping ([AgentSessionEvent]) -> Void) {
+        client.request("thread/turns/list",
+                       ["threadId": threadId,
+                        "limit": Self.initialTurnLimit]) { [weak self] turnsResult in
             guard let self else { return }
-            guard case .success(let value) = result,
-                  let page = value["data"] as? [[String: Any]]
-            else {
-                self.finishReplay(box: box, mapper: mapper, done: done)
-                return
-            }
-            let ordered = Array(page.reversed()) // oldest→newest
-            // No progress (same page again) = the beginning is reached —
-            // small threads ALWAYS land here (their backwardsCursor is
-            // never null), so the item hydration must run on this path
-            // too or the summary items render and the goal turn's
-            // reasoning/agentMessage/commandExecution never appear.
-            if let firstId = ordered.first?["id"] as? String,
-               firstId == box.oldestTurnId {
-                self.hydrateTurnItems(threadId: threadId, index: 0,
-                                      box: box, mapper: mapper, done: done)
-                return
-            }
-            box.oldestTurnId = ordered.first?["id"] as? String ?? box.oldestTurnId
-            box.rawTurns.insert(contentsOf: ordered, at: 0)
-            if let older = value["backwardsCursor"] as? String, !older.isEmpty,
-               !page.isEmpty {
-                self.collectTurns(threadId: threadId, cursor: older,
-                                  box: box, mapper: mapper, done: done)
-            } else {
-                // Turns complete — hydrate each turn's FULL items (the
-                // turns payload is a SUMMARY view: an interrupted turn
-                // reports items:0 while thread/items/list returns its
-                // reasoning + agentMessage + commandExecution — probed
-                // 2026-09-11 on the 你是可用的么 thread).
-                self.hydrateTurnItems(threadId: threadId, index: 0,
-                                      box: box, mapper: mapper, done: done)
+            // turns page arrives newest→oldest; the tail renders
+            // oldest→newest with each turn's error frame interleaved.
+            let turns = (((try? turnsResult.get())?["data"]
+                as? [[String: Any]]) ?? []).reversed()
+            self.client.request("thread/items/list",
+                                ["threadId": threadId,
+                                 "limit": Self.itemPageLimit,
+                                 "sortDirection": "desc"]) { [weak self] itemsResult in
+                guard let self else { return }
+                guard let value = try? itemsResult.get() else {
+                    self.adoptingReplay = false
+                    done([.transcriptReset, .historyTruncated(false)])
+                    self.flushPendingSends()
+                    return
+                }
+                let entries = value["data"] as? [[String: Any]] ?? []
+                self.olderItemsCursor = value["backwardsCursor"] as? String
+                let turnIds = Set(turns.compactMap { $0["id"] as? String })
+                var byTurn: [String: [[String: Any]]] = [:]
+                var olderItems: [[String: Any]] = []
+                for entry in entries {   // newest→oldest
+                    guard let item = entry["item"] as? [String: Any] else { continue }
+                    if let tid = entry["turnId"] as? String, turnIds.contains(tid) {
+                        byTurn[tid, default: []].append(item)
+                    } else {
+                        olderItems.append(item)
+                    }
+                }
+                var events: [AgentSessionEvent] = []
+                for turn in turns {   // oldest→newest of the tail
+                    if let tid = turn["id"] as? String {
+                        for item in (byTurn[tid] ?? []).reversed() {
+                            events += mapper.map(
+                                method: "item/completed",
+                                params: ["item": item, "threadId": ""])
+                        }
+                    }
+                    events += mapper.map(method: "turn/completed",
+                                         params: ["turn": turn])
+                }
+                // Items belonging to turns older than the tail's turn
+                // list still arrived in the first 100 — prepend them,
+                // oldest first.
+                let olderEvents = olderItems.reversed().flatMap { item in
+                    mapper.map(method: "item/completed",
+                               params: ["item": item, "threadId": ""])
+                }
+                events.insert(contentsOf: olderEvents, at: 0)
+                self.adoptingReplay = false
+                done([.transcriptReset]
+                     + events
+                     + [.historyTruncated(self.olderItemsCursor != nil
+                                          && !entries.isEmpty)])
+                self.flushPendingSends()
             }
         }
     }
 
-    /// Fetch each turn's FULL item list (thread/items/list, cursor-paged)
-    /// and replace the summary view before mapping.
-    private func hydrateTurnItems(threadId: String, index: Int,
-                                  box: Box, mapper: CodexFrameMapper,
-                                  done: @escaping () -> Void) {
-        guard index < box.rawTurns.count else {
-            finishReplay(box: box, mapper: mapper, done: done)
+    /// One older page on scroll: items/list(cursor, desc) → events the
+    /// host prepends (omp's loadOlderHistory contract; nil = no more,
+    /// the page hides its sentinel).
+    func loadOlderHistory(completion: @escaping ([AgentSessionEvent]?) -> Void) {
+        guard let tid = threadId, let cursor = olderItemsCursor else {
+            completion(nil)
             return
         }
-        guard let turnId = box.rawTurns[index]["id"] as? String else {
-            hydrateTurnItems(threadId: threadId, index: index + 1,
-                             box: box, mapper: mapper, done: done)
-            return
-        }
-        fetchTurnItems(threadId: threadId, turnId: turnId, cursor: nil,
-                       acc: []) { [weak self] items in
-            box.rawTurns[index]["items"] = items
-            self?.hydrateTurnItems(threadId: threadId, index: index + 1,
-                                   box: box, mapper: mapper, done: done)
-        }
-    }
-
-    private func fetchTurnItems(threadId: String, turnId: String,
-                                cursor: String?, acc: [[String: Any]],
-                                done: @escaping ([[String: Any]]) -> Void) {
-        var params: [String: Any] = ["threadId": threadId, "turnId": turnId]
-        if let cursor { params["cursor"] = cursor }
-        client.request("thread/items/list", params) { [weak self] result in
-            guard let self else { return }
-            guard case .success(let value) = result else {
-                done(acc)
+        client.request("thread/items/list",
+                       ["threadId": tid, "cursor": cursor,
+                        "limit": Self.itemPageLimit,
+                        "sortDirection": "desc"]) { [weak self] result in
+            guard let self, let value = try? result.get() else {
+                completion(nil)
                 return
             }
-            let page = ((value["data"] as? [[String: Any]]) ?? [])
-                .compactMap { $0["item"] as? [String: Any] }
-            let all = acc + page
-            if let next = value["nextCursor"] as? String, !next.isEmpty {
-                self.fetchTurnItems(threadId: threadId, turnId: turnId,
-                                    cursor: next, acc: all, done: done)
-            } else {
-                done(all)
+            let entries = (value["data"] as? [[String: Any]]) ?? []
+            guard !entries.isEmpty else {
+                self.olderItemsCursor = nil
+                completion(nil)
+                return
             }
-        }
-    }
-
-    /// Map the collected turns (chronological), open the live gate, and
-    /// release any sends parked while the restore was in flight.
-    private func finishReplay(box: Box, mapper: CodexFrameMapper,
-                              done: @escaping () -> Void) {
-        adoptingReplay = false
-        for turn in box.rawTurns {
-            box.turnCount += 1
-            for item in turn["items"] as? [[String: Any]] ?? [] {
-                box.events += mapper.map(
-                    method: "item/completed",
-                    params: ["item": item, "threadId": ""])
+            self.olderItemsCursor = value["backwardsCursor"] as? String ?? cursor
+            // Fresh mapper: prepend pages dedupe independently.
+            let mapper = CodexFrameMapper()
+            var events: [AgentSessionEvent] = []
+            for entry in entries.reversed() {   // oldest→newest of this page
+                guard let item = entry["item"] as? [String: Any] else { continue }
+                events += mapper.map(method: "item/completed",
+                                     params: ["item": item, "threadId": ""])
             }
-            box.events += mapper.map(method: "turn/completed",
-                                     params: ["turn": turn])
+            completion(events.isEmpty ? nil : events)
         }
-        done()
-        flushPendingSends()
     }
 
     /// Fire the parked sends in order; the first takes the turn, the
@@ -1193,17 +1190,6 @@ final class CodexSession: AgentSessioning {
         resume(bare: false)
     }
 
-    /// Accumulator for the paginated replay (async pages can't share an
-    /// inout across escaping closures).
-    private final class Box {
-        var events: [AgentSessionEvent] = []
-        var turnCount = 0
-        /// Turns collected oldest-first across backward pages.
-        var rawTurns: [[String: Any]] = []
-        /// First turn of the newest collected page — a repeated id means
-        /// the walk hit the beginning.
-        var oldestTurnId: String?
-    }
 
     func shutdown() {
         pane?.close()
