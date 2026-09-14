@@ -883,12 +883,34 @@ final class CodexSession: AgentSessioning {
 
     func cancel() {
         guard let threadId else { return }
-        client.notify("turn/interrupt", ["threadId": threadId])
+        // A parked approval blocks the turn harder than the turn itself:
+        // decline every outstanding one first (schema: TurnInterrupt
+        // only carries threadId+turnId; the approval is a separate
+        // server request that must be answered).
+        let outstanding = pendingApprovals
+        pendingApprovals.removeAll()
+        for id in outstanding {
+            client.respond(id: id, result: ["decision": "decline"])
+        }
+        // turn/interrupt is a REQUEST ({threadId, turnId}) — the old
+        // notify-without-turnId was silently ignored (Esc/停止 did
+        // nothing while the pane hung on 思考中).
+        var params: [String: Any] = ["threadId": threadId]
+        if let turnId = activeTurnId {
+            params["turnId"] = turnId
+        }
+        client.request("turn/interrupt", params) { [weak self] _ in
+            // Interrupt settles locally too: the server's turn/aborted
+            // may race the pane's exit; never leave a wedged working.
+            self?.isWorking = false
+            self?.emit([.turnEnded(stopReason: "interrupted")])
+        }
     }
 
     func respondPermission(requestID: String, optionId: String) {
         guard let id = Int(requestID) else { return }
         let decision = optionId.hasPrefix("allow") ? "accept" : "decline"
+        pendingApprovals.removeAll { $0 == id }
         client.respond(id: id, result: ["decision": decision])
     }
 
@@ -1292,6 +1314,7 @@ final class CodexSession: AgentSessioning {
             let rid = (params["requestId"] as? Int)
                 ?? (params["requestId"] as? String).flatMap(Int.init)
             if let rid {
+                pendingApprovals.removeAll { $0 == rid }
                 emit([.permissionResolved(requestID: String(rid))])
             }
         case "thread/name/updated":
@@ -1395,6 +1418,7 @@ final class CodexSession: AgentSessioning {
             client.respond(id: id, result: [:])
             return
         }
+        pendingApprovals.append(id)
         let title: String
         if let item = params["item"] as? [String: Any] {
             let command = (item["command"] as? [String: Any])?["command"] as? String
@@ -1408,6 +1432,11 @@ final class CodexSession: AgentSessioning {
             requestID: String(id), title: title)
         emit([.permissionRequested(prompt)])
     }
+
+    /// Server request ids awaiting our decision (requestApproval /
+    /// requestUserInput). cancel() declines them all; responses and
+    /// server-side resolutions retire entries.
+    private var pendingApprovals: [Int] = []
 
     private func emit(_ events: [AgentSessionEvent]) {
         guard !events.isEmpty else { return }
