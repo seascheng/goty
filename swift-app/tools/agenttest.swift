@@ -590,6 +590,54 @@ enum AgentTest {
         }
         check(CodexFrameMapper.textOf([["type": "text", "text": "a"], ["type": "text", "text": "b"]]) == "ab",
               "codex content text join")
+        // Protocol-audit branches (docs/codex-protocol-coverage.md):
+        // reasoning deltas stream + the completed item stays silent;
+        // commandExecution/outputDelta accumulates into the tool card;
+        // turn/plan/updated maps steps to plan entries.
+        do {
+            let m = CodexFrameMapper()
+            var thoughts: [String] = []
+            for d in ["思考", "片段"] {
+                thoughts += m.map(method: "item/reasoning/summaryTextDelta",
+                                  params: ["itemId": "rs_1", "delta": d])
+                    .compactMap { if case .thoughtChunk(let t) = $0 { return t } else { return nil } }
+            }
+            let completed = m.map(method: "item/completed",
+                                  params: ["item": ["type": "reasoning", "id": "rs_1",
+                                                    "summary": ["思考片段"], "content": []]])
+            check(thoughts == ["思考", "片段"] && completed.isEmpty,
+                  "reasoning deltas stream and the completed item does not repeat")
+        }
+        do {
+            let m = CodexFrameMapper()
+            var outputs: [String] = []
+            for d in ["line1\n", "line2\n"] {
+                outputs += m.map(method: "item/commandExecution/outputDelta",
+                                 params: ["itemId": "exec_9", "delta": d])
+                    .compactMap { ev -> String? in
+                        if case .toolCallUpdate(_, _, _, _, _, let out, _, _) = ev {
+                            return out.first?.text
+                        }
+                        return nil
+                    }
+            }
+            check(outputs == ["line1\n", "line1\nline2\n"],
+                  "outputDelta accumulates the full buffer per item")
+        }
+        do {
+            let m = CodexFrameMapper()
+            let events = m.map(method: "turn/plan/updated", params: [
+                "threadId": "t", "turnId": "u", "explanation": NSNull(),
+                "plan": [["step": "收集证据", "status": "completed"],
+                         ["step": "写文档", "status": "pending"]] as [[String: Any]]])
+            if case .plan(let entries)? = events.first {
+                check(entries.map(\.content) == ["收集证据", "写文档"]
+                      && entries.map(\.status) == ["completed", "pending"],
+                      "plan steps map with statuses")
+            } else {
+                check(false, "turn/plan/updated emits a plan")
+            }
+        }
         print("— missed-settle heal (/compact stuck-working regression) —")
         // /compact finishes without agent_settled: two consecutive idle
         // get_state reads must be allowed to force the turn closed…

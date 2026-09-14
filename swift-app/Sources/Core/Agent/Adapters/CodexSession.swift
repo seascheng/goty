@@ -1295,6 +1295,30 @@ final class CodexSession: AgentSessioning {
             // except during ring replay, whose stale turn/started has
             // its terminal gated off and would wedge isWorking on.
             if !adoptingReplay { isWorking = true }
+        case "serverRequest/resolved":
+            // The server settled a pending approval itself (e.g. its
+            // 154s timeout, probed on 5090) — retract the permission
+            // card or the pane waits on a dialog nobody can answer.
+            let rid = (params["requestId"] as? Int)
+                ?? (params["requestId"] as? String).flatMap(Int.init)
+            if let rid {
+                emit([.permissionResolved(requestID: String(rid))])
+            }
+        case "thread/name/updated":
+            // /rename and codex's own auto-naming — follow the live
+            // title (omp parity via sessionTitle).
+            if (params["threadId"] as? String) == threadId,
+               let name = params["threadName"] as? String, !name.isEmpty {
+                emit([.sessionTitle(name)])
+            }
+        case "warning", "guardianWarning", "configWarning":
+            if let msg = params["message"] as? String, !msg.isEmpty {
+                emit([.notice("⚠︎ \(msg)")])
+            }
+        case "skills/changed":
+            // Schema: treat as invalidation and re-run skills/list with
+            // the current parameters.
+            loadCommands()
         case "thread/status/changed":
             // waitingOnApproval = commands parked on an approval the
             // user may never have seen (the 5090 report: three tool

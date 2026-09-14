@@ -19,6 +19,8 @@ final class CodexFrameMapper {
     /// item/agentMessage/delta — their completed item must not repeat it.
     private var streamedText: Set<String> = []
     private var itemTitles: [String: String] = [:]
+    /// Per-commandExecution accumulated stdout from outputDelta frames.
+    private var outputBuffers: [String: String] = [:]
 
     /// Integrity accounting (agenttest asserts these).
     private(set) var notificationsRouted = 0
@@ -45,6 +47,51 @@ final class CodexFrameMapper {
             }
             streamedText.insert(id)
             return [.messageChunk(delta)]
+        case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta":
+            // Live thinking stream (schema: {threadId, turnId, itemId,
+            // delta, summaryIndex|contentIndex}). The completed
+            // reasoning item repeats the whole summary — mark the id so
+            // the completed case stays silent.
+            guard let id = params["itemId"] as? String,
+                  let delta = params["delta"] as? String, !delta.isEmpty
+            else {
+                notificationsIgnored += 1
+                return []
+            }
+            streamedText.insert(id)
+            return [.thoughtChunk(delta)]
+        case "item/commandExecution/outputDelta":
+            // {threadId, turnId, itemId, delta} — the command's stdout
+            // streams; accumulate per item and re-emit the whole buffer
+            // (the store upserts by id, so the card shows the full log).
+            guard let id = params["itemId"] as? String,
+                  let delta = params["delta"] as? String
+            else {
+                notificationsIgnored += 1
+                return []
+            }
+            outputBuffers[id, default: ""] += delta
+            return [.toolCallUpdate(
+                id: id, title: itemTitles[id] ?? "",
+                kind: "execute", status: "in_progress",
+                content: [],
+                output: [AgentContent(type: "text", text: outputBuffers[id] ?? "",
+                                      path: nil)],
+                rawInput: nil, oldText: nil)]
+        case "turn/plan/updated":
+            // {threadId, turnId, explanation, plan: [{step, status}]}
+            let steps = params["plan"] as? [[String: Any]] ?? []
+            let entries = steps.compactMap { raw -> AgentPlanEntry? in
+                guard let step = raw["step"] as? String else { return nil }
+                return AgentPlanEntry(content: step,
+                                      priority: nil,
+                                      status: raw["status"] as? String)
+            }
+            guard !entries.isEmpty else {
+                notificationsIgnored += 1
+                return []
+            }
+            return [.plan(entries)]
         case "turn/completed":
             return mapTurnCompleted(params)
         case "turn/aborted":
@@ -106,6 +153,9 @@ final class CodexFrameMapper {
         case "reasoning":
             // History items carry summary[] + content[] (the TUI's
             // ReasoningSummaryCell); raw content wins when present.
+            // Live-delta-streamed reasoning already rendered its text —
+            // the completed item repeats it whole.
+            if streamedText.contains(id) { return [] }
             let content = (item["content"] as? [String])?
                 .joined(separator: "\n\n") ?? ""
             let summary = (item["summary"] as? [String])?
