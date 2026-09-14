@@ -1339,6 +1339,33 @@ final class CodexSession: AgentSessioning {
             if let msg = params["message"] as? String, !msg.isEmpty {
                 emit([.notice("⚠︎ \(msg)")])
             }
+        case "thread/goal/updated":
+            // The goal loop runs AUTONOMOUSLY server-side (probed: ask a
+            // question, go idle, immediately open another turn — ask
+            // again, declare blocked, pause). The status flash is the
+            // only cue the pane has for WHY the agent keeps talking.
+            if let goal = params["goal"] as? [String: Any],
+               (params["threadId"] as? String) == threadId {
+                let status = goal["status"] as? String ?? ""
+                let objective = (goal["objective"] as? String ?? "")
+                let brief = String(objective.prefix(40))
+                switch status {
+                case "blocked":
+                    emit([.statusFlash("⏸ goal 已阻塞，等待你的回答（/goal resume 恢复）")])
+                case "paused":
+                    emit([.statusFlash("goal 已暂停（/goal resume 恢复）")])
+                case "active" where !brief.isEmpty:
+                    emit([.statusFlash("🎯 goal 进行中：\(brief)…")])
+                default:
+                    break
+                }
+            }
+        case "thread/goal/cleared":
+            emit([.statusFlash("goal 已清除")])
+        case "warning", "guardianWarning", "configWarning":
+            if let msg = params["message"] as? String, !msg.isEmpty {
+                emit([.notice("⚠︎ \(msg)")])
+            }
         case "skills/changed":
             // Schema: treat as invalidation and re-run skills/list with
             // the current parameters.
