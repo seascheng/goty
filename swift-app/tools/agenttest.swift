@@ -559,6 +559,55 @@ enum AgentTest {
                   && completed.isEmpty,
                   "agentMessage deltas stream and the completed item does not repeat them")
         }
+        // paseo: "emits only the missing assistant suffix when completed
+        // text extends streamed deltas" — a completed text longer than
+        // what streamed backfills the gap, never the whole text.
+        do {
+            let m = CodexFrameMapper()
+            _ = m.map(method: "item/agentMessage/delta",
+                      params: ["itemId": "m2", "delta": "Hel"])
+            _ = m.map(method: "item/agentMessage/delta",
+                      params: ["itemId": "m2", "delta": "lo"])
+            let suffixEvents = m.map(method: "item/completed", params: [
+                "item": ["type": "agentMessage", "id": "m2",
+                         "text": "Hello world"]])
+            let texts = suffixEvents.compactMap { event -> String? in
+                if case .messageChunk(let t) = event { return t }
+                return nil
+            }
+            check(texts == [" world"],
+                  "completed assistant text backfills only the missing suffix")
+            // Equal text backfills nothing.
+            _ = m.map(method: "item/agentMessage/delta",
+                      params: ["itemId": "m3", "delta": "same"])
+            check(m.map(method: "item/completed", params: [
+                "item": ["type": "agentMessage", "id": "m3",
+                         "text": "same"]]).isEmpty,
+                  "equal completed assistant text stays silent")
+        }
+        // paseo: "streams Codex reasoning deltas and does not replay
+        // completed reasoning" + missing-suffix backfill.
+        do {
+            let m = CodexFrameMapper()
+            var thoughts: [String] = []
+            for d in ["思", "考中"] {
+                thoughts += m.map(method: "item/reasoning/summaryTextDelta",
+                                  params: ["itemId": "r2", "delta": d])
+                    .compactMap { if case .thoughtChunk(let t) = $0 { return t } else { return nil } }
+            }
+            let backfill = m.map(method: "item/completed", params: [
+                "item": ["type": "reasoning", "id": "r2",
+                         "summary": ["思考中…完毕"], "content": []]])
+                .compactMap { if case .thoughtChunk(let t) = $0 { return t } else { return nil } }
+            check(thoughts == ["思", "考中"] && backfill == ["…完毕"],
+                  "reasoning deltas stream and completed backfills only the gap")
+        }
+        // Approval decision literals (paseo round-trips these through
+        // the real app-server transport; schema-verified).
+        check(CodexSession.approvalDecision("allow_once") == "accept"
+              && CodexSession.approvalDecision("allow_session") == "acceptForSession"
+              && CodexSession.approvalDecision("reject_once") == "decline",
+              "approval options map to schema decision literals")
         // turn/aborted (turn/interrupt) ends the turn without
         // turn/completed; token usage maps `last` (never cumulative
         // `total`) as the context-window measure.

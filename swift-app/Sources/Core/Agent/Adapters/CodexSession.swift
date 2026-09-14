@@ -909,16 +909,20 @@ final class CodexSession: AgentSessioning {
 
     func respondPermission(requestID: String, optionId: String) {
         guard let id = Int(requestID) else { return }
-        // codex CommandExecution/FileChange ApprovalDecision literals:
-        // accept / acceptForSession / decline (schema-verified).
-        let decision: String
-        switch optionId {
-        case "allow_once": decision = "accept"
-        case "allow_session": decision = "acceptForSession"
-        default: decision = "decline"
-        }
         pendingApprovals.removeAll { $0 == id }
-        client.respond(id: id, result: ["decision": decision])
+        client.respond(id: id,
+                       result: ["decision": Self.approvalDecision(optionId)])
+    }
+
+    /// codex CommandExecution/FileChange ApprovalDecision literals:
+    /// accept / acceptForSession / decline (schema-verified; paseo
+    /// round-trips these through the real app-server transport).
+    static func approvalDecision(_ optionId: String) -> String {
+        switch optionId {
+        case "allow_once": return "accept"
+        case "allow_session": return "acceptForSession"
+        default: return "decline"
+        }
     }
 
     func setConfigOption(id: String, value: String) {

@@ -15,9 +15,9 @@ import Foundation
 /// silently dropped.
 final class CodexFrameMapper {
     private var emittedText: Set<String> = []
-    /// Item ids whose text already streamed via
-    /// item/agentMessage/delta — their completed item must not repeat it.
-    private var streamedText: Set<String> = []
+    /// Item ids → text already streamed via deltas; a completed item
+    /// backfills only the trailing gap it never streamed.
+    private var streamedTexts: [String: String] = [:]
     private var itemTitles: [String: String] = [:]
     /// Per-commandExecution accumulated stdout from outputDelta frames.
     private var outputBuffers: [String: String] = [:]
@@ -45,20 +45,20 @@ final class CodexFrameMapper {
                 notificationsIgnored += 1
                 return []
             }
-            streamedText.insert(id)
+            streamedTexts[id, default: ""] += delta
             return [.messageChunk(delta)]
         case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta":
             // Live thinking stream (schema: {threadId, turnId, itemId,
-            // delta, summaryIndex|contentIndex}). The completed
-            // reasoning item repeats the whole summary — mark the id so
-            // the completed case stays silent.
+            // delta, summaryIndex|contentIndex}). The completed item
+            // repeats the whole summary; a trailing gap is backfilled
+            // (paseo: "emits only the missing reasoning suffix").
             guard let id = params["itemId"] as? String,
                   let delta = params["delta"] as? String, !delta.isEmpty
             else {
                 notificationsIgnored += 1
                 return []
             }
-            streamedText.insert(id)
+            streamedTexts[id, default: ""] += delta
             return [.thoughtChunk(delta)]
         case "item/commandExecution/outputDelta":
             // {threadId, turnId, itemId, delta} — the command's stdout
@@ -143,24 +143,32 @@ final class CodexFrameMapper {
         case "agentMessage", "assistantMessage":
             // 0.153 tags the assistant's reply `agentMessage` (the
             // 0.147-era docs said assistantMessage — accept both).
-            // Deltas already delivered the text: the completed item
-            // repeats it whole and must not re-render.
-            if streamedText.contains(id) { return [] }
+            // Deltas already delivered the text; the completed item
+            // repeats it whole — EXCEPT a trailing gap the stream
+            // missed, which is backfilled (paseo: "emits only the
+            // missing assistant suffix").
             let text = CodexFrameMapper.textOf(item["text"] ?? item["content"])
+            if let streamed = streamedTexts[id] {
+                return Self.suffix(of: text, after: streamed)
+                    .map { [.messageChunk($0)] } ?? []
+            }
             guard !text.isEmpty, !emittedText.contains(id) else { return [] }
             emittedText.insert(id)
             return [.messageChunk(text)]
         case "reasoning":
             // History items carry summary[] + content[] (the TUI's
             // ReasoningSummaryCell); raw content wins when present.
-            // Live-delta-streamed reasoning already rendered its text —
-            // the completed item repeats it whole.
-            if streamedText.contains(id) { return [] }
+            // A live-streamed item repeats its text whole — minus a
+            // trailing gap, backfilled the same way.
             let content = (item["content"] as? [String])?
                 .joined(separator: "\n\n") ?? ""
             let summary = (item["summary"] as? [String])?
                 .joined(separator: "\n") ?? ""
             let text = content.isEmpty ? summary : content
+            if let streamed = streamedTexts[id] {
+                return Self.suffix(of: text, after: streamed)
+                    .map { [.thoughtChunk($0)] } ?? []
+            }
             guard !text.isEmpty else { return [] }
             return [.thoughtChunk(text)]
         case "commandExecution":
@@ -218,6 +226,17 @@ final class CodexFrameMapper {
         let status = turn["status"] as? String
         events.append(.turnEnded(stopReason: status))
         return events
+    }
+
+    /// The trailing gap of a completed text the delta stream never
+    /// delivered (paseo's missing-suffix contract): nil = nothing to
+    /// backfill (equal, shorter, or divergent — never re-render).
+    static func suffix(of full: String, after streamed: String) -> String? {
+        guard full.count >= streamed.count, full.hasPrefix(streamed) else {
+            return nil
+        }
+        let gap = String(full.dropFirst(streamed.count))
+        return gap.isEmpty ? nil : gap
     }
 
     /// codex content: [{type:"text",text:…}] (also tolerates raw string).
