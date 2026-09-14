@@ -18,12 +18,23 @@ enum RPCFailure: Error, LocalizedError {
 /// loosely typed ([String: Any]) on purpose; the session adapter owns
 /// the typed extraction. Outbound goes through onOutbound → PaneSession.sendInput.
 ///
-/// Concurrency: frames arrive on the pane's reader thread while requests
-/// are sent from the main thread — all mutable state (pending map, ids,
-/// echo ring, splitter) is lock-guarded, and request completions fire
-/// OUTSIDE the lock (connect chains issue follow-up requests from inside
-/// completions). `pending` is inserted BEFORE the request hits the wire,
-/// so a fast response can never outrun its own registration.
+/// Concurrency (2026-09-14 spec): `feed` runs on the pane's reader
+/// thread; `request`/`notify`/`respond` run wherever the adapter calls
+/// them. Two NARROW locks replace the old single one —
+/// - `framingLock` guards only the splitter (line extraction);
+/// - `stateLock` guards pending map, id counter, echo ring, counters.
+/// JSON parsing happens under NO lock on the reader thread (a large
+/// replay no longer blocks a concurrent `request`), and every callback
+/// fires outside both locks — consumers may answer a server request
+/// synchronously (respond → send → same lock) or chain follow-ups;
+/// under a lock that is a guaranteed self-deadlock (codex hit it on
+/// its first server request; 2026-08-29).
+///
+/// Delivery: each `feed` builds ONE ordered `Delivery` array (wire
+/// order, callbacks NOT grouped by type) and hands it to the configured
+/// `callbackQueue` in a single hop — production uses `.main`, so a
+/// 200k-frame replay costs one main-queue dispatch, not one per line.
+/// A nil queue delivers synchronously (tests/probes).
 ///
 /// Echo filter: the no-echo stty runs inside the pty microseconds after
 /// fork; anything we write before it lands can come back verbatim. The
@@ -37,6 +48,20 @@ enum RPCFailure: Error, LocalizedError {
 /// pending requests; notifications and server→client requests still
 /// route (transcript rebuild + permission revival).
 final class JSONRPCChannel {
+    typealias Parser = (Data) -> Any?
+
+    /// One recognized wire message, in wire order. Completions carry
+    /// their completion so a single ordered pass can fire everything.
+    private enum Delivery {
+        case unparseable(String)
+        case notification(String, [String: Any])
+        case request(Int, String, [String: Any])
+        case replayRequest(Int, String, [String: Any])
+        case orphan([String: Any])
+        case completion(Result<[String: Any], RPCFailure>,
+                        (Result<[String: Any], RPCFailure>) -> Void)
+    }
+
     var onNotification: ((String, [String: Any]) -> Void)?
     /// Non-JSON output lines (agent stderr merges into the pane);
     /// counted always, surfaced for death-message diagnosis.
@@ -57,42 +82,73 @@ final class JSONRPCChannel {
     /// updates never echo prompts. Fires outside the lock, replay only.
     var onReplayRequest: ((Int, String, [String: Any]) -> Void)?
 
-    private let lock = NSLock()
+    private let callbackQueue: DispatchQueue?
+    private let parser: Parser
+    private let framingLock = NSLock()
+    private let stateLock = NSLock()
+    private var splitter = NdjsonSplitter()
     private var nextID = 1
     private var pending: [Int: (Result<[String: Any], RPCFailure>) -> Void] = [:]
     private var recentOut: [String] = []
-    private var splitter = NdjsonSplitter()
     private static let echoRing = 32
 
     /// Integrity accounting (probes/agenttest assert these).
-    private(set) var messagesRouted = 0
-    private(set) var unparseableLines = 0
+    private var _messagesRouted = 0
+    private var _unparseableLines = 0
+
+    init(callbackQueue: DispatchQueue? = nil,
+         parser: @escaping Parser = { try? JSONSerialization.jsonObject(with: $0) }) {
+        self.callbackQueue = callbackQueue
+        self.parser = parser
+    }
+
+    var messagesRouted: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _messagesRouted
+    }
+
+    var unparseableLines: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _unparseableLines
+    }
+
+    var debugPendingCount: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return pending.count
+    }
 
     /// `replay`: consuming ring history — see the replay-mode notes above.
     /// ALL callbacks (completions, notifications, requests) fire OUTSIDE
-    /// the lock: a consumer may answer a server request synchronously
-    /// (respond → send → same lock) or chain follow-ups — under the lock
-    /// that is a guaranteed self-deadlock (codex hit it on its first
-    /// server request; 2026-08-29).
+    /// the locks on the configured callback queue, in wire order.
     func feed(_ bytes: [UInt8], replay: Bool = false) {
-        var fired: [(Result<[String: Any], RPCFailure>,
-                     (Result<[String: Any], RPCFailure>) -> Void)] = []
-        var routed: [(Int, String, [String: Any])] = []
-        var notified: [(String, [String: Any])] = []
-        var unparseable: [String] = []
-        var orphanResults: [[String: Any]] = []
-        var replayRequests: [(Int, String, [String: Any])] = []
-        lock.lock()
-        for line in splitter.feed(bytes) {
-            if recentOut.contains(line) { continue }
+        // 1. Extract complete lines under the narrow framing lock only.
+        framingLock.lock()
+        let lines = splitter.feed(bytes)
+        framingLock.unlock()
+
+        // 2. Parse and classify off-lock, on the reader thread.
+        var deliveries: [Delivery] = []
+        deliveries.reserveCapacity(lines.count)
+        for line in lines {
+            stateLock.lock()
+            let echoed = recentOut.contains(line)
+            stateLock.unlock()
+            if echoed { continue }
             guard let data = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: data),
+                  let json = parser(data),
                   let message = json as? [String: Any] else {
-                unparseableLines += 1
-                unparseable.append(line)
+                stateLock.lock()
+                _unparseableLines += 1
+                stateLock.unlock()
+                deliveries.append(.unparseable(line))
                 continue
             }
-            messagesRouted += 1
+            stateLock.lock()
+            _messagesRouted += 1
+            stateLock.unlock()
             if let method = message["method"] as? String {
                 let params = message["params"] as? [String: Any] ?? [:]
                 if let id = message["id"] as? Int {
@@ -101,12 +157,12 @@ final class JSONRPCChannel {
                     // onRequest creates phantom permission cards whose
                     // answers respond() to the WRONG live request id.
                     if replay {
-                        replayRequests.append((id, method, params))
+                        deliveries.append(.replayRequest(id, method, params))
                     } else {
-                        routed.append((id, method, params))
+                        deliveries.append(.request(id, method, params))
                     }
                 } else {
-                    notified.append((method, params))
+                    deliveries.append(.notification(method, params))
                 }
                 continue
             }
@@ -114,45 +170,81 @@ final class JSONRPCChannel {
             // it surfaces to onOrphanResult instead (live id re-capture).
             if replay {
                 if let result = message["result"] as? [String: Any] {
-                    orphanResults.append(result)
+                    deliveries.append(.orphan(result))
                 }
                 continue
             }
-            guard let id = message["id"] as? Int,
-                  let completion = pending.removeValue(forKey: id) else {
+            stateLock.lock()
+            let completion: ((Result<[String: Any], RPCFailure>) -> Void)?
+            if let id = message["id"] as? Int {
+                completion = pending.removeValue(forKey: id)
+            } else {
+                completion = nil
+            }
+            stateLock.unlock()
+            guard let completion else {
                 // Live traffic can also orphan a response — a request we
                 // already timed out of. Same hook, same reason.
                 if let result = message["result"] as? [String: Any] {
-                    orphanResults.append(result)
+                    deliveries.append(.orphan(result))
                 }
                 continue
             }
             if let error = message["error"] as? [String: Any],
                let text = error["message"] as? String {
-                fired.append((.failure(.message(text)), completion))
+                deliveries.append(.completion(.failure(.message(text)), completion))
             } else if let result = message["result"] as? [String: Any] {
-                fired.append((.success(result), completion))
+                deliveries.append(.completion(.success(result), completion))
             } else {
-                fired.append((.success([:]), completion))
+                deliveries.append(.completion(.success([:]), completion))
             }
         }
-        lock.unlock()
-        for line in unparseable { onUnparseable?(line) }
-        for (method, params) in notified { onNotification?(method, params) }
-        for (id, method, params) in routed { onRequest?(id, method, params) }
-        for (id, method, params) in replayRequests { onReplayRequest?(id, method, params) }
-        for result in orphanResults { onOrphanResult?(result) }
-        for (result, completion) in fired { completion(result) }
+        deliver(deliveries)
+    }
+
+    /// 3-5. One queue hop for the whole batch, no lock held, wire order.
+    private func deliver(_ deliveries: [Delivery]) {
+        guard !deliveries.isEmpty else { return }
+        let work = { [self] in
+            for delivery in deliveries {
+                switch delivery {
+                case .unparseable(let line): onUnparseable?(line)
+                case .notification(let method, let params): onNotification?(method, params)
+                case .request(let id, let method, let params): onRequest?(id, method, params)
+                case .replayRequest(let id, let method, let params): onReplayRequest?(id, method, params)
+                case .orphan(let result): onOrphanResult?(result)
+                case .completion(let result, let completion): completion(result)
+                }
+            }
+        }
+        if let callbackQueue {
+            callbackQueue.async(execute: work)
+        } else {
+            work()
+        }
+    }
+
+    /// Fail EVERY outstanding request exactly once (transport exit,
+    /// disconnect, shutdown, or a new transport epoch) — atomically
+    /// drain, then deliver outside the lock. Unlike closing the channel,
+    /// this leaves the id space reusable for a reconnect.
+    func failPending(reason: String) {
+        stateLock.lock()
+        let completions = Array(pending.values)
+        pending.removeAll(keepingCapacity: true)
+        stateLock.unlock()
+        let failure = Result<[String: Any], RPCFailure>.failure(.message(reason))
+        deliver(completions.map { .completion(failure, $0) })
     }
 
     @discardableResult
     func request(_ method: String, _ params: [String: Any],
                  completion: @escaping (Result<[String: Any], RPCFailure>) -> Void) -> Int {
-        lock.lock()
+        stateLock.lock()
         let id = nextID
         nextID += 1
         pending[id] = completion
-        lock.unlock()
+        stateLock.unlock()
         send(["jsonrpc": "2.0", "id": id, "method": method, "params": params])
         return id
     }
@@ -169,7 +261,7 @@ final class JSONRPCChannel {
     private func send(_ message: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: message),
               let line = String(data: data, encoding: .utf8) else { return }
-        lock.lock()
+        stateLock.lock()
         // Ring stores the BARE line — the same shape NdjsonSplitter
         // yields on the way in (terminator stripped, \r trimmed). The
         // ring used to store the "\n"-terminated wire form and never
@@ -178,7 +270,7 @@ final class JSONRPCChannel {
         // response completed our own pending handshake).
         recentOut.append(line)
         if recentOut.count > Self.echoRing { recentOut.removeFirst(recentOut.count - Self.echoRing) }
-        lock.unlock()
+        stateLock.unlock()
         onOutbound?(Array((line + "\n").utf8))
     }
 }

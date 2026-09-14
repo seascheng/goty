@@ -338,6 +338,70 @@ enum AgentTest {
         rcPrompt.feed(Array("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"kind\":\"command\",\"itemId\":\"exec-y\"}}\n".utf8))
         check(phantomServerRequests == 1, "live server request reaches onRequest")
 
+        print("— JSONRPCChannel callback queue + lifecycle —")
+        func wait(_ semaphore: DispatchSemaphore, seconds: Double = 1) -> Bool {
+            semaphore.wait(timeout: .now() + seconds) == .success
+        }
+        let deliveryQueue = DispatchQueue(label: "goty.agenttest.rpc-callback")
+        let deliveryKey = DispatchSpecificKey<String>()
+        deliveryQueue.setSpecific(key: deliveryKey, value: "rpc")
+        let delivered = DispatchSemaphore(value: 0)
+        let queued = JSONRPCChannel(callbackQueue: deliveryQueue)
+        var callbackOrder: [String] = []
+        var callbackQueueWasCorrect = true
+        queued.onNotification = { method, _ in
+            callbackQueueWasCorrect = callbackQueueWasCorrect
+                && DispatchQueue.getSpecific(key: deliveryKey) == "rpc"
+            callbackOrder.append(method)
+            if callbackOrder.count == 2 { delivered.signal() }
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            queued.feed(Array("{\"method\":\"first\"}\n{\"method\":\"second\"}\n".utf8))
+        }
+        check(wait(delivered), "JSON-RPC queued callbacks finish")
+        check(callbackQueueWasCorrect, "JSON-RPC callbacks use configured queue")
+        check(callbackOrder == ["first", "second"], "JSON-RPC callbacks keep wire order")
+
+        let teardown = JSONRPCChannel()
+        teardown.onOutbound = { _ in }
+        var teardownFailures = 0
+        teardown.request("one", [:]) { result in
+            if case .failure = result { teardownFailures += 1 }
+        }
+        teardown.request("two", [:]) { result in
+            if case .failure = result { teardownFailures += 1 }
+        }
+        check(teardown.debugPendingCount == 2, "JSON-RPC tracks pending requests")
+        teardown.failPending(reason: "transport disconnected")
+        teardown.failPending(reason: "duplicate teardown")
+        check(teardownFailures == 2, "JSON-RPC teardown fails each request once")
+        check(teardown.debugPendingCount == 0, "JSON-RPC teardown drains pending requests")
+
+        // Lock separation: a slow parser on the reader thread must not
+        // block request registration from another thread (the old single
+        // lock serialized both).
+        let parserEntered = DispatchSemaphore(value: 0)
+        let parserRelease = DispatchSemaphore(value: 0)
+        let requestReturned = DispatchSemaphore(value: 0)
+        let contention = JSONRPCChannel(parser: { data in
+            parserEntered.signal()
+            _ = parserRelease.wait(timeout: .now() + 2)
+            return try? JSONSerialization.jsonObject(with: data)
+        })
+        contention.onOutbound = { _ in }
+        DispatchQueue.global(qos: .userInitiated).async {
+            contention.feed(Array("{\"method\":\"blocked-parser\"}\n".utf8))
+        }
+        check(wait(parserEntered), "JSON-RPC parser seam entered")
+        DispatchQueue.global(qos: .userInitiated).async {
+            contention.request("must-not-wait-for-parser", [:]) { _ in }
+            requestReturned.signal()
+        }
+        check(wait(requestReturned, seconds: 0.25),
+              "request registration does not wait for JSON parsing")
+        parserRelease.signal()
+        contention.failPending(reason: "test complete")
+
         print("— integrity counters —")
         check(rpcMapper.eventsRouted > 0 && rpcMapper.framesIgnored > 0,
               "mapper counts routed and ignored frames")
