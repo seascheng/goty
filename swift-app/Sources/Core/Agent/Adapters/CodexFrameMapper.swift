@@ -129,6 +129,16 @@ final class CodexFrameMapper {
                                                 path: nil)] : [],
                 rawInput: command.isEmpty ? nil : ["command": command],
                 oldText: nil)]
+        case "contextCompaction":
+            // thread/compact/start's turn runs ONE contextCompaction item
+            // (probed: item/started → item/completed, ~11s on a small
+            // thread). Without this the whole compaction turn renders as
+            // a bare "thinking" with zero visible progress.
+            itemTitles[id] = "压缩对话上下文"
+            return [.toolCallUpdate(
+                id: id, title: "压缩对话上下文", kind: "other",
+                status: completed ? "completed" : "in_progress",
+                content: [], output: [], rawInput: nil, oldText: nil)]
         case "fileChange":
             let path = item["path"] as? String ?? ""
             itemTitles[id] = path

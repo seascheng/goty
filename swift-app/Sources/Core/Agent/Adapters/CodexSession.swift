@@ -641,18 +641,33 @@ final class CodexSession: AgentSessioning {
     private func executeTuiCommand(_ name: String, args: String, threadId: String) {
         switch name {
         case "compact":
-            // A compaction turn follows (turn/started) — it owns the
+            // A compaction turn follows (turn/started → one
+            // contextCompaction item → turn/completed) — it owns the
             // lifecycle from here.
-            client.request("thread/compact/start", ["threadId": threadId]) { [weak self] _ in
-                self?.emit([.messageChunk("已请求压缩对话。")])
+            client.request("thread/compact/start", ["threadId": threadId]) { [weak self] result in
+                guard let self else { return }
+                if case .failure(let err) = result {
+                    // paseo echoes the compact error as an assistant
+                    // message; never report success on a failed RPC.
+                    self.emit([.messageChunk("压缩失败：\(err.localizedDescription)"),
+                               .turnEnded(stopReason: nil)])
+                } else {
+                    self.emit([.messageChunk("已请求压缩对话。")])
+                }
             }
         case "goal":
             let goal = Self.goalParams(threadId: threadId, args: args)
             if let goal {
                 // goal/set makes the agent start a turn on its own
                 // (probed): turn/started owns the lifecycle.
-                client.request(goal.method, goal.params) { [weak self] _ in
-                    self?.emit([.messageChunk(Self.goalReceipt(args))])
+                client.request(goal.method, goal.params) { [weak self] result in
+                    guard let self else { return }
+                    if case .failure(let err) = result {
+                        self.emit([.messageChunk("goal 设置失败：\(err.localizedDescription)"),
+                                   .turnEnded(stopReason: nil)])
+                    } else {
+                        self.emit([.messageChunk(Self.goalReceipt(args))])
+                    }
                 }
             } else {
                 emit([.notice("用法：/goal <objective>|pause|resume|clear"),
