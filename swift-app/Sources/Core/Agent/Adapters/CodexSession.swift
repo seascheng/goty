@@ -32,6 +32,9 @@ final class CodexSession: AgentSessioning {
     /// Sends parked while the thread restore is still in flight; flushed
     /// the moment the replay lands and the thread id is live.
     private var pendingSends: [(text: String, images: [AgentImage])] = []
+    /// resume lost the writer flock to a live codex process elsewhere
+    /// (goal runner): reads work, every write will be refused.
+    private var ownershipDenied = false
     private let paneId: String
     private let environment: [String: String]
     private let daemon: SessionDaemon
@@ -394,8 +397,22 @@ final class CodexSession: AgentSessioning {
                 // thread — the turns/list replay is a cross-process
                 // READ and does not load it. resume first (probed:
                 // 5090 compact against an adopted-not-resumed pane).
-                client.request("thread/resume", ["threadId": restore]) { [weak self] _ in
+                // A live writer elsewhere (goal runner holding the
+                // flock — codex-rs thread-store writer_lock.rs, no
+                // force option) leaves us read-only: SAY so instead
+                // of looking healthy until the first send explodes.
+                client.request("thread/resume", ["threadId": restore]) { [weak self] result in
                     guard let self else { return }
+                    switch result {
+                    case .success:
+                        self.ownershipDenied = false
+                    case .failure(let err):
+                        self.ownershipDenied = true
+                        if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                            print("CODEX_ATTACH resume failed: \(err.localizedDescription)")
+                        }
+                        self.emit([.notice("⚠︎ 会话正被另一个 codex 进程持有（goal runner 等）——当前只读，发送与 /compact 会被拒绝")])
+                    }
                     self.rebuildAdoptedThread(restore)
                 }
             } else {
@@ -578,6 +595,11 @@ final class CodexSession: AgentSessioning {
 
     @discardableResult
     func send(_ text: String, images: [AgentImage]) -> Bool {
+        if ownershipDenied {
+            emit([.messageChunk("[codex] 会话正被另一个 codex 进程持有，当前只读。请结束占用它的进程（如 goal runner）后重试。"),
+                  .turnEnded(stopReason: nil)])
+            return true
+        }
         guard let threadId else {
             // Restore still in flight (attach replay / resume): park the
             // text instead of refusing — the old refusal read as an error
@@ -654,6 +676,11 @@ final class CodexSession: AgentSessioning {
     private func executeTuiCommand(_ name: String, args: String, threadId: String) {
         switch name {
         case "compact":
+            if ownershipDenied {
+                emit([.messageChunk("压缩失败：会话正被另一个 codex 进程持有（只读）。请结束占用它的进程（如 goal runner）后重试。"),
+                      .turnEnded(stopReason: nil)])
+                return
+            }
             // A compaction turn follows (turn/started → one
             // contextCompaction item → turn/completed) — it owns the
             // lifecycle from here.
