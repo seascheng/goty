@@ -16,6 +16,7 @@ import Foundation
 ///   login, export/stats, pushed command directory.
 ///
 /// Probed live on omp 18.0.11 / pi 0.84.3.
+@MainActor
 class PiSession: AgentSessioning {
     weak var delegate: AgentSessionDelegate?
 
@@ -58,7 +59,12 @@ class PiSession: AgentSessioning {
     let environment: [String: String]
     let daemon: SessionDaemon
     private let grid: SessionGrid
-    let channel = LineChannel()
+    /// Parsed frames deliver on the main queue (one hop per feed) —
+    /// adapter state below is main-actor confined; the reader thread
+    /// only parses.
+    let channel = LineChannel(callbackQueue: .main)
+    /// Generation fence for connect/reconnect/shutdown (see openPane).
+    private let connectionGate = AgentConnectionGate()
 
     /// get_state's model descriptor — the thinking-level ladder is
     /// model-specific (thinking.efforts), so applyState needs it when
@@ -146,9 +152,31 @@ class PiSession: AgentSessioning {
         self.mapper = PiFrameMapper(terminalOnAgentEnd: mapperTerminalOnAgentEnd)
         self.resumeSessionId = params.restoredSessionId
         channel.onOutbound = { [weak self] in self?.pane?.sendInput($0) }
-        channel.onFrame = { [weak self] frame, _ in
-            self?.handleFrame(frame)
+        channel.onFrame = { [weak self] frame, replay in
+            guard let self else { return }
+            // Replay suppression is derived AT CALLBACK TIME from the
+            // delivered flag (the feed call is asynchronous now — flags
+            // set around it would race the delivery).
+            let state = Self.replayState(replay: replay,
+                                         suppressesRingReplay: self.suppressesRingReplay)
+            self.mapper.replaying = state.mapperReplaying
+            self.suppressReplay = state.suppressContent
+            defer {
+                self.mapper.replaying = false
+                self.suppressReplay = false
+            }
+            self.handleFrame(frame)
         }
+    }
+
+    /// Replay decision derived at frame-delivery time: the mapper maps
+    /// history for BOTH dialects (ids/commands must rebind); the omp
+    /// content suppression only fires on replay frames of a dialect
+    /// whose authoritative transcript is the store. Pure — tested in
+    /// agenttest.
+    static func replayState(replay: Bool, suppressesRingReplay: Bool)
+        -> (mapperReplaying: Bool, suppressContent: Bool) {
+        (replay, replay && suppressesRingReplay)
     }
 
     // MARK: - dialect hooks
@@ -274,28 +302,32 @@ class PiSession: AgentSessioning {
         // which reads the same store).
         if let sessionId {
             self.sessionId = sessionId
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.delegate?.session(self, didEmit: [.ready])
-            }
+            delegate?.session(self, didEmit: [.ready])
         }
         // The daemon round trip (attach/spawn handshake +, on a remote
         // link, the store listing a respawn's --resume path needs) is
         // BLOCKING socket I/O — over an ssh tunnel that's tens of ms.
-        // Run it off main; everything stateful below hops back or is
-        // lock-guarded (PaneSession write lock, responseLock).
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            var args = ["--mode", Self.spawnMode]
-            self.appendSpawnArgs(&args, resume: sessionId)
+        // The gate runs it off main, fences stale attempts (a newer
+        // open/shutdown advances the generation), and delivers the
+        // result back on main before anything stateful runs.
+        var args = ["--mode", Self.spawnMode]
+        appendSpawnArgs(&args, resume: sessionId)
+        let daemon = self.daemon
+        let paneId = self.paneId
+        let cwd = self.cwd
+        let shellName = self.shellName
+        let environment = self.environment
+        let grid = self.grid
+        let channel = self.channel
+        connectionGate.open(work: {
             // omp: the handshake is gated on the ready frame (see
             // OmpSession.interceptProtocolFrame) — the process answers
             // stdin normally once its RPC loop is up; a burst written
             // before that strands all but the first line (PTY line
             // discipline, probed 2026-08-31).
-            guard let opened = self.daemon.openPaneWithAttachment(
-                id: self.paneId, cwd: self.cwd, shell: self.shellName, args: args,
-                environment: self.environment, grid: self.grid,
+            daemon.openPaneWithAttachment(
+                id: paneId, cwd: cwd, shell: shellName, args: args,
+                environment: environment, grid: grid,
                 // 1MB ring for every pi-mono pane: both dialects rebuild
                 // transcripts from their history source (store /
                 // get_messages), never from the ring — the ring only
@@ -306,28 +338,80 @@ class PiSession: AgentSessioning {
                 // snapshot per attach is the faster load.
                 noEcho: true, ringBytes: 1_048_576,
                 onFrame: { [weak self] kind, data in
-                    self?.handleTransportFrame(kind: kind, data: data)
+                    switch kind {
+                    case SessionOutputKind.output:
+                        // Reader thread: parse only; delivery hops to
+                        // the channel's main callback queue.
+                        channel.feed([UInt8](data), replay: false)
+                    case SessionOutputKind.snapshot:
+                        channel.feed([UInt8](data), replay: true)
+                    default:
+                        DispatchQueue.main.async {
+                            self?.handleControlFrame(kind: kind, data: data)
+                        }
+                    }
                 },
                 onDisconnect: { [weak self] in
-                    guard let self else { return }
-                    self.connected = false
-                    self.delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
+                    DispatchQueue.main.async { self?.transportDisconnected() }
                 })
-            else {
-                self.connected = false
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.delegate?.sessionDidFail(self, reason: "sessiond 不可用")
-                    completion?(false)
-                }
-                return
-            }
-            opened.session.start()
-            self.pane = opened.session
-            self.attachedExistingPane = opened.attachedExisting
-            self.beginHandshakeAfterSpawn(attachedExisting: opened.attachedExisting,
-                                          completion: completion)
+        }, onStale: { opened in
+            // A newer attempt (or shutdown) owns this pane now.
+            opened?.session.close()
+        }, completion: { [weak self] opened in
+            guard let self else { opened?.session.close(); return }
+            self.finishOpeningPane(opened, completion: completion)
+        })
+    }
+
+    /// Post-open state installation, always on main.
+    private func finishOpeningPane(
+        _ opened: SessionDaemon.OpenPaneResult?,
+        completion: ((Bool) -> Void)?
+    ) {
+        guard let opened else {
+            connected = false
+            delegate?.sessionDidFail(self, reason: "sessiond 不可用")
+            completion?(false)
+            return
         }
+        pane = opened.session
+        attachedExistingPane = opened.attachedExisting
+        opened.session.start()
+        beginHandshakeAfterSpawn(attachedExisting: opened.attachedExisting,
+                                 completion: completion)
+    }
+
+    /// Control-frame state handling (exited …), on main. Output and
+    /// snapshot bytes never reach here — they feed the channel on the
+    /// reader thread.
+    private func handleControlFrame(kind: UInt8, data: Data) {
+        guard kind == SessionOutputKind.exited else { return }
+        if isWorking {
+            isWorking = false
+            emit([.turnEnded(stopReason: nil)])
+        }
+        // The pane's process is gone (crash, user exit, or a pane
+        // spawned by an older build's argv). Reset everything so a
+        // retry reconnects and RESPAWNS — connect() used to return
+        // early on the stale `connected` flag and the retry button
+        // did nothing (2026-08-31).
+        connectionGate.invalidate()
+        connected = false
+        pane?.close()
+        pane = nil
+        // killPane talks to the daemon (blocking) — keep it off main.
+        let daemon = self.daemon
+        let paneId = self.paneId
+        DispatchQueue.global(qos: .userInitiated).async {
+            daemon.killPane(id: paneId)
+        }
+        delegate?.sessionDidFail(self, reason: "\(shellName) 进程已退出")
+    }
+
+    /// Transport-level disconnect (daemon restart, ssh forward loss).
+    private func transportDisconnected() {
+        connected = false
+        delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
     }
 
     /// Shared get_state handler: the pi immediate handshake and the omp
@@ -582,6 +666,9 @@ class PiSession: AgentSessioning {
 
     func shutdown() {
         stopStatePolling()
+        // Fence any in-flight open: its result must not resurrect a
+        // pane on a stopped session.
+        connectionGate.invalidate()
         pane?.close()
         pane = nil
         connected = false
@@ -895,38 +982,6 @@ class PiSession: AgentSessioning {
 
     // MARK: - plumbing
 
-    private func handleTransportFrame(kind: UInt8, data: Data) {
-        switch kind {
-        case SessionOutputKind.output:
-            channel.feed([UInt8](data), replay: false)
-        case SessionOutputKind.snapshot:
-            // Ring replay (reattach). pi renders it through the mapper
-            // with the user echo on; omp suppresses rendering entirely —
-            // its transcript lands from the session store instead.
-            if suppressesRingReplay { suppressReplay = true }
-            mapper.replaying = true
-            channel.feed([UInt8](data), replay: true)
-            mapper.replaying = false
-            suppressReplay = false
-        case SessionOutputKind.exited:
-            if isWorking {
-                isWorking = false
-                emit([.turnEnded(stopReason: nil)])
-            }
-            // The pane's process is gone (crash, user exit, or a pane
-            // spawned by an older build's argv). Reset everything so a
-            // retry reconnects and RESPAWNS — connect() used to return
-            // early on the stale `connected` flag and the retry button
-            // did nothing (2026-08-31).
-            connected = false
-            pane?.close()
-            pane = nil
-            daemon.killPane(id: paneId)
-            delegate?.sessionDidFail(self, reason: "\(shellName) 进程已退出")
-        default:
-            break
-        }
-    }
 
     private func handleFrame(_ frame: [String: Any]) {
         framesRouted += 1

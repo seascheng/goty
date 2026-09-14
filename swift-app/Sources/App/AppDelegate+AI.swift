@@ -258,6 +258,7 @@ extension AppDelegate {
     /// ready remote link answers from its connect-time probe (the same
     /// merged PATH the remote pane spawns with); a connecting/failing
     /// link offers nothing — the list reshapes the moment it lands.
+    @MainActor
     func agentAvailable(key: String) -> Bool {
         guard let store = coordinator.store, let ws = store.focused, ws.isRemote else {
             return AgentRegistry.descriptor(for: key)?

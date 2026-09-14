@@ -41,8 +41,8 @@ final class LineTrigger {
     private var line: [UInt8] = []
     private static let prefixes: [(bytes: [UInt8], kind: TriggerKind)] = {
         var list: [(bytes: [UInt8], kind: TriggerKind)] = [(Array("@ai".utf8), .ai)]
-        for descriptor in AgentRegistry.descriptors {
-            list.append((Array("@\(descriptor.key)".utf8), .agent(key: descriptor.key)))
+        for key in AgentRegistry.agentKeys {
+            list.append((Array("@\(key)".utf8), .agent(key: key)))
         }
         list.append((Array("@tty".utf8), .tty))
         return list

@@ -102,6 +102,11 @@ struct DaemonSessionRow: Decodable {
 
 /// One sessiond endpoint: the local singleton, or a remote daemon reached
 /// through an ssh-forwarded Unix socket. The wire protocol is identical.
+///
+/// `@unchecked Sendable`: every request serializes on the socket's
+/// write lock and reads land on caller threads by design (adapters
+/// open panes from background queues, the UI sends from main).
+extension SessionDaemon: @unchecked Sendable {}
 final class SessionDaemon {
     static let shared = SessionDaemon()
 

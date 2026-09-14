@@ -306,7 +306,7 @@ final class RemoteDaemonLink {
         // One name per lookup: dash's `command -v` with several names
         // reports ONLY the first hit (2026-08-31, host 5090 — omp found,
         // claude/codex silently swallowed). `--` dropped too: dash.
-        let binaries = AgentRegistry.descriptors.map(\.binary).joined(separator: " ")
+        let binaries = AgentRegistry.probeCatalog.map(\.binary).joined(separator: " ")
         let script = "for b in \(binaries); do p=$(command -v \"$b\" 2>/dev/null) "
             + "&& printf '%s\\n' \"$p\"; done; true"
         let capturedPath = remoteEnvironment["PATH"] ?? ""
@@ -314,9 +314,9 @@ final class RemoteDaemonLink {
             ? ssh("env PATH=\(Shell.forceQuoted(capturedPath)) sh -c \(Shell.forceQuoted(script))")
             : ssh(script)
         let found = Set(probe.split(separator: "\n").map(String.init))
-        for descriptor in AgentRegistry.descriptors {
-            agentAvailability[descriptor.key] =
-                found.contains { $0.hasSuffix("/" + descriptor.binary) }
+        for entry in AgentRegistry.probeCatalog {
+            agentAvailability[entry.key] =
+                found.contains { $0.hasSuffix("/" + entry.binary) }
         }
     }
 

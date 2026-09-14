@@ -32,7 +32,9 @@ struct AgentDescriptor {
     /// ("omp"/"claude"/"pi"; nil = no daemon-side listing — codex).
     let storeListKey: String?
     let spawn: AgentSpawn
-    let make: (AgentPaneParams) -> AgentSessioning
+    /// Factory is main-actor: adapters are main-actor confined from
+    /// construction (their state is the UI's state).
+    let make: @MainActor (AgentPaneParams) -> any AgentSessioning
     /// PATH search for an executable — no subprocess. The interactive
     /// env capture is the whole reason this works from a Finder launch.
     func isAvailable(path: String) -> Bool {
@@ -51,6 +53,12 @@ struct AgentDescriptor {
 /// spawn path all read this table — adding an agent family is one entry
 /// plus its session implementation, nothing else.
 enum AgentRegistry {
+    /// Keys in catalog order, usable from nonisolated contexts (line
+    /// triggers match @agent prefixes on byte streams). Kept in lockstep
+    /// with `descriptors` — agenttest asserts the two agree.
+    nonisolated static let agentKeys: [String] = ["omp", "claude", "codex", "pi"]
+
+    @MainActor
     static let descriptors: [AgentDescriptor] = [
         AgentDescriptor(
             key: "omp",
@@ -68,7 +76,7 @@ enum AgentRegistry {
             // plain text A/B lists.
             spawn: AgentSpawn(command: "omp", args: ["--mode", "rpc-ui"],
                               ringBytes: 1_048_576),
-            make: { params in OmpSession(params: params) }),
+            make: { @MainActor params in OmpSession(params: params) }),
         AgentDescriptor(
             key: "claude",
             label: "Claude Code",
@@ -78,7 +86,7 @@ enum AgentRegistry {
                               args: ["--print", "--input-format", "stream-json",
                                      "--output-format", "stream-json", "--verbose"],
                               ringBytes: 16_777_216),
-            make: { params in ClaudeSession(params: params) }),
+            make: { @MainActor params in ClaudeSession(params: params) }),
         AgentDescriptor(
             key: "codex",
             label: "Codex",
@@ -86,7 +94,7 @@ enum AgentRegistry {
             storeListKey: nil,
             spawn: AgentSpawn(command: "codex", args: ["app-server"],
                               ringBytes: 16_777_216),
-            make: { params in CodexSession(params: params) }),
+            make: { @MainActor params in CodexSession(params: params) }),
         AgentDescriptor(
             key: "pi",
             label: "pi",
@@ -96,7 +104,7 @@ enum AgentRegistry {
             // ring size (1MB, both dialects).
             spawn: AgentSpawn(command: "pi", args: ["--mode", "rpc"],
                               ringBytes: 1_048_576),
-            make: { params in PiLegacySession(params: params) }),
+            make: { @MainActor params in PiLegacySession(params: params) }),
     ]
 
     /// The omp spawn shape tests construct OmpSession panes with
@@ -104,6 +112,7 @@ enum AgentRegistry {
     static let ompSpawn = AgentSpawn(command: "omp", args: ["--mode", "rpc-ui"],
                                      ringBytes: 67_108_864)
 
+    @MainActor
     static func descriptor(for key: String) -> AgentDescriptor? {
         descriptors.first { $0.key == key }
     }
@@ -111,9 +120,23 @@ enum AgentRegistry {
     /// FOCUSED workspace's availability (local user PATH vs a remote
     /// link's connect-time probe). Unavailable agents are DROPPED
     /// (2026-08-31): a picker offers only what will actually open —
-    /// keyboard and @agent triggers still hit the openAgentSession gate.
+    @MainActor
     static func pickerEntries(isAvailable: (String) -> Bool)
         -> [(key: String, label: String, available: Bool)] {
         descriptors.map { ($0.key, $0.label, isAvailable($0.key)) }
     }
+
+    /// Availability probing needs only (key, binary) pairs, and it runs
+    /// on background capture queues — this nonisolated projection keeps
+    /// the actor-confined factory out of those closures. agenttest
+    /// asserts it stays in lockstep with `descriptors`.
+    nonisolated static let probeCatalog: [(key: String, binary: String)] = [
+        ("omp", "omp"), ("claude", "claude"), ("codex", "codex"), ("pi", "pi"),
+    ]
+
+    /// Store-listing key by agent key, nonisolated for background
+    /// title prefetches. Missing key = no daemon-side listing (codex).
+    nonisolated static let storeListKeys: [String: String] = [
+        "omp": "omp", "claude": "claude", "pi": "pi",
+    ]
 }

@@ -210,10 +210,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
     /// keeps it) — show reconnecting and ride the backoff until the
     /// transport reattaches, then let the ring replay rebuild the page.
     func session(_ session: AgentSessioning, didDisconnectBecause reason: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, !self.isReconnecting else { return }
-            self.setReconnecting()
-        }
+        // Main-actor by protocol now — no dispatch hop needed.
+        guard !isReconnecting else { return }
+        setReconnecting()
     }
 
     private func setReconnecting() {
@@ -995,9 +994,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
     /// Replay traffic derives identically to live (the store is cleared
     /// first, so a rebuild lands on the right state by construction).
     func session(_ session: AgentSessioning, didEmit events: [AgentSessionEvent]) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            for event in events {
+        // Main-actor by protocol now — no dispatch hop needed.
+        for event in events {
                 switch event {
                 case .ready, .configChanged, .userMessage, .userChunk, .messageChunk, .toolCallUpdate, .chunkBoundary:
                     // First handshake-complete signal cancels the
@@ -1154,8 +1152,6 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                 default:
                     break
                 }
-                self.bridge.push(event.jsRepresentation)
-            }
         }
     }
 
@@ -1191,19 +1187,13 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
     }
 
     func sessionDidFail(_ session: AgentSessioning, reason: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            // A failure inside the reconnect loop (handshake against a
-            // half-up daemon…) must not fight the loop — it already
-            // schedules the next attempt.
-            guard !self.isReconnecting else { return }
-            self.setTurnState(.errored(reason))
-        }
+        // Main-actor by protocol now — no dispatch hop needed.
+        // A failure inside the reconnect loop (handshake against a
+        // half-up daemon…) must not fight the loop — it already
+        // schedules the next attempt.
+        guard !isReconnecting else { return }
+        setTurnState(.errored(reason))
     }
-
-    /// WKUIDelegate: WebKit hands <input type="file"> open panels to the
-    /// host and NEVER shows one itself — the 📎 attach button depends on
-    /// this entirely. Image-only to match the composer's ingest contract.
     func webView(_ webView: WKWebView,
                  runOpenPanelWith parameters: WKOpenPanelParameters,
                  initiatedByFrame frame: WKFrameInfo,

@@ -4,6 +4,7 @@ import AppKit
 
 extension AppDelegate {
 
+    @MainActor
     func buildMainMenu() {
         let main = NSMenu()
         let appItem = NSMenuItem(title: "Goty", action: nil, keyEquivalent: "")

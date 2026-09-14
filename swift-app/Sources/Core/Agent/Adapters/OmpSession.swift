@@ -19,6 +19,7 @@ import Foundation
 /// Everything here overrides a PiSession hook or implements an
 /// AgentSessioning capability the core defaults to no-op — never a
 /// branch in shared code.
+@MainActor
 final class OmpSession: PiSession {
     // ready-frame handshake bookkeeping (spawn-gated)
     private var respawnedForReadyTimeout = false
@@ -261,8 +262,12 @@ final class OmpSession: PiSession {
     override func readStoredHistory(
             _ sid: String,
             completion: @escaping (StoredSessionHistory?) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return completion(nil) }
+        // All blocking I/O below runs off main; state (the history
+        // anchor) is written back on main. The daemon handle and the
+        // listing cache are captured as immutable inputs up front.
+        let daemon = self.daemon
+        let daemonPaths = daemonSessionPaths
+        AgentSessionExecution.runOffMain(work: { () -> StoredSessionHistory? in
             // Daemon tail first (capability 9, remote panes): a store
             // file can OUTGROW the 16MB frame cap, and then the
             // whole-file reply errors — every fallback reads a
@@ -273,8 +278,8 @@ final class OmpSession: PiSession {
             // The windowed parse only wants the tail anyway; an old
             // daemon ignores tail_bytes and answers with the whole
             // file, which the same seam logic handles.
-            if self.daemon.isRemote,
-               let tail = self.daemon.agentStoreFile(
+            if daemon.isRemote,
+               let tail = daemon.agentStoreFile(
                     sessionId: sid,
                     tailBytes: UInt64(Self.tailLoadThresholdBytes)),
                let text = String(data: tail, encoding: .utf8),
@@ -282,18 +287,15 @@ final class OmpSession: PiSession {
                 let sliced = OmpSessionStore.daemonTailSlice(text)
                 let loaded = OmpSessionStore.parse(sliced.slice)
                 let anchor = sliced.firstEntryId
-                DispatchQueue.main.async {
-                    self.historyAnchorEntryId = anchor
-                }
-                completion(StoredSessionHistory(events: loaded.events,
-                                                openTools: loaded.openTools,
-                                                aborted: loaded.aborted,
-                                                firstEntryId: anchor))
-                return
+                return StoredSessionHistory(events: loaded.events,
+                                            openTools: loaded.openTools,
+                                            aborted: loaded.aborted,
+                                            firstEntryId: anchor)
             }
             // Local pane (or an unreachable daemon): read the file the
             // GUI can see, tail-first past the byte window.
-            guard let raw = self.storeRaw(sid) else { return completion(nil) }
+            guard let raw = Self.storeRaw(sid, daemon: daemon,
+                                          daemonPaths: daemonPaths) else { return nil }
             var loaded: OmpSessionStore.Loaded
             if raw.utf8.count > Self.tailLoadThresholdBytes {
                 let tail = OmpSessionStore.tailSlice(raw)
@@ -302,15 +304,16 @@ final class OmpSession: PiSession {
             } else {
                 loaded = OmpSessionStore.parse(raw)
             }
-            let anchor = loaded.firstEntryId
-            DispatchQueue.main.async {
-                self.historyAnchorEntryId = anchor
+            return StoredSessionHistory(events: loaded.events,
+                                        openTools: loaded.openTools,
+                                        aborted: loaded.aborted,
+                                        firstEntryId: loaded.firstEntryId)
+        }, completion: { [weak self] history in
+            if let anchor = history?.firstEntryId {
+                self?.historyAnchorEntryId = anchor
             }
-            completion(StoredSessionHistory(events: loaded.events,
-                                            openTools: loaded.openTools,
-                                            aborted: loaded.aborted,
-                                            firstEntryId: anchor))
-        }
+            completion(history)
+        })
     }
 
     /// Prepend pipeline: re-read the full file ONCE and convert the
@@ -318,42 +321,44 @@ final class OmpSession: PiSession {
     /// (if a new anchor exists after compaction/reload) pages again.
     override func loadOlderHistory(
             completion: @escaping ([AgentSessionEvent]?) -> Void) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, !self.olderLoadInFlight,
-                  let sid = self.sessionId, !sid.isEmpty,
-                  let anchor = self.historyAnchorEntryId else {
-                completion(nil)
-                return
-            }
-            self.olderLoadInFlight = true
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let self else { return }
-                // Full-file semantics: parseOlder wants everything
-                // before the anchor. An over-cap REMOTE file can't
-                // cross the wire whole — the fetch misses and the page
-                // gets an empty prepend (the sentinel clears; the tail
-                // window it already holds is what's reachable).
-                let events = self.storeRaw(sid).map {
-                    OmpSessionStore.parseOlder($0, beforeEntryId: anchor).events
-                }
-                DispatchQueue.main.async {
-                    self.olderLoadInFlight = false
-                    self.historyAnchorEntryId = nil
-                    completion(events)
-                }
-            }
+        guard !olderLoadInFlight,
+              let sid = sessionId, !sid.isEmpty,
+              let anchor = historyAnchorEntryId else {
+            completion(nil)
+            return
         }
+        olderLoadInFlight = true
+        let daemon = self.daemon
+        let daemonPaths = daemonSessionPaths
+        AgentSessionExecution.runOffMain(work: { () -> [AgentSessionEvent]? in
+            // Full-file semantics: parseOlder wants everything
+            // before the anchor. An over-cap REMOTE file can't
+            // cross the wire whole — the fetch misses and the page
+            // gets an empty prepend (the sentinel clears; the tail
+            // window it already holds is what's reachable).
+            Self.storeRaw(sid, daemon: daemon, daemonPaths: daemonPaths).map {
+                OmpSessionStore.parseOlder($0, beforeEntryId: anchor).events
+            }
+        }, completion: { [weak self] events in
+            self?.olderLoadInFlight = false
+            self?.historyAnchorEntryId = nil
+            completion(events)
+        })
     }
 
     /// The session store's raw bytes: the DAEMON's machine first
     /// (remote panes — the GUI's local ~/.omp is a different host),
     /// then the seeded daemon-side path, then the local suffix walk.
-    /// Background-queue only (blocking file/socket I/O).
-    private func storeRaw(_ sid: String) -> String? {
+    /// Background-queue only (blocking file/socket I/O); takes the
+    /// daemon handle and listing cache as immutable inputs so it can
+    /// run off the actor.
+    private nonisolated static func storeRaw(
+        _ sid: String, daemon: SessionDaemon, daemonPaths: [String: String]
+    ) -> String? {
         if let data = daemon.agentStoreFile(sessionId: sid) {
             return String(data: data, encoding: .utf8)
         }
-        if let path = daemonSessionPaths[sid] {
+        if let path = daemonPaths[sid] {
             return try? String(contentsOfFile: path, encoding: .utf8)
         }
         if let url = OmpSessionStore.fileURL(sessionId: sid) {
@@ -362,7 +367,6 @@ final class OmpSession: PiSession {
         return nil
     }
 
-
     /// History from the DAEMON's store (capability 7) — the only right
     /// answer on remote panes, where the GUI's local ~/.omp belongs to
     /// a different machine. Falls back to the local read (old daemon,
@@ -370,21 +374,28 @@ final class OmpSession: PiSession {
     /// one-time notice instead of a silent empty list.
     override func sessionSummaries(
             _ completion: @escaping ([AgentSessionSummary]) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        let daemon = self.daemon
+        let cwd = self.cwd
+        AgentSessionExecution.runOffMain(work: { () -> (rows: [AgentSessionSummary],
+                                                     paths: [String: String]?,
+                                                     fallback: [AgentSessionSummary]?) in
+            if let (rows, paths) = daemon.agentStoreSummaries(cwd: cwd) {
+                return (rows.map { $0.summary }, paths, nil)
+            }
+            return ([], nil, OmpSessionStore.summaries(cwd: cwd))
+        }, completion: { [weak self] result in
             guard let self else { return completion([]) }
-            if let (rows, paths) = self.daemon.agentStoreSummaries(cwd: self.cwd) {
+            if let paths = result.paths {
                 self.daemonSessionPaths.merge(paths) { _, new in new }
-                let summaries = rows.map { $0.summary }
-                self.noteStoreFallbackIfRemote(summaries)
-                completion(summaries)
+                self.noteStoreFallbackIfRemote(result.rows)
+                completion(result.rows)
             } else {
-                let summaries = OmpSessionStore.summaries(cwd: self.cwd)
+                let summaries = result.fallback ?? []
                 self.noteStoreFallbackIfRemote(summaries)
                 completion(summaries)
             }
-        }
+        })
     }
-
     private func noteStoreFallbackIfRemote(_ summaries: [AgentSessionSummary]) {
         guard daemon.isRemote, summaries.isEmpty, !warnedOldDaemonStore else { return }
         warnedOldDaemonStore = true
@@ -670,38 +681,39 @@ final class OmpSession: PiSession {
 
     /// Ship the store's not-yet-marked entries to the page. Newest
     /// first (OmpSessionStore.freshEntryMarks) — the page stamps the
-    /// newest still-unmarked block per role, so every mark lands on
-    /// its own block even when several turns settled before this read.
     private func stampEntryMarks(sessionId sid: String) {
         // Main-queue pre-check (sessionId is main-written): a session
         // switch inside the 1.5s window must drop the stale stamp.
         guard sid == sessionId else { return }
         let known = markedEntryIds
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
+        let daemon = self.daemon
+        let daemonPaths = daemonSessionPaths
+        AgentSessionExecution.runOffMain(work: { () -> [AgentSessionEvent]? in
             // The marks the page still needs live in the file's tail;
             // remote panes fetch the tail by BYTES (over-cap files
             // can't cross the wire whole — same cap as the history
             // load). Falls back to the full local read.
             var slice: String
-            if self.daemon.isRemote,
-               let tail = self.daemon.agentStoreFile(
+            if daemon.isRemote,
+               let tail = daemon.agentStoreFile(
                     sessionId: sid,
                     tailBytes: UInt64(Self.tailLoadThresholdBytes)),
                let text = String(data: tail, encoding: .utf8), !text.isEmpty {
                 slice = OmpSessionStore.daemonTailSlice(text).slice
-            } else if let raw = self.storeRaw(sid) {
+            } else if let raw = Self.storeRaw(sid, daemon: daemon,
+                                              daemonPaths: daemonPaths) {
                 slice = raw.utf8.count > Self.tailLoadThresholdBytes
                     ? OmpSessionStore.tailSlice(raw).slice : raw
             } else {
-                return
+                return nil
             }
             let fresh = OmpSessionStore
                 .freshEntryMarks(from: OmpSessionStore.parse(slice),
                                  known: known)
-            guard !fresh.isEmpty else { return }
-            self.emit(fresh)
-        }
+            return fresh.isEmpty ? nil : fresh
+        }, completion: { [weak self] fresh in
+            if let fresh { self?.emit(fresh) }
+        })
     }
 
 
@@ -800,20 +812,22 @@ final class OmpSession: PiSession {
             completion(nil)
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return completion(nil) }
+        let daemon = self.daemon
+        AgentSessionExecution.runOffMain(work: { () -> String? in
             // Local filesystem first (the GUI shares it with a local
             // daemon), then the daemon's store machine (remote panes).
             if let forkId = OmpSessionStore.forkFile(sourceId: source, entryId: entryId) {
-                completion(forkId)
-                return
+                return forkId
             }
-            if let forkId = self.daemon.agentStoreFork(sourceId: source, entryId: entryId) {
+            return daemon.agentStoreFork(sourceId: source, entryId: entryId)
+        }, completion: { [weak self] forkId in
+            guard let self else { return completion(nil) }
+            if let forkId {
                 completion(forkId)
                 return
             }
             self.forkViaProcess(source: source, entryId: entryId, completion: completion)
-        }
+        })
     }
 
     /// Fallback: omp's own branch, driven through a throwaway sibling.

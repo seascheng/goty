@@ -11,6 +11,7 @@ import Foundation
 /// History/resume: `~/.claude/projects` jsonl (ClaudeSessionStore);
 /// load() replays the file as events, then swaps the pane to a resumed
 /// process for live continuation — identical UX to omp's session/load.
+@MainActor
 final class ClaudeSession: AgentSessioning {
     weak var delegate: AgentSessionDelegate?
 
@@ -30,7 +31,11 @@ final class ClaudeSession: AgentSessioning {
     private let grid: SessionGrid
     /// The pane (and its store) live on the daemon's machine.
     var runsOnThisMac: Bool { !daemon.isRemote }
-    private let channel = LineChannel()
+    /// Parsed frames deliver on the main queue; the reader thread
+    /// only parses (see PiSession.channel).
+    private let channel = LineChannel(callbackQueue: .main)
+    /// Generation fence for connect/reconnect/shutdown (see openPane).
+    private let connectionGate = AgentConnectionGate()
     private let mapper = ClaudeFrameMapper()
     private var pane: PaneSession?
     private var connected = false
@@ -174,12 +179,18 @@ final class ClaudeSession: AgentSessioning {
         // the cwd hijacked unrelated conversations (terminal claude,
         // other panes) into every new pane — pi semantics (0360fcb)
         // apply here too.
-        daemon.killPane(id: paneId)
-        if let restoredSessionId {
-            load(sessionId: restoredSessionId, completion: completion)
-        } else {
-            openPane(resume: nil, completion: completion)
-        }
+        let daemon = self.daemon
+        let paneId = self.paneId
+        AgentSessionExecution.runOffMain(work: {
+            daemon.killPane(id: paneId)
+        }, completion: { [weak self] _ in
+            guard let self else { return }
+            if let restored = self.restoredSessionId {
+                self.load(sessionId: restored, completion: completion)
+            } else {
+                self.openPane(resume: nil, completion: completion)
+            }
+        })
     }
 
 
@@ -194,28 +205,56 @@ final class ClaudeSession: AgentSessioning {
         let (shell, shellArgs) = ClaudeSession.shellCommand(model: modelOverride,
                                                              resume: resume,
                                                              mode: runtimeMode)
-        guard let opened = daemon.openPaneWithAttachment(
-            id: paneId, cwd: cwd, shell: shell, args: shellArgs,
-            environment: environment, grid: grid,
-            noEcho: true, ringBytes: 16_777_216,
-            onFrame: { [weak self] kind, data in
-                self?.handleTransportFrame(kind: kind, data: data)
-            },
-            onDisconnect: { [weak self] in
-                guard let self else { return }
-                self.connected = false
-                self.processAlive = false
-                self.delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
-            })
-        else {
+        let daemon = self.daemon
+        let paneId = self.paneId
+        let cwd = self.cwd
+        let environment = self.environment
+        let grid = self.grid
+        let channel = self.channel
+        connectionGate.open(work: {
+            daemon.openPaneWithAttachment(
+                id: paneId, cwd: cwd, shell: shell, args: shellArgs,
+                environment: environment, grid: grid,
+                noEcho: true, ringBytes: 16_777_216,
+                onFrame: { [weak self] kind, data in
+                    switch kind {
+                    case SessionOutputKind.output:
+                        // Reader thread: parse only; delivery hops to
+                        // the channel's main callback queue.
+                        channel.feed([UInt8](data))
+                    case SessionOutputKind.snapshot:
+                        channel.feed([UInt8](data), replay: true)
+                    default:
+                        DispatchQueue.main.async {
+                            self?.handleControlFrame(kind: kind, data: data)
+                        }
+                    }
+                },
+                onDisconnect: { [weak self] in
+                    DispatchQueue.main.async { self?.transportDisconnected() }
+                })
+        }, onStale: { opened in
+            opened?.session.close()
+        }, completion: { [weak self] opened in
+            guard let self else { opened?.session.close(); return }
+            self.finishOpeningPane(opened, completion: completion)
+        })
+    }
+
+    /// Post-open state installation, always on main.
+    private func finishOpeningPane(
+        _ opened: SessionDaemon.OpenPaneResult?,
+        completion: ((Bool) -> Void)?
+    ) {
+        guard let opened else {
             connected = false
             delegate?.sessionDidFail(self, reason: "sessiond 不可用")
             completion?(false)
             return
         }
-        opened.session.start()
         pane = opened.session
         processAlive = true
+        opened.session.start()
         // claude has no pre-turn handshake: in SDK --print mode the
         // `init` frame arrives only when the FIRST user turn starts —
         // a fresh process emits nothing but SessionStart hook frames
@@ -410,34 +449,35 @@ final class ClaudeSession: AgentSessioning {
     }
 
     func listSessions(completion: @escaping ([AgentSessionSummary]) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return completion([]) }
+        let daemon = self.daemon
+        let cwd = self.cwd
+        AgentSessionExecution.runOffMain(work: { () -> [AgentSessionSummary] in
             // Daemon-side store (capability 8) — remote panes list
             // THEIR host's ~/.claude; local read only as fallback.
-            var summaries: [AgentSessionSummary]
-            if let (rows, _) = self.daemon.agentStoreSummaries(cwd: self.cwd, store: "claude") {
+            let summaries: [AgentSessionSummary]
+            if let (rows, _) = daemon.agentStoreSummaries(cwd: cwd, store: "claude") {
                 summaries = rows.map { $0.summary }
             } else {
-                summaries = ClaudeSessionStore.summaries(cwd: self.cwd)
+                summaries = ClaudeSessionStore.summaries(cwd: cwd)
             }
-            let filtered = summaries.filter { ($0.messageCount ?? 1) > 0 }
-            DispatchQueue.main.async {
-                completion(filtered)
-            }
-        }
+            return summaries.filter { ($0.messageCount ?? 1) > 0 }
+        }, completion: { filtered in
+            completion(filtered)
+        })
     }
 
     func load(sessionId: String, completion: ((Bool) -> Void)? = nil) {
         // 1. Replay the persisted file as events (the asking side
         //    included — userChunk), 2. swap the pane to a resumed
         //    process so send() continues the same conversation.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
+        let daemon = self.daemon
+        AgentSessionExecution.runOffMain(work: { () -> (events: [AgentSessionEvent],
+                                                     skipped: Int) in
             var skipped = 0
             // Daemon bytes first (remote panes read THEIR host's store);
             // the local reader only as fallback.
             let frames: [[String: Any]]
-            if let data = self.daemon.agentStoreFile(sessionId: sessionId, store: "claude"),
+            if let data = daemon.agentStoreFile(sessionId: sessionId, store: "claude"),
                let text = String(data: data, encoding: .utf8) {
                 var parsed: [[String: Any]] = []
                 for line in text.split(separator: "\n") {
@@ -462,54 +502,61 @@ final class ClaudeSession: AgentSessioning {
             if skipped > 0 {
                 events.append(.messageChunk("[resume: \(skipped) 行无法解析，已跳过并计数]"))
             }
-            DispatchQueue.main.async {
-                self.sessionId = sessionId
-                self.resumeSessionId = sessionId
-                self.commands = []
-                // The attach may already have replayed the ring into
-                // the transcript — the store file is authoritative, so
-                // wipe before replaying it (no double history).
-                self.emit([.transcriptReset])
-                self.emit(events + [.configChanged(self.configOptions)])
-                // The respawn re-reads settings.json (model/env/MCP):
-                // surface it as a boot phase — the old starting chip was
-                // already consumed by the replayed init's ready.
-                self.emit([.starting(agent: Self.startingLabel)])
-                self.pane?.close()
-                // Pane id is daemon identity (attach-or-spawn): kill the
-                // old process or the reopen would ATTACH to it — a fresh
-                // --resume spawn never happens.
-                self.daemon.killPane(id: self.paneId)
-                self.openPane(resume: sessionId, completion: completion)
+            return (events, skipped)
+        }, completion: { [weak self] result in
+            guard let self else { completion?(false); return }
+            self.sessionId = sessionId
+            self.resumeSessionId = sessionId
+            self.commands = []
+            // The attach may already have replayed the ring into
+            // the transcript — the store file is authoritative, so
+            // wipe before replaying it (no double history).
+            self.emit([.transcriptReset])
+            self.emit(result.events + [.configChanged(self.configOptions)])
+            // The respawn re-reads settings.json (model/env/MCP):
+            // surface it as a boot phase — the old starting chip was
+            // already consumed by the replayed init's ready.
+            self.emit([.starting(agent: Self.startingLabel)])
+            self.pane?.close()
+            // Pane id is daemon identity (attach-or-spawn): kill the
+            // old process or the reopen would ATTACH to it — a fresh
+            // --resume spawn never happens. Blocking daemon call:
+            // stays off main.
+            let daemon = self.daemon
+            let paneId = self.paneId
+            DispatchQueue.global(qos: .userInitiated).async {
+                daemon.killPane(id: paneId)
             }
-        }
+            self.openPane(resume: sessionId, completion: completion)
+        })
     }
 
     func shutdown() {
+        // Fence any in-flight open: its result must not resurrect a
+        // pane on a stopped session.
+        connectionGate.invalidate()
         pane?.close()
         pane = nil
         connected = false
     }
 
-    // MARK: - frame plumbing
-
-    private func handleTransportFrame(kind: UInt8, data: Data) {
-        switch kind {
-        case SessionOutputKind.output:
-            channel.feed([UInt8](data))
-        case SessionOutputKind.snapshot:
-            // Ring replay on reattach: claude history is not in the ring
-            // (load() reads the store); frame stream replays harmlessly.
-            channel.feed([UInt8](data), replay: true)
-        case SessionOutputKind.exited:
-            processAlive = false
-            if isWorking {
-                isWorking = false
-                emit([.turnEnded(stopReason: nil)])
-            }
-        default:
-            break
+    /// Control-frame state handling (exited …), on main. Output and
+    /// snapshot bytes never reach here — they feed the channel on the
+    /// reader thread.
+    private func handleControlFrame(kind: UInt8, data: Data) {
+        guard kind == SessionOutputKind.exited else { return }
+        processAlive = false
+        if isWorking {
+            isWorking = false
+            emit([.turnEnded(stopReason: nil)])
         }
+    }
+
+    /// Transport-level disconnect (daemon restart, ssh forward loss).
+    private func transportDisconnected() {
+        connected = false
+        processAlive = false
+        delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
     }
 
     /// Mid-turn steering. claude's stream-json has no steer path — the

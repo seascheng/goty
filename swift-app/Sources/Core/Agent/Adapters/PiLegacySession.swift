@@ -6,6 +6,7 @@ import Foundation
 /// sessions in PiSessionStore, command directory via get_commands.
 /// Attaches omp-style (the 2026-09-02 double-reload report): ring
 /// replay suppressed, transcript rebuilt from the live process.
+@MainActor
 final class PiLegacySession: PiSession {
     override func appendSpawnArgs(_ args: inout [String], resume sessionId: String?) {
         // pi EXITS when --session names an id its store no longer
@@ -58,7 +59,9 @@ final class PiLegacySession: PiSession {
     /// message made a big pi pane visibly stream on open while omp
     /// (512KB store tail) flashed. Window the replay at a USER-message
     /// boundary; the anchor rides back through loadOlderHistory.
-    private static let tailBudget = 200_000
+    /// `nonisolated`: pure constant, read by tailWindow's default
+    /// argument from nonisolated contexts (static helpers).
+    private nonisolated static let tailBudget = 200_000
 
     /// One replayed message with its render budget and identity —
     /// slicing needs per-message granularity the mapped events alone
@@ -246,16 +249,18 @@ final class PiLegacySession: PiSession {
 
     override func sessionSummaries(
             _ completion: @escaping ([AgentSessionSummary]) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return completion([]) }
+        let daemon = self.daemon
+        let cwd = self.cwd
+        AgentSessionExecution.runOffMain(work: { () -> [AgentSessionSummary] in
             // Daemon-side store (capability 8): remote panes must read
             // THEIR host's ~/.pi, not the GUI's. Local fallback keeps
             // old daemons identical.
-            if let (rows, _) = self.daemon.agentStoreSummaries(cwd: self.cwd, store: "pi") {
-                completion(rows.map { $0.summary })
-            } else {
-                completion(PiSessionStore.summaries(cwd: self.cwd))
+            if let (rows, _) = daemon.agentStoreSummaries(cwd: cwd, store: "pi") {
+                return rows.map { $0.summary }
             }
-        }
+            return PiSessionStore.summaries(cwd: cwd)
+        }, completion: { summaries in
+            completion(summaries)
+        })
     }
 }

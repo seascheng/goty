@@ -450,7 +450,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
-    /// Returns the persistent host for one daemon-owned pane.
+    /// Returns the persistent host for one daemon-owned pane. Called
+    /// from the layout/UI passes (main), but left nonisolated because
+    /// ghostty's C surface reaches it through closures the compiler
+    /// can't see through — the agent-factory hop is asserted at the
+    /// single call site instead.
     func makePaneHost(pane: PaneState, ws: WorkspaceState,
                       gapp: ghostty_app_t) -> (any PaneHosting)? {
         let key = HostKey(workspace: ws.id, pane: pane.id)
@@ -462,7 +466,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return aiHost
         }
         if case .agent(let agentKey) = pane.kind {
-            guard let agentHost = makeAgentPaneHost(pane: pane, ws: ws, key: key, agentKey: agentKey) else {
+            // Every caller reaches here on main (layout passes, @agent
+            // triggers hop to main in TerminalViews) — assert it once
+            // at the actor boundary instead of annotating the whole
+            // closure chain above.
+            let agentHost = MainActor.assumeIsolated {
+                self.makeAgentPaneHost(pane: pane, ws: ws, key: key, agentKey: agentKey)
+            }
+            guard let agentHost else {
                 // No daemon/env for this agent pane (remote link down,
                 // unknown agent key): NO host beats a wrong host — a
                 // plain shell here was the M1 "silent degradation". The
@@ -633,6 +644,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Persistent host for one GUI agent session pane (ACP over sessiond).
+    /// Main-actor: the registry's adapter factory is actor-confined
+    /// (sessions are UI state from construction).
+    @MainActor
     func makeAgentPaneHost(pane: PaneState, ws: WorkspaceState,
                            key: HostKey, agentKey: String) -> AgentPaneHost? {
         guard let descriptor = AgentRegistry.descriptor(for: agentKey),
@@ -860,7 +874,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.openAgentSession(agent: key, cwd: cwd)
         }
         sidebar.agentAvailable = { [weak self] key in
-            self?.agentAvailable(key: key) ?? false
+            MainActor.assumeIsolated { self?.agentAvailable(key: key) ?? false }
         }
         sidebar.onNewWorktreeInDir = { [weak self] cwd in
             self?.startWorktreeFlow(cwd: cwd)
@@ -979,7 +993,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.openAgentSession(agent: key)
         }
         strip.agentAvailable = { [weak self] key in
-            self?.agentAvailable(key: key) ?? false
+            MainActor.assumeIsolated { self?.agentAvailable(key: key) ?? false }
         }
         strip.onCloseTab = { [weak self] idx in
             self?.coordinator.closeTab(index: idx)

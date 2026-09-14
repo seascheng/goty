@@ -256,7 +256,7 @@ final class WorkspaceCoordinator {
             var gaps: [(paneId: String, storeKey: String, sessionId: String)] = []
             for pane in ws.tabs.flatMap(\.panes) {
                 guard case .agent(let agentKey) = pane.kind,
-                      let storeKey = AgentRegistry.descriptor(for: agentKey)?.storeListKey,
+                      let storeKey = AgentRegistry.storeListKeys[agentKey],
                       let sessionId = pane.agentSessionId, !sessionId.isEmpty,
                       !titlePrefetched[ws.id, default: []].contains(pane.id),
                       hasLiveHost?(HostKey(workspace: ws.id, pane: pane.id)) != true

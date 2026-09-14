@@ -34,6 +34,13 @@ struct AgentCapabilities: OptionSet {
 /// speaks this interface; each agent family adapts its wire dialect
 /// behind it (Adapters/: Claude/Codex their own, Pi+omp share the
 /// pi-mono rpc runtime in PiSession). Events (`AgentSessionEvent`)
+///
+/// Execution domain (2026-09-14 spec): this protocol and its delegate
+/// are MAIN-ACTOR confined — public calls, completions, parsed-protocol
+/// callbacks, connection transitions, timers, and delegate emission
+/// all observe one ordered execution domain. Transport parsing and
+/// daemon I/O stay off-main; crossing back is explicit.
+@MainActor
 protocol AgentSessioning: AnyObject {
     var delegate: AgentSessionDelegate? { get set }
     /// What this adapter supports; the default is "nothing optional" —
@@ -188,6 +195,8 @@ enum AgentTurnState: Equatable {
 }
 
 /// Dialect-neutral: the delegate never learns which adapter runs.
+/// Main-actor confined with the session itself (see AgentSessioning).
+@MainActor
 protocol AgentSessionDelegate: AnyObject {
     func session(_ session: AgentSessioning, didEmit events: [AgentSessionEvent])
     func sessionDidFail(_ session: AgentSessioning, reason: String)

@@ -8,6 +8,7 @@ import Foundation
 /// answered with {decision: accept|decline}. Resume rides the server's
 /// own model: thread/list {cwd} → thread/resume + thread/read
 /// {includeTurns} → the same mapper replays items as events.
+@MainActor
 final class CodexSession: AgentSessioning {
     weak var delegate: AgentSessionDelegate?
 
@@ -44,7 +45,11 @@ final class CodexSession: AgentSessioning {
     private let environment: [String: String]
     private let daemon: SessionDaemon
     private let grid: SessionGrid
-    private let client = JSONRPCChannel()
+    /// Parsed frames deliver on the main queue; the reader thread
+    /// only parses (see PiSession.channel).
+    private let client = JSONRPCChannel(callbackQueue: .main)
+    /// Generation fence for connect/reconnect/shutdown (see openTransport).
+    private let connectionGate = AgentConnectionGate()
     /// The pane (and its store) live on the daemon's machine.
     var runsOnThisMac: Bool { !daemon.isRemote }
     private let mapper = CodexFrameMapper()
@@ -358,108 +363,78 @@ final class CodexSession: AgentSessioning {
         }
     }
 
-    // MARK: - AgentSessioning
-
     func connect(completion: ((Bool) -> Void)? = nil) {
         guard !connected else {
             completion?(true)
             return
         }
         connected = true
-        guard let opened = openTransport() else {
+        // A new transport epoch: anything pending on the old one can
+        // never complete now.
+        client.failPending(reason: "transport epoch replaced")
+        openTransport { [weak self] opened in
+            self?.finishOpeningTransport(opened, intent: .initial,
+                                         completion: completion)
+        }
+    }
+
+    /// Why the transport is opening — drives the attached-pane branch
+    /// (initial connect adopts/rebuilds; reconnect stays lightweight).
+    private enum TransportOpenIntent {
+        case initial
+        case reconnect
+    }
+
+    /// Runs the blocking daemon open off main, fenced by the gate; the
+    /// result lands on main before any state changes.
+    private func openTransport(
+        completion: @escaping (SessionDaemon.OpenPaneResult?) -> Void
+    ) {
+        let daemon = self.daemon
+        let paneId = self.paneId
+        let cwd = self.cwd
+        let environment = self.environment
+        let grid = self.grid
+        let client = self.client
+        connectionGate.open(work: {
+            daemon.openPaneWithAttachment(
+                id: paneId, cwd: cwd, shell: "codex", args: ["app-server"],
+                environment: environment, grid: grid,
+                noEcho: true, ringBytes: 16_777_216,
+                onFrame: { [weak self] kind, data in
+                    switch kind {
+                    case SessionOutputKind.output:
+                        // Reader thread: parse only; delivery hops to
+                        // the channel's main callback queue.
+                        client.feed([UInt8](data))
+                    case SessionOutputKind.snapshot:
+                        client.feed([UInt8](data), replay: true)
+                    default:
+                        DispatchQueue.main.async {
+                            self?.handleControlFrame(kind: kind, data: data)
+                        }
+                    }
+                },
+                onDisconnect: { [weak self] in
+                    DispatchQueue.main.async { self?.transportDisconnected() }
+                })
+        }, onStale: { opened in
+            opened?.session.close()
+        }, completion: completion)
+    }
+
+    /// Post-open branches, always on main.
+    private func finishOpeningTransport(
+        _ opened: SessionDaemon.OpenPaneResult?,
+        intent: TransportOpenIntent,
+        completion: ((Bool) -> Void)?
+    ) {
+        guard let opened else {
             connected = false
             delegate?.sessionDidFail(self, reason: "sessiond 不可用")
             completion?(false)
             return
         }
-        if opened.attachedExisting {
-            // Live thread on the far side of the ring — adopting, never
-            // re-starting (thread/start would fork the conversation).
-            // The chips and transcript still have to come from
-            // somewhere: emit the knobs now (model/list pages the
-            // picker in over the live app-server). The thread to open is
-            // the one the user left here (restoredSessionId — the exact
-            // claude/pi restore param); without one, fall back to the
-            // app-server's own live-thread report (thread/loaded/list).
-            // The ring replay's orphaned thread/start result only
-            // survives inside the 16MB window, so it can't be the
-            // primary source.
-            configOptions = assembleOptions()
-            loadModelCatalog()
-            adoptRebuild = true
-            commands = []
-            loadCommands()
-            adoptingReplay = true
-            if let restore = restoredSessionId {
-                if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
-                    print("CODEX_ATTACH restore=\(restore)")
-                }
-                adoptRebuild = false
-                threadId = restore
-                sessionId = restore
-                // Writes (turn/start, thread/compact/start) fail with
-                // "thread not found" unless THIS process owns the
-                // thread — the turns/list replay is a cross-process
-                // READ and does not load it. resume first (probed:
-                // 5090 compact against an adopted-not-resumed pane).
-                // A live writer elsewhere (goal runner holding the
-                // flock — codex-rs thread-store writer_lock.rs, no
-                // force option) leaves us read-only: SAY so instead
-                // of looking healthy until the first send explodes.
-                client.request("thread/resume", ["threadId": restore]) { [weak self] result in
-                    guard let self else { return }
-                    switch result {
-                    case .success:
-                        self.ownershipDenied = false
-                    case .failure(let err):
-                        self.ownershipDenied = true
-                        if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
-                            print("CODEX_ATTACH resume failed: \(err.localizedDescription)")
-                        }
-                        self.emit([.notice("⚠︎ 会话正被另一个 codex 进程持有（goal runner 等）——当前只读，发送与 /compact 会被拒绝")])
-                    }
-                    self.rebuildAdoptedThread(restore)
-                }
-            } else {
-                client.request("thread/loaded/list", [:]) { [weak self] result in
-                    guard let self, self.adoptRebuild else { return }
-                    guard let value = try? result.get() else {
-                        if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
-                            print("CODEX_LOADED_LIST failed")
-                        }
-                        return
-                    }
-                    if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
-                        print("CODEX_LOADED_LIST value=\(value)")
-                    }
-                    guard let id = Self.pickLoadedThreadId(value) else { return }
-                    self.adoptRebuild = false
-                    self.threadId = id
-                    self.sessionId = id
-                    self.rebuildAdoptedThread(id)
-                }
-            }
-            emit([.configChanged(configOptions), .ready])
-            completion?(true)
-            return
-        }
-        handshake(completion)
-    }
-
-    private func openTransport() -> SessionDaemon.OpenPaneResult? {
-        let opened = daemon.openPaneWithAttachment(
-            id: paneId, cwd: cwd, shell: "codex", args: ["app-server"],
-            environment: environment, grid: grid,
-            noEcho: true, ringBytes: 16_777_216,
-            onFrame: { [weak self] kind, data in
-                self?.handleTransportFrame(kind: kind, data: data)
-            },
-            onDisconnect: { [weak self] in
-                guard let self else { return }
-                self.connected = false
-                self.delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
-            })
-        guard let opened else { return nil }
         // The reader thread was never started here — initialize went
         // out into a pane nobody read (pane was never assigned either),
         // so the handshake hung forever: the pane showed 正在启动 Codex…
@@ -467,8 +442,96 @@ final class CodexSession: AgentSessioning {
         // must too.
         pane = opened.session
         opened.session.start()
-        return opened
+        if opened.attachedExisting {
+            switch intent {
+            case .initial:
+                finishInitialAttachment(completion: completion)
+            case .reconnect:
+                // Lightweight attach on reconnect: the live thread keeps
+                // running; the transcript already stands (or the caller
+                // restores it via load(lastSessionId)).
+                emit([.ready])
+                completion?(true)
+            }
+        } else {
+            handshake(completion)
+        }
     }
+
+    /// The initial-connect attached-pane branch: adopt the live thread,
+    /// rebuild chips/transcript, surface ready.
+    private func finishInitialAttachment(completion: ((Bool) -> Void)?) {
+        // Live thread on the far side of the ring — adopting, never
+        // re-starting (thread/start would fork the conversation).
+        // The chips and transcript still have to come from
+        // somewhere: emit the knobs now (model/list pages the
+        // picker in over the live app-server). The thread to open is
+        // the one the user left here (restoredSessionId — the exact
+        // claude/pi restore param); without one, fall back to the
+        // app-server's own live-thread report (thread/loaded/list).
+        // The ring replay's orphaned thread/start result only
+        // survives inside the 16MB window, so it can't be the
+        // primary source.
+        configOptions = assembleOptions()
+        loadModelCatalog()
+        adoptRebuild = true
+        commands = []
+        loadCommands()
+        adoptingReplay = true
+        if let restore = restoredSessionId {
+            if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                print("CODEX_ATTACH restore=\(restore)")
+            }
+            adoptRebuild = false
+            threadId = restore
+            sessionId = restore
+            // Writes (turn/start, thread/compact/start) fail with
+            // "thread not found" unless THIS process owns the
+            // thread — the turns/list replay is a cross-process
+            // READ and does not load it. resume first (probed:
+            // 5090 compact against an adopted-not-resumed pane).
+            // A live writer elsewhere (goal runner holding the
+            // flock — codex-rs thread-store writer_lock.rs, no
+            // force option) leaves us read-only: SAY so instead
+            // of looking healthy until the first send explodes.
+            client.request("thread/resume", ["threadId": restore]) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.ownershipDenied = false
+                case .failure(let err):
+                    self.ownershipDenied = true
+                    if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                        print("CODEX_ATTACH resume failed: \(err.localizedDescription)")
+                    }
+                    self.emit([.notice("⚠︎ 会话正被另一个 codex 进程持有（goal runner 等）——当前只读，发送与 /compact 会被拒绝")])
+                }
+                self.rebuildAdoptedThread(restore)
+            }
+        } else {
+            client.request("thread/loaded/list", [:]) { [weak self] result in
+                guard let self, self.adoptRebuild else { return }
+                guard let value = try? result.get() else {
+                    if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                        print("CODEX_LOADED_LIST failed")
+                    }
+                    return
+                }
+                if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                    print("CODEX_LOADED_LIST value=\(value)")
+                }
+                guard let id = Self.pickLoadedThreadId(value) else { return }
+                self.adoptRebuild = false
+                self.threadId = id
+                self.sessionId = id
+                self.rebuildAdoptedThread(id)
+            }
+        }
+        emit([.configChanged(configOptions), .ready])
+        completion?(true)
+    }
+
+    // (openTransport moved above: asynchronous, generation-fenced.)
 
     private func handshake(_ completion: ((Bool) -> Void)?) {
         client.request("initialize",
@@ -497,19 +560,11 @@ final class CodexSession: AgentSessioning {
         pane?.close()
         pane = nil
         connected = true
-        guard let opened = openTransport() else {
-            connected = false
-            completion?(false)
-            return
+        client.failPending(reason: "transport epoch replaced")
+        openTransport { [weak self] opened in
+            self?.finishOpeningTransport(opened, intent: .reconnect,
+                                         completion: completion)
         }
-        if opened.attachedExisting {
-            emit([.ready])
-            completion?(true)
-            return
-        }
-        // Fresh process: handshake re-opens the remembered thread
-        // (restoredSessionId / lastSessionId) itself via thread/resume.
-        handshake(completion)
     }
 
 
@@ -547,7 +602,7 @@ final class CodexSession: AgentSessioning {
             // picker's options in after ready — the thread already
             // works with its default while the catalog loads.
             self.loadModelCatalog()
-            var readyEvents: [AgentSessionEvent] = [.configChanged(self.configOptions), .ready]
+            let readyEvents: [AgentSessionEvent] = [.configChanged(self.configOptions), .ready]
             self.emit(readyEvents)
             self.flushPendingSends()
             completion?(true)
@@ -1229,6 +1284,8 @@ final class CodexSession: AgentSessioning {
 
 
     func shutdown() {
+        connectionGate.invalidate()
+        client.failPending(reason: "codex transport closed")
         pane?.close()
         pane = nil
         connected = false
@@ -1236,25 +1293,25 @@ final class CodexSession: AgentSessioning {
 
     // MARK: - plumbing
 
-    private func handleTransportFrame(kind: UInt8, data: Data) {
-        if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil,
-           kind == SessionOutputKind.output {
-            print("CODEX_RAW \(String(decoding: data.prefix(200), as: UTF8.self))")
+    /// Control-frame state handling (exited …), on main. Output and
+    /// snapshot bytes never reach here — they feed the channel on the
+    /// reader thread.
+    private func handleControlFrame(kind: UInt8, data: Data) {
+        guard kind == SessionOutputKind.exited else { return }
+        if isWorking {
+            isWorking = false
+            emit([.turnEnded(stopReason: nil)])
         }
-        switch kind {
-        case SessionOutputKind.output:
-            client.feed([UInt8](data))
-        case SessionOutputKind.snapshot:
-            client.feed([UInt8](data), replay: true)
-        case SessionOutputKind.exited:
-            if isWorking {
-                isWorking = false
-                emit([.turnEnded(stopReason: nil)])
-            }
-            delegate?.sessionDidFail(self, reason: "codex 进程已退出")
-        default:
-            break
-        }
+        connectionGate.invalidate()
+        client.failPending(reason: "codex transport closed")
+        delegate?.sessionDidFail(self, reason: "codex 进程已退出")
+    }
+
+    /// Transport-level disconnect (daemon restart, ssh forward loss).
+    private func transportDisconnected() {
+        connected = false
+        client.failPending(reason: "codex transport disconnected")
+        delegate?.session(self, didDisconnectBecause: "daemon 连接断开")
     }
 
     /// Single source of truth for the manifest (agenttest asserts it).
@@ -1362,10 +1419,6 @@ final class CodexSession: AgentSessioning {
             }
         case "thread/goal/cleared":
             emit([.statusFlash("goal 已清除")])
-        case "warning", "guardianWarning", "configWarning":
-            if let msg = params["message"] as? String, !msg.isEmpty {
-                emit([.notice("⚠︎ \(msg)")])
-            }
         case "skills/changed":
             // Schema: treat as invalidation and re-run skills/list with
             // the current parameters.
