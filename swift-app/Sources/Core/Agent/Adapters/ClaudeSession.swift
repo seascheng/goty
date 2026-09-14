@@ -228,8 +228,9 @@ final class ClaudeSession: AgentSessioning {
         completion?(true)
     }
 
-    func send(_ text: String, images: [AgentImage]) {
-        guard !isWorking else { return }
+    @discardableResult
+    func send(_ text: String, images: [AgentImage]) -> Bool {
+        guard !isWorking else { return false }
         isWorking = true
         // --print may have ended the process at the last result: a
         // resumed spawn is the only way onward.
@@ -255,6 +256,7 @@ final class ClaudeSession: AgentSessioning {
         }
         channel.send(["type": "user",
                       "message": ["role": "user", "content": content]])
+        return true
     }
 
     func cancel() {
@@ -531,7 +533,7 @@ final class ClaudeSession: AgentSessioning {
     }
 
     private func enqueueMidTurn(_ text: String, images: [AgentImage]) {
-        guard isWorking else { return send(text, images: images) }
+        guard isWorking else { _ = send(text, images: images); return }
         pendingMidTurn.append((text, images))
         emit([.notice("⟳ 消息已排队，本轮结束后发送")])
     }

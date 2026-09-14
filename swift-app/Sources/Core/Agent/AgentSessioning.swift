@@ -41,10 +41,10 @@ protocol AgentSessioning: AnyObject {
     var capabilities: AgentCapabilities { get }
     var sessionId: String? { get }
     var isWorking: Bool { get }
-    /// True while the adapter OWNS sent-but-undelivered work: a running
-    /// turn or sends parked behind an in-flight restore. The host's
-    /// refusal guard reads this instead of isWorking.
-    var hasPendingWork: Bool { get }
+    /// Sends park or refuse synchronously; the Bool says which. The
+    /// host's refusal guard reads it instead of guessing from state —
+    /// an out-of-band command (codex /goal) reports accepted without
+    /// owning a turn.
     var configOptions: [AgentConfigOption] { get }
     var commands: [AgentSlashCommand] { get }
     /// Working directory — file index and session-store filters.
@@ -61,7 +61,7 @@ protocol AgentSessioning: AnyObject {
     var debugReplayFrames: Int { get }
 
     func connect(completion: ((Bool) -> Void)?)
-    func send(_ text: String, images: [AgentImage])
+    @discardableResult func send(_ text: String, images: [AgentImage]) -> Bool
     func cancel()
     func respondPermission(requestID: String, optionId: String)
     func setConfigOption(id: String, value: String)
@@ -129,9 +129,6 @@ extension AgentSessioning {
         completion(nil)
     }
     var lastSessionId: String? { sessionId }
-    /// Default: pending work IS the running turn. Adapters that park
-    /// sends during a restore override this.
-    var hasPendingWork: Bool { isWorking }
     /// true = the adapter consumes `restoredSessionId` itself inside
     /// connect (claude: store replay + --resume respawn) and the caller
     /// must NOT also load() after connect.
@@ -142,7 +139,7 @@ extension AgentSessioning {
     /// Single-argument conveniences: extension bodies forward into the
     /// requirements above, so calls through `any AgentSessioning`
     /// still dispatch dynamically to the adapter's implementation.
-    func send(_ text: String) { send(text, images: []) }
+    @discardableResult func send(_ text: String) -> Bool { send(text, images: []) }
     func steer(_ text: String) { steer(text, images: []) }
     /// Fast-mode toggle (omp set_fast_mode). Unsupported adapters no-op.
     func setFastMode(enabled: Bool) {}

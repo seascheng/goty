@@ -384,11 +384,12 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                     return
                 }
                 self.setTurnState(.thinking)
-                self.session.send(text, images: images)
-                // An adapter with no live session id (attach replay rotated
-                // past the handshake) refuses send() — never leave the
-                // composer stuck "working".
-                if !self.session.hasPendingWork {
+                let accepted = self.session.send(text, images: images)
+                // A refused send (adapter with no live session id, attach
+                // replay rotated past the handshake) must not leave the
+                // composer stuck "working". Accepted-but-queued work
+                // (restore in flight, out-of-band command) reports true.
+                if !accepted {
                     self.setTurnState(.errored("未关联到 agent 会话 — 请点重试"))
                 }
             }
@@ -984,10 +985,8 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
         onQueuedOutboxChange?(queuedOutbox.map(\.text))
         bridge.push(["type": "queueDelivered", "text": item.text])
         setTurnState(.thinking)
-        session.send(item.message, images: item.images)
-        // Same refusal guard as the send path: an adapter with no live
-        // session id must not leave the pane stuck "thinking".
-        if !session.hasPendingWork {
+        if !session.send(item.message, images: item.images) {
+            // Same refusal semantics as the send path.
             setTurnState(.errored("未关联到 agent 会话 — 请点重试"))
         }
     }

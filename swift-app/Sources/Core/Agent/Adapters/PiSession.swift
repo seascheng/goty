@@ -492,8 +492,9 @@ class PiSession: AgentSessioning {
         delegate?.session(self, didEmit: events)
     }
 
-    func send(_ text: String, images: [AgentImage]) {
-        guard !isWorking else { return }
+    @discardableResult
+    func send(_ text: String, images: [AgentImage]) -> Bool {
+        guard !isWorking else { return false }
         isWorking = true
         lastSendAt = Date()
         idlePollStreak = 0
@@ -518,6 +519,7 @@ class PiSession: AgentSessioning {
         var frame: [String: Any] = ["id": id, "type": "prompt", "message": text]
         if !images.isEmpty { frame["images"] = images.map(\.piWire) }
         channel.send(frame)
+        return true
     }
 
     func cancel() {
@@ -834,7 +836,7 @@ class PiSession: AgentSessioning {
     }
 
     func steer(_ text: String, images: [AgentImage]) {
-        guard isWorking else { return send(text, images: images) }
+        guard isWorking else { _ = send(text, images: images); return }
         // A mid-turn builtin (/rename …) must NOT ride a steer frame —
         // pi-mono never parses commands on the steer path, and sending
         // a prompt mid-stream kills the turn on omp 18.0.11. Park it.

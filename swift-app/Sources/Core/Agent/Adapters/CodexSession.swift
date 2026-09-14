@@ -32,8 +32,6 @@ final class CodexSession: AgentSessioning {
     /// Sends parked while the thread restore is still in flight; flushed
     /// the moment the replay lands and the thread id is live.
     private var pendingSends: [(text: String, images: [AgentImage])] = []
-    /// Parked sends count as owned work — the host's refusal guard.
-    var hasPendingWork: Bool { isWorking || !pendingSends.isEmpty }
     private let paneId: String
     private let environment: [String: String]
     private let daemon: SessionDaemon
@@ -570,7 +568,8 @@ final class CodexSession: AgentSessioning {
         page(nil)
     }
 
-    func send(_ text: String, images: [AgentImage]) {
+    @discardableResult
+    func send(_ text: String, images: [AgentImage]) -> Bool {
         guard let threadId else {
             // Restore still in flight (attach replay / resume): park the
             // text instead of refusing — the old refusal read as an error
@@ -578,9 +577,9 @@ final class CodexSession: AgentSessioning {
             // replay lands.
             pendingSends.append((text, images))
             emit([.notice("⟳ 会话恢复中，消息稍后自动发送")])
-            return
+            return true
         }
-        guard !isWorking else { enqueueMidTurn(text, images: images); return }
+        guard !isWorking else { enqueueMidTurn(text, images: images); return true }
         // Slash = the TUI's command table. Host-translated RPCs run
         // out of band (compact, goal); commands the GUI carries as
         // chips say so; the rest admit they're not wired. Skills are
@@ -591,7 +590,7 @@ final class CodexSession: AgentSessioning {
         if trimmed.hasPrefix("/") {
             if let m = Self.matchCommand(trimmed, commands: Self.tuiCommands()) {
                 executeTuiCommand(m.command.name, args: m.rest, threadId: threadId)
-                return
+                return true
             }
         }
         var prompt = text
@@ -620,9 +619,9 @@ final class CodexSession: AgentSessioning {
                                          $0.path.isEmpty ? nil : $0
                                      })
         // Turn ownership is synchronous here: the host's refusal guard
-        // reads isWorking the moment send() returns; the appended text
-        // is matched against the agent's userMessage echo to suppress
-        // the double render.
+        // reads the return the moment send() returns; the appended
+        // text is matched against the agent's userMessage echo to
+        // suppress the double render.
         isWorking = true
         pendingEcho.append(trimmed)
         if pendingEcho.count > 4 { pendingEcho.removeFirst() }
@@ -631,34 +630,59 @@ final class CodexSession: AgentSessioning {
             // request result only acknowledges the turn object.
             _ = self
         }
+        return true
     }
 
     /// Host-translated TUI commands (RPC evidence from paseo's
-    /// executeCompactCommand / executeGoalSubcommand). Commands whose
-    /// TUI surface is a GUI chip here say so; the rest are honestly
-    /// reported as not wired rather than faked.
+    /// executeCompactCommand / executeGoalSubcommand — including the
+    /// assistant-message receipt after each out-of-band RPC). Commands
+    /// whose TUI surface is a GUI chip here say so; the rest are
+    /// honestly reported as not wired rather than faked.
     private func executeTuiCommand(_ name: String, args: String, threadId: String) {
         switch name {
         case "compact":
-            client.request("thread/compact/start", ["threadId": threadId]) { _ in }
+            // A compaction turn follows (turn/started) — it owns the
+            // lifecycle from here.
+            client.request("thread/compact/start", ["threadId": threadId]) { [weak self] _ in
+                self?.emit([.messageChunk("已请求压缩对话。")])
+            }
         case "goal":
             let goal = Self.goalParams(threadId: threadId, args: args)
             if let goal {
-                client.request(goal.method, goal.params) { _ in }
+                // goal/set makes the agent start a turn on its own
+                // (probed): turn/started owns the lifecycle.
+                client.request(goal.method, goal.params) { [weak self] _ in
+                    self?.emit([.messageChunk(Self.goalReceipt(args))])
+                }
             } else {
-                emit([.notice("用法：/goal <objective>|pause|resume|clear")])
+                emit([.notice("用法：/goal <objective>|pause|resume|clear"),
+                      .turnEnded(stopReason: nil)])
             }
         case "model":
-            emit([.notice("模型与推理力度由底部「模型 / 思考」chip 承载")])
+            emit([.notice("模型与推理力度由底部「模型 / 思考」chip 承载"),
+                  .turnEnded(stopReason: nil)])
         case "permissions":
-            emit([.notice("权限由底部「权限」chip 承载")])
+            emit([.notice("权限由底部「权限」chip 承载"), .turnEnded(stopReason: nil)])
         case "skills":
             let count = skillCommands.count
             emit([.notice(count > 0
                   ? "技能以 $ 前缀调用：输入 $ 加技能名（\(count) 个可用）"
-                  : "当前无可用技能")])
+                  : "当前无可用技能"), .turnEnded(stopReason: nil)])
         default:
-            emit([.notice("「/\(name)」暂未接入此 GUI")])
+            emit([.notice("「/\(name)」暂未接入此 GUI"), .turnEnded(stopReason: nil)])
+        }
+    }
+
+    /// Receipt text for a /goal RPC (paseo: "Goal set: …" / "Goal
+    /// paused." — the agent's own status line, echoed into the
+    /// transcript).
+    static func goalReceipt(_ args: String) -> String {
+        let rest = args.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch rest {
+        case "pause": return "Goal 已暂停。"
+        case "resume": return "Goal 已恢复。"
+        case "clear": return "Goal 已清除。"
+        default: return "Goal 已设置：\(rest)"
         }
     }
 
@@ -1244,7 +1268,7 @@ final class CodexSession: AgentSessioning {
     }
 
     private func enqueueMidTurn(_ text: String, images: [AgentImage]) {
-        guard isWorking else { return send(text, images: images) }
+        guard isWorking else { _ = send(text, images: images); return }
         pendingMidTurn.append((text, images))
         emit([.notice("⟳ 消息已排队，本轮结束后发送")])
     }
