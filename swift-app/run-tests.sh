@@ -22,6 +22,17 @@ cd "$(dirname "$0")"
 
 B="/tmp/goty-build-$$"          # per-run binaries (rpath CGhostty copy)
 mkdir -p "$B"
+cleanup_build_dir() {
+    local status=$?
+    trap - EXIT HUP INT TERM
+    # Exact, fully-resolved per-run dir only — never the shared
+    # content-keyed cache ($B carries the literal $$ path).
+    case "$B" in
+        /tmp/goty-build-[0-9]*) rm -rf -- "$B" ;;
+    esac
+    exit "$status"
+}
+trap cleanup_build_dir EXIT
 # Cache is per-CHECKOUT: worktrees share /tmp but not source content,
 # and the mtime stamp can't tell trees apart — a sibling worktree's
 # build made this tree's tools compile against a stale module (the old
@@ -147,16 +158,8 @@ cp -R vendor-sparkle/Sparkle.framework "$B"/
 
 # Watchdog: a wedged test binary holds REAL windows on the user's
 # screen (2026-08-24: a SIGPIPE-muted goty-files-test left one up).
-run_guarded() {
-    "$@" &
-    local pid=$!
-    ( sleep 300 && kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
-    local wd=$!
-    wait "$pid"; local st=$?
-    kill "$wd" 2>/dev/null
-    wait "$wd" 2>/dev/null || true
-    return $st
-}
+# tools/run-guarded.sh preserves the child status and always reaps
+# under set -e, leaking sleeps and this per-run directory).
 
 # Entry points compile+link in parallel (each is one file); they only
 # share the read-only cache archive. DISABLED for now (2026-08-31):
@@ -176,7 +179,7 @@ done
 [ -z "$FAILED" ] || { echo "test binary compile failed for:$FAILED" >&2; exit 1; }
 
 # Tests run sequentially (they share UserDefaults and real windows).
-run_guarded "$B"/goty-layouttest-test
-run_guarded "$B"/goty-filestest-test
-run_guarded "$B"/goty-aitest-test
-run_guarded "$B"/goty-agenttest-test
+tools/run-guarded.sh 300 "$B"/goty-layouttest-test
+tools/run-guarded.sh 300 "$B"/goty-filestest-test
+tools/run-guarded.sh 300 "$B"/goty-aitest-test
+tools/run-guarded.sh 300 "$B"/goty-agenttest-test
