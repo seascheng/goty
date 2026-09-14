@@ -10,6 +10,7 @@ import Foundation
 import AppKit
 @testable import goty
 
+@MainActor
 final class CompactDelegate: NSObject, AgentSessionDelegate {
     let lock = NSLock()
     var runtimeEvents = 0
@@ -54,6 +55,7 @@ enum CompactProbe {
         return done()
     }
 
+    @MainActor
     static func main() {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)

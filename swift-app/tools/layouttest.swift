@@ -1868,7 +1868,7 @@ func run() {
     wc.sidebar.onNewAgentSessionInDir = { agentDirs.append(($0, $1)) }
     wc.sidebar.agentAvailable = { _ in true }  // count assertions assume every agent listed
     let plusMenu = wc.sidebar.spacePlusMenu(dir: repoDir, isGit: true)
-    let agentCount = AgentRegistry.descriptors.count
+    let agentCount = MainActor.assumeIsolated { AgentRegistry.descriptors.count }
     check(plusMenu.items.count == 3 + agentCount
           && plusMenu.items[0].title == "New Terminal"
           && plusMenu.items[1].title == "New Worktree…",

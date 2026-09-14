@@ -11,6 +11,7 @@ import Foundation
 @testable import goty
 
 @main
+@MainActor
 enum AgentProbe {
     static func main() {
         let args = CommandLine.arguments

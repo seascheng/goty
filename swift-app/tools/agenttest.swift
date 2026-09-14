@@ -6,6 +6,7 @@ import Foundation
 
 @main
 enum AgentTest {
+    @MainActor
     static func main() {
         var failures = 0
         func check(_ cond: Bool, _ name: String) {
@@ -491,7 +492,63 @@ enum AgentTest {
         }
         check(acceptedConnections == ["new"], "only newest connection is accepted")
         check(discardedConnections == ["old"], "stale connection is discarded")
+        print("— production channel main-thread affinity —")
+        let mainLineDone = DispatchSemaphore(value: 0)
+        let mainLine = LineChannel(callbackQueue: .main)
+        var mainLineWasMain = false
+        mainLine.onFrame = { _, _ in
+            mainLineWasMain = Thread.isMainThread
+            mainLineDone.signal()
+        }
+        DispatchQueue.global().async {
+            mainLine.feed(Array("{\"type\":\"main-check\"}\n".utf8))
+        }
+        var mainLineDeadline = Date().addingTimeInterval(1)
+        while mainLineDone.wait(timeout: .now()) != .success,
+              Date() < mainLineDeadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        check(mainLineWasMain, "production line callbacks reach main thread")
 
+        let mainRPCDone = DispatchSemaphore(value: 0)
+        let mainRPC = JSONRPCChannel(callbackQueue: .main)
+        var mainRPCWasMain = false
+        mainRPC.onNotification = { _, _ in
+            mainRPCWasMain = Thread.isMainThread
+            mainRPCDone.signal()
+        }
+        DispatchQueue.global().async {
+            mainRPC.feed(Array("{\"method\":\"main-check\"}\n".utf8))
+        }
+        var mainRPCDeadline = Date().addingTimeInterval(1)
+        while mainRPCDone.wait(timeout: .now()) != .success,
+              Date() < mainRPCDeadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        check(mainRPCWasMain, "production JSON-RPC callbacks reach main thread")
+
+        print("— pi/omp replay-state derivation —")
+        let ompReplay = PiSession.replayState(replay: true, suppressesRingReplay: true)
+        check(ompReplay.mapperReplaying && ompReplay.suppressContent,
+              "OMP replay maps history but suppresses content")
+        let piReplay = PiSession.replayState(replay: true, suppressesRingReplay: false)
+        check(piReplay.mapperReplaying && !piReplay.suppressContent,
+              "Pi replay maps history without OMP suppression")
+        let liveFrame = PiSession.replayState(replay: false, suppressesRingReplay: true)
+        check(!liveFrame.mapperReplaying && !liveFrame.suppressContent,
+              "live OMP frame is never replay-suppressed")
+
+        print("— registry nonisolated projections stay in lockstep —")
+        check(AgentRegistry.descriptors.map(\.key) == AgentRegistry.agentKeys,
+              "agentKeys match descriptor order")
+        check(AgentRegistry.probeCatalog.map(\.key) == AgentRegistry.agentKeys,
+              "probeCatalog matches descriptor keys")
+        var storeProjection: [String: String] = [:]
+        for descriptor in AgentRegistry.descriptors {
+            if let key = descriptor.storeListKey { storeProjection[descriptor.key] = key }
+        }
+        check(storeProjection == AgentRegistry.storeListKeys,
+              "storeListKeys match descriptor store keys")
         print("— integrity counters —")
         check(rpcMapper.eventsRouted > 0 && rpcMapper.framesIgnored > 0,
               "mapper counts routed and ignored frames")

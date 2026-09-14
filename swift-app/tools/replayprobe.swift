@@ -17,7 +17,8 @@ final class ProbeSink: NSObject, WKScriptMessageHandler {
     }
 }
 
-final class ProbeDelegate: AgentSessionDelegate {
+@MainActor
+final class ProbeDelegate: NSObject, AgentSessionDelegate {
     let lock = NSLock()
     var eventCounts: [String: Int] = [:]
     var lastUserText = ""
@@ -80,6 +81,7 @@ enum ReplayProbe {
         return done()
     }
 
+    @MainActor
     static func main() {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
