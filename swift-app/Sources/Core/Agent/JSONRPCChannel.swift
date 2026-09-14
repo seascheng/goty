@@ -2,9 +2,15 @@
 import Foundation
 
 /// JSON-RPC `error.message` carrier. String itself is not an Error
-/// (SE-0192 removed the implicit conformance).
-enum RPCFailure: Error {
+/// (SE-0192 removed the implicit conformance). LocalizedError exposes
+/// the server's message ("thread not found: …") — without it Swift
+/// prints "goty.RPCFailure error 0" and the real reason is lost.
+enum RPCFailure: Error, LocalizedError {
     case message(String)
+    var errorDescription: String? {
+        if case .message(let text) = self { return text }
+        return nil
+    }
 }
 
 /// JSON-RPC 2.0 over ndjson for one agent pane — protocol-agnostic

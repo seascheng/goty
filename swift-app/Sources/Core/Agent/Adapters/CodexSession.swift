@@ -389,7 +389,15 @@ final class CodexSession: AgentSessioning {
                 adoptRebuild = false
                 threadId = restore
                 sessionId = restore
-                rebuildAdoptedThread(restore)
+                // Writes (turn/start, thread/compact/start) fail with
+                // "thread not found" unless THIS process owns the
+                // thread — the turns/list replay is a cross-process
+                // READ and does not load it. resume first (probed:
+                // 5090 compact against an adopted-not-resumed pane).
+                client.request("thread/resume", ["threadId": restore]) { [weak self] _ in
+                    guard let self else { return }
+                    self.rebuildAdoptedThread(restore)
+                }
             } else {
                 client.request("thread/loaded/list", [:]) { [weak self] result in
                     guard let self, self.adoptRebuild else { return }
@@ -625,10 +633,15 @@ final class CodexSession: AgentSessioning {
         isWorking = true
         pendingEcho.append(trimmed)
         if pendingEcho.count > 4 { pendingEcho.removeFirst() }
-        client.request("turn/start", params) { [weak self] _ in
-            // turn outcome arrives as turn/completed notification; the
-            // request result only acknowledges the turn object.
-            _ = self
+        client.request("turn/start", params) { [weak self] result in
+            guard let self, case .failure(let err) = result else { return }
+            // No turn object was created: nothing will ever send
+            // turn/started/completed. Close the phantom working state
+            // and surface the server's reason ("thread not found: …").
+            self.isWorking = false
+            self.pendingEcho.removeAll { $0 == trimmed }
+            self.emit([.messageChunk("[codex] \(err.localizedDescription)"),
+                       .turnEnded(stopReason: nil)])
         }
         return true
     }
