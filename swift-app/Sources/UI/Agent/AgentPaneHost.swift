@@ -1021,6 +1021,15 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                     // dead ring's transcript or the fresh history load
                     // would duplicate every block.
                     self.bridge.push(["type": "clearTranscript"])
+                    // The reset also wipes the page's permission card —
+                    // an approval that arrived between the replay start
+                    // and its reset would otherwise vanish while codex
+                    // still waits on it. Re-publish it.
+                    if let prompt = self.pendingPrompt {
+                        self.bridge.push(
+                            AgentSessionEvent.permissionRequested(prompt)
+                                .jsRepresentation)
+                    }
                 }
                 switch event {
                 case .openURL(let url):

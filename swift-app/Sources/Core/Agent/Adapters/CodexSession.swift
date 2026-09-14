@@ -605,11 +605,15 @@ final class CodexSession: AgentSessioning {
                   .turnEnded(stopReason: nil)])
             return true
         }
-        guard let threadId else {
+        guard !adoptingReplay, let threadId else {
             // Restore still in flight (attach replay / resume): park the
             // text instead of refusing — the old refusal read as an error
-            // and forced the manual 重试 detour. Flush fires when the
-            // replay lands.
+            // and forced the manual 重试 detour. Also parks while the
+            // adoption replay is still running: a send racing the replay
+            // puts approvals BEFORE the transcript reset, which wipes
+            // the permission card and the live tool cards — the "goal
+            // turn stuck on 思考中 with three invisible approvals"
+            // repro. Flush fires when the replay lands.
             pendingSends.append((text, images))
             emit([.notice("⟳ 会话恢复中，消息稍后自动发送")])
             return true
