@@ -5,6 +5,18 @@
     <description>Most recent changes to Goty.</description>
     <language>en</language>
   <item>
+    <title>Version 0.3.1 (Build 5)</title>
+    <pubDate>Tue, 15 Sep 2026 05:02:40 +0000</pubDate>
+    <sparkle:version>5</sparkle:version>
+    <sparkle:shortVersionString>0.3.1</sparkle:shortVersionString>
+    <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+    <description><![CDATA[<ul><li>codex: 远端 app-server 重启后发送报 thread not found 时,自动恢复会话并重发消息</li><li>codex: 重开会话时进行中的回合不再显示为已完成——tab 状态与思考中指示如实恢复,并提示输出在回合结束后可见</li><li>codex: 审批卡三选项(允许一次/本会话总是允许/拒绝);Esc 中断可靠收尾并收回未决审批</li><li>codex: /compact 压缩进度卡与真实失败回报;goal 状态闪现(进行中/已阻塞/已暂停/已清除)</li><li>codex: 会话历史加载提速——首屏有界加载,滚动加载更早消息</li><li>codex: 流式输出补齐完成消息的缺失后缀,尾部内容不再丢失</li><li>agent: 会话状态收敛到主线程,连接代际隔离,并发更稳</li></ul>]]></description>
+    <enclosure url="https://github.com/seascheng/goty/releases/download/v0.3.1/Goty-0.3.1-arm64.dmg"
+               type="application/octet-stream"
+               sparkle:edSignature="uE5ceCqCKtn95UuwrePtBbzXv3Yx1Yafye+8iXOMN79ytlTLJQSSAy30ACRA6iX2TD05y+UWzDfU1Xj+n1uADQ=="
+               length="16587795" />
+  </item>
+  <item>
     <title>Version 0.3.0 (Build 4)</title>
     <pubDate>Wed, 09 Sep 2026 06:39:11 +0000</pubDate>
     <sparkle:version>4</sparkle:version>
