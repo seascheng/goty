@@ -1118,8 +1118,44 @@ fn stream_pane(stream: UnixStream, pane: Arc<Pane>) -> anyhow::Result<()> {
 }
 
 fn write_output(mut stream: UnixStream, receiver: mpsc::Receiver<OutFrame>) {
-    while let Ok(frame) = receiver.recv() {
-        if protocol::write_frame(&mut stream, frame.kind, &frame.payload).is_err() {
+    // Terminal floods arrive in tiny upstream chunks (probed 2026-09-15:
+    // a 50k-file `ls` lands as ~150-190B reads — the tty write rhythm of
+    // the producing program). One socket write per chunk costs a wake
+    // chain (reader→channel→writer→client) per ~190 bytes and capped the
+    // whole link at 0.15 MB/s vs 0.79 MB/s reading the same PTY directly.
+    // Consecutive OUTPUT frames are a pure byte stream to the client, so
+    // drain whatever is already queued and write it as ONE frame. Frame
+    // kinds never mix in a batch (control markers keep their own frames)
+    // and queue order is preserved exactly.
+    const BATCH_CAP: usize = 256 * 1024;
+    'outer: while let Ok(first) = receiver.recv() {
+        let mut kind = first.kind;
+        let mut payload = first.payload;
+        loop {
+            if payload.len() >= BATCH_CAP {
+                break;
+            }
+            match receiver.try_recv() {
+                Ok(next) => {
+                    // ONLY output merges: SIZE payloads are fixed-width
+                    // binary (two merged SIZE frames would misparse),
+                    // and control markers keep 1:1 frames.
+                    if next.kind == kind && kind == protocol::kind::OUTPUT {
+                        payload.extend_from_slice(&next.payload);
+                    } else {
+                        // Kind boundary: flush the batch, start the next
+                        // with the frame we just took.
+                        if protocol::write_frame(&mut stream, kind, &payload).is_err() {
+                            break 'outer;
+                        }
+                        kind = next.kind;
+                        payload = next.payload;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if protocol::write_frame(&mut stream, kind, &payload).is_err() {
             break;
         }
     }
@@ -1171,6 +1207,72 @@ mod tests {
         // Compile-time guard: this build must not regress below the
         // capability the GUI's expectedCapability demands.
         const _: () = assert!(protocol::CAPABILITY >= 2);
+        Ok(())
+    }
+
+    #[test]
+    fn write_output_coalesces_output_and_keeps_markers() -> anyhow::Result<()> {
+        // The 50k-file ls fix: consecutive OUTPUT frames merge into one
+        // socket frame; SIZE/EXITED keep 1:1 frames and the byte order
+        // across kind boundaries is preserved exactly.
+        let (left, mut right) = UnixStream::pair()?;
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<OutFrame>(64);
+        let writer = std::thread::spawn(move || write_output(left, receiver));
+
+        let size = protocol::encode_size(protocol::WinSize {
+            cols: 80,
+            rows: 24,
+            cell_w: 8,
+            cell_h: 16,
+        });
+        sender.send(OutFrame::new(protocol::kind::OUTPUT, b"aaa".to_vec()))?;
+        sender.send(OutFrame::new(protocol::kind::OUTPUT, b"bbb".to_vec()))?;
+        sender.send(OutFrame::new(protocol::kind::SIZE, size.to_vec()))?;
+        sender.send(OutFrame::new(protocol::kind::OUTPUT, b"ccc".to_vec()))?;
+        drop(sender);
+        writer
+            .join()
+            .map_err(|_| anyhow::anyhow!("writer panicked"))?;
+
+        let (kind, payload) = protocol::read_frame(&mut right)?;
+        assert_eq!(kind, protocol::kind::OUTPUT);
+        assert_eq!(payload, b"aaabbb");
+        let (kind, payload) = protocol::read_frame(&mut right)?;
+        assert_eq!(kind, protocol::kind::SIZE);
+        assert_eq!(payload, size.to_vec());
+        let (kind, payload) = protocol::read_frame(&mut right)?;
+        assert_eq!(kind, protocol::kind::OUTPUT);
+        assert_eq!(payload, b"ccc");
+        assert!(protocol::read_frame(&mut right).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn write_output_never_merges_two_size_frames() -> anyhow::Result<()> {
+        let (left, mut right) = UnixStream::pair()?;
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<OutFrame>(64);
+        let writer = std::thread::spawn(move || write_output(left, receiver));
+        let size = protocol::encode_size(protocol::WinSize {
+            cols: 1,
+            rows: 2,
+            cell_w: 3,
+            cell_h: 4,
+        });
+        sender.send(OutFrame::new(protocol::kind::SIZE, size.to_vec()))?;
+        sender.send(OutFrame::new(protocol::kind::SIZE, size.to_vec()))?;
+        drop(sender);
+        writer
+            .join()
+            .map_err(|_| anyhow::anyhow!("writer panicked"))?;
+        for _ in 0..2 {
+            let (kind, payload) = protocol::read_frame(&mut right)?;
+            assert_eq!(kind, protocol::kind::SIZE);
+            assert_eq!(
+                payload.len(),
+                8,
+                "each SIZE stays its own fixed-width frame"
+            );
+        }
         Ok(())
     }
 

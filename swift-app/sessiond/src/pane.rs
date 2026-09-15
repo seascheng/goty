@@ -17,7 +17,7 @@ pub struct OutFrame {
 }
 
 impl OutFrame {
-    fn new(kind: u8, payload: Vec<u8>) -> Self {
+    pub(crate) fn new(kind: u8, payload: Vec<u8>) -> Self {
         Self { kind, payload }
     }
 }
@@ -710,11 +710,14 @@ fn spawn_reader(
             let mut diag_bytes: usize = 0;
             let mut diag_chunks: usize = 0;
             let diag_t0 = std::time::Instant::now();
+            // Hoisted: env::var per chunk costs more than the whole
+            // loop body at flood rates (2026-09-15 throughput bisect).
+            let diag = std::env::var("GOTYD_REPLAY_DIAG").is_ok();
             loop {
                 match reader.read(&mut scratch) {
                     Ok(0) => break,
                     Ok(count) => {
-                        if std::env::var("GOTYD_REPLAY_DIAG").is_ok() {
+                        if diag {
                             diag_bytes += count;
                             diag_chunks += 1;
                             if diag_bytes / 262_144 != (diag_bytes - count) / 262_144 {
