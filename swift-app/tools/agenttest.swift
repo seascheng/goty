@@ -1495,6 +1495,73 @@ enum AgentTest {
                   },
                   "second failure surfaces the error instead of looping")
         }
+
+        // — a resumed thread whose newest turn is still RUNNING: the
+        // replay must NOT fake its completion (probed 2026-09-15: a
+        // resumed connection receives zero live events for another
+        // connection's turn) — the tab shows busy and says why. —
+        do {
+            let m = CodexFrameMapper()
+            var events: [AgentSessionEvent] = []
+            events += m.map(method: "item/completed", params: [
+                "item": ["type": "agentMessage", "id": "live-1",
+                         "text": "中途的部分输出"], "threadId": ""])
+            events += m.map(method: "turn/completed", params: [
+                "turn": ["id": "t-old", "status": "completed"]])
+            let settled = events.contains { if case .turnEnded = $0 { return true } else { return false } }
+            check(settled, "a completed replayed turn still settles")
+            // The REAL contract is the load() replay path: a resumed
+            // thread whose newest turn is inProgress must mark the
+            // pane busy and explain the quiet — without faking a
+            // turnEnded (probed 2026-09-15: resumed connections get
+            // zero live events for another connection's turn).
+            let s = CodexSession(params: AgentPaneParams(
+                paneId: "live-turn", cwd: nil, environment: [:],
+                daemon: .shared))
+            @MainActor final class R2: AgentSessionDelegate {
+                var events: [AgentSessionEvent] = []
+                func session(_ x: AgentSessioning, didEmit e: [AgentSessionEvent]) { events += e }
+                func sessionDidFail(_ x: AgentSessioning, reason: String) {}
+            }
+            let rec = R2()
+            s.delegate = rec
+            var out: [String] = []
+            s.client.onOutbound = { out.append(String(decoding: $0, as: UTF8.self)) }
+            func pump2() {
+                let deadline = Date().addingTimeInterval(0.15)
+                while Date() < deadline {
+                    RunLoop.main.run(mode: .default,
+                                     before: Date().addingTimeInterval(0.005))
+                }
+            }
+            func respond(_ method: String, _ tail: String) {
+                var rid: Int?
+                for line in out.reversed() {
+                    guard let d = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                          d["method"] as? String == method else { continue }
+                    rid = (d["id"] as? Int) ?? (d["id"] as? String).flatMap(Int.init)
+                    break
+                }
+                guard let id = rid else { return }
+                s.client.feed(Array(#"{"jsonrpc":"2.0","id":\#(id),\#(tail)}\#n"#.utf8))
+                pump2()
+            }
+            s.load(sessionId: "t-live")
+            respond("thread/resume", #""result":{"thread":{"id":"t-live"}}"#)
+            respond("thread/read", #""result":{"thread":{"id":"t-live"}}"#)
+            respond("thread/turns/list",
+                    #""result":{"data":[{"id":"turn-live","status":"inProgress"}]}"#)
+            respond("thread/items/list",
+                    #""result":{"data":[],"backwardsCursor":"c1"}"#)
+            check(s.isWorking, "running tail turn marks the pane busy")
+            check(rec.events.contains {
+                if case .statusFlash(let t) = $0 { return t.contains("进行中的回合") }
+                else { return false }
+            }, "running tail turn explains the quiet pane")
+            check(!rec.events.contains {
+                if case .turnEnded = $0 { return true } else { return false }
+            }, "inProgress turn is not faked as completed")
+        }
         check(CodexSession.turnParams(threadId: "t", text: "x", model: "gpt-5.3",
                                       mode: .fullAccess, effort: nil,
                                       serviceTier: "fast")["serviceTier"] as? String == "fast",

@@ -1208,6 +1208,7 @@ final class CodexSession: AgentSessioning {
                     }
                 }
                 var events: [AgentSessionEvent] = []
+                var liveTurnRunning = false
                 for turn in turns {   // oldest→newest of the tail
                     if let tid = turn["id"] as? String {
                         for item in (byTurn[tid] ?? []).reversed() {
@@ -1215,6 +1216,16 @@ final class CodexSession: AgentSessioning {
                                 method: "item/completed",
                                 params: ["item": item, "threadId": ""])
                         }
+                    }
+                    // The tail's newest turn can still be RUNNING on
+                    // the server (goal loop, or a turn another client
+                    // connection started). Probed 2026-09-15: a
+                    // resumed connection receives ZERO live events
+                    // for such a turn — mapping it as turn/completed
+                    // would fake an idle tab while work continues.
+                    if (turn["status"] as? String) == "inProgress" {
+                        liveTurnRunning = true
+                        continue
                     }
                     events += mapper.map(method: "turn/completed",
                                          params: ["turn": turn])
@@ -1227,6 +1238,15 @@ final class CodexSession: AgentSessioning {
                                params: ["item": item, "threadId": ""])
                 }
                 events.insert(contentsOf: olderEvents, at: 0)
+                if liveTurnRunning {
+                    // Tell the truth about the quiet pane: the tab
+                    // shows busy (the work IS running), but this
+                    // window gets none of its output until the turn
+                    // finishes and the thread is reopened.
+                    self.isWorking = true
+                    events.append(.statusFlash(
+                        "⏸ 该会话有一个进行中的回合(由其他连接发起),本窗口不接收其实时输出;回合完成后重开会话或发送消息即可看到结果"))
+                }
                 self.adoptingReplay = false
                 done([.transcriptReset]
                      + events
