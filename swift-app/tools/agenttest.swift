@@ -1435,6 +1435,58 @@ enum AgentTest {
               && tp["approvalsReviewer"] as? String == "auto_review"
               && tp["model"] == nil && tp["serviceTier"] == nil,
               "codex turnParams carries the runtime mode without a model")
+
+        // — thread rescue: a rebooted remote app-server forgot the
+        // thread we resumed (5090 link reboot, 2026-09-15). send()
+        // must re-resume once and replay; a second failure surfaces
+        // the error instead of looping. —
+        do {
+            let session = CodexSession(params: AgentPaneParams(
+                paneId: "rescue-probe", cwd: nil, environment: [:],
+                daemon: .shared))
+            @MainActor final class Recorder: AgentSessionDelegate {
+                var events: [AgentSessionEvent] = []
+                func session(_ s: AgentSessioning, didEmit e: [AgentSessionEvent]) { events += e }
+                func sessionDidFail(_ s: AgentSessioning, reason: String) {}
+            }
+            let recorder = Recorder()
+            session.delegate = recorder
+            var outbound: [String] = []
+            session.client.onOutbound = { outbound.append(String(decoding: $0, as: UTF8.self)) }
+            func pump() { RunLoop.main.run(until: Date().addingTimeInterval(0.03)) }
+            func lastMethod() -> (String, Int)? {
+                guard let line = outbound.last,
+                      let d = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                      let m = d["method"] as? String else { return nil }
+                let id = (d["id"] as? Int) ?? (d["id"] as? String).flatMap(Int.init)
+                return (m, id ?? -1)
+            }
+            // Adopt a thread without any transport: orphan-result path.
+            session.client.feed(Array(#"{"jsonrpc":"2.0","id":9,"result":{"thread":{"id":"t-rescue"}}}"#.utf8))
+            pump()
+            check(session.sessionId == "t-rescue", "orphan thread result adopted")
+            _ = session.send("hi", images: [])
+            check(lastMethod()?.0 == "turn/start", "send issues turn/start")
+            let turnID = lastMethod()!.1
+            session.client.feed(Array(#"{"jsonrpc":"2.0","id":\#(turnID),"error":{"code":-32000,"message":"thread not found: t-rescue"}}"#.utf8))
+            pump()
+            check(lastMethod()?.0 == "thread/resume", "thread-not-found triggers re-resume")
+            let resumeID = lastMethod()!.1
+            session.client.feed(Array(#"{"jsonrpc":"2.0","id":\#(resumeID),"result":{"thread":{"id":"t-rescue"}}}"#.utf8))
+            pump()
+            check(lastMethod()?.0 == "turn/start", "rescue replays the send")
+            check(recorder.events.contains { if case .statusFlash = $0 { return true } else { return false } },
+                  "rescue flashes the auto-restore notice")
+            let turn2 = lastMethod()!.1
+            session.client.feed(Array(#"{"jsonrpc":"2.0","id":\#(turn2),"error":{"code":-32000,"message":"thread not found: t-rescue"}}"#.utf8))
+            pump()
+            check(lastMethod()?.0 == "turn/start"
+                  && recorder.events.contains {
+                      if case .messageChunk(let t) = $0 { return t.contains("thread not found") }
+                      else { return false }
+                  },
+                  "second failure surfaces the error instead of looping")
+        }
         check(CodexSession.turnParams(threadId: "t", text: "x", model: "gpt-5.3",
                                       mode: .fullAccess, effort: nil,
                                       serviceTier: "fast")["serviceTier"] as? String == "fast",

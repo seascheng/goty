@@ -41,13 +41,19 @@ final class CodexSession: AgentSessioning {
     /// resume lost the writer flock to a live codex process elsewhere
     /// (goal runner): reads work, every write will be refused.
     private var ownershipDenied = false
+    /// One-shot: a "thread not found" turn/start failure has already
+    /// triggered a re-resume this session lifetime (reset whenever a
+    /// fresh load succeeds). Guards rescue loops.
+    private var attemptedThreadRescue = false
     private let paneId: String
     private let environment: [String: String]
     private let daemon: SessionDaemon
     private let grid: SessionGrid
     /// Parsed frames deliver on the main queue; the reader thread
-    /// only parses (see PiSession.channel).
-    private let client = JSONRPCChannel(callbackQueue: .main)
+    /// only parses (see PiSession.channel). Internal (not private):
+    /// agenttest feeds wire responses through it — same visibility
+    /// PiSession.channel already has.
+    let client = JSONRPCChannel(callbackQueue: .main)
     /// Generation fence for connect/reconnect/shutdown (see openTransport).
     private let connectionGate = AgentConnectionGate()
     /// The pane (and its store) live on the daemon's machine.
@@ -723,11 +729,36 @@ final class CodexSession: AgentSessioning {
             guard let self, case .failure(let err) = result else { return }
             // No turn object was created: nothing will ever send
             // turn/started/completed. Close the phantom working state
-            // and surface the server's reason ("thread not found: …").
+            // and surface the server's reason — UNLESS the reason is
+            // "thread not found" and we haven't rescued yet: a remote
+            // app-server that died and came back (5090 link forward
+            // exited → rebooted) no longer holds the thread we once
+            // resumed. Re-claim it and replay the send instead of
+            // bouncing the user to a manual reopen.
             self.isWorking = false
             self.pendingEcho.removeAll { $0 == trimmed }
-            self.emit([.messageChunk("[codex] \(err.localizedDescription)"),
-                       .turnEnded(stopReason: nil)])
+            let reason = err.localizedDescription
+            guard reason.contains("thread not found"), let tid = self.threadId,
+                  !self.attemptedThreadRescue else {
+                self.emit([.messageChunk("[codex] \(reason)"),
+                           .turnEnded(stopReason: nil)])
+                return
+            }
+            self.attemptedThreadRescue = true
+            // Bare resume: a carried model override poisons resume on
+            // hosts whose config lacks that provider (probed 2026-09-11);
+            // the thread keeps its own model anyway.
+            self.client.request("thread/resume", ["threadId": tid]) { [weak self] r in
+                guard let self else { return }
+                if case .success = r {
+                    self.ownershipDenied = false
+                    self.emit([.statusFlash("链接重启后已自动恢复会话线程")])
+                    _ = self.send(text, images: images)
+                } else if case .failure(let resumeErr) = r {
+                    self.emit([.messageChunk("[codex] 自动恢复失败:\(resumeErr.localizedDescription)"),
+                               .turnEnded(stopReason: nil)])
+                }
+            }
         }
         return true
     }
@@ -1241,7 +1272,7 @@ final class CodexSession: AgentSessioning {
         }
     }
 
-    /// Fire the parked sends in order; the first takes the turn, the
+
     /// rest park on the mid-turn queue like any follow-up.
     private func flushPendingSends() {
         guard threadId != nil, !pendingSends.isEmpty else { return }
@@ -1270,7 +1301,18 @@ final class CodexSession: AgentSessioning {
                     resume(bare: true)
                     return
                 }
+                if case .failure(let err) = result {
+                    // Bare resume failed too (dead link mid-restore,
+                    // poisoned thread file, …). History still replays
+                    // cross-process, but every write will fail with
+                    // "thread not found" — SAY so up front instead of
+                    // looking healthy until the first send explodes
+                    // (5090 report 2026-09-15). NOT ownershipDenied:
+                    // send()'s one-shot rescue may re-resume and heal.
+                    self.emit([.notice("⚠︎ 会话恢复失败:\(err.localizedDescription)——先以只读模式显示,首次发送时将自动重试恢复")])
+                }
                 self.threadId = sessionId
+                self.attemptedThreadRescue = false
                 self.sessionId = sessionId
                 self.replayThreadHistory(sessionId) { [weak self] events in
                     self?.emit(events + [.configChanged(self?.assembleOptions() ?? []),
