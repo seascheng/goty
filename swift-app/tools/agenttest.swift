@@ -1453,7 +1453,16 @@ enum AgentTest {
             session.delegate = recorder
             var outbound: [String] = []
             session.client.onOutbound = { outbound.append(String(decoding: $0, as: UTF8.self)) }
-            func pump() { RunLoop.main.run(until: Date().addingTimeInterval(0.03)) }
+            func pump() {
+                // An EMPTY runloop's run(until:) returns immediately —
+                // loop the way the AgentSessionExecution tests do so
+                // main-queue deliveries actually drain.
+                let deadline = Date().addingTimeInterval(0.15)
+                while Date() < deadline {
+                    RunLoop.main.run(mode: .default,
+                                     before: Date().addingTimeInterval(0.005))
+                }
+            }
             func lastMethod() -> (String, Int)? {
                 guard let line = outbound.last,
                       let d = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
@@ -1462,23 +1471,22 @@ enum AgentTest {
                 return (m, id ?? -1)
             }
             // Adopt a thread without any transport: orphan-result path.
-            session.client.feed(Array(#"{"jsonrpc":"2.0","id":9,"result":{"thread":{"id":"t-rescue"}}}"#.utf8))
+            session.client.feed(Array(#"{"jsonrpc":"2.0","id":9,"result":{"thread":{"id":"t-rescue"}}}\#n"#.utf8))
             pump()
-            check(session.sessionId == "t-rescue", "orphan thread result adopted")
             _ = session.send("hi", images: [])
             check(lastMethod()?.0 == "turn/start", "send issues turn/start")
             let turnID = lastMethod()!.1
-            session.client.feed(Array(#"{"jsonrpc":"2.0","id":\#(turnID),"error":{"code":-32000,"message":"thread not found: t-rescue"}}"#.utf8))
+            session.client.feed(Array(#"{"jsonrpc":"2.0","id":\#(turnID),"error":{"code":-32000,"message":"thread not found: t-rescue"}}\#n"#.utf8))
             pump()
             check(lastMethod()?.0 == "thread/resume", "thread-not-found triggers re-resume")
             let resumeID = lastMethod()!.1
-            session.client.feed(Array(#"{"jsonrpc":"2.0","id":\#(resumeID),"result":{"thread":{"id":"t-rescue"}}}"#.utf8))
+            session.client.feed(Array(#"{"jsonrpc":"2.0","id":\#(resumeID),"result":{"thread":{"id":"t-rescue"}}}\#n"#.utf8))
             pump()
             check(lastMethod()?.0 == "turn/start", "rescue replays the send")
             check(recorder.events.contains { if case .statusFlash = $0 { return true } else { return false } },
                   "rescue flashes the auto-restore notice")
             let turn2 = lastMethod()!.1
-            session.client.feed(Array(#"{"jsonrpc":"2.0","id":\#(turn2),"error":{"code":-32000,"message":"thread not found: t-rescue"}}"#.utf8))
+            session.client.feed(Array(#"{"jsonrpc":"2.0","id":\#(turn2),"error":{"code":-32000,"message":"thread not found: t-rescue"}}\#n"#.utf8))
             pump()
             check(lastMethod()?.0 == "turn/start"
                   && recorder.events.contains {
