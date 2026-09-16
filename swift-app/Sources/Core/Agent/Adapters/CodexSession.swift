@@ -14,11 +14,49 @@ final class CodexSession: AgentSessioning {
 
     let cwd: String?
     private(set) var sessionId: String?
+    private(set) var isWorking = false
+    private(set) var configOptions: [AgentConfigOption] = []
+    /// PaneState.agentSessionId at GUI start: the thread to re-open on
+    /// both the attach (thread/read) and respawn (thread/resume) paths.
+    /// Set by shutdown(); fences connect retries (a dead link retry
+    /// loop must not resurrect a closed pane).
+    private var shuttingDown = false
     /// PaneState.agentSessionId at GUI start: the thread to re-open on
     /// both the attach (thread/read) and respawn (thread/resume) paths.
     private let restoredSessionId: String?
-    private(set) var isWorking = false
-    private(set) var configOptions: [AgentConfigOption] = []
+
+    /// "already has an active writer" means another codex process
+    /// holds the thread's rollout lock (codex-rs thread-store
+    /// writer_lock.rs — no force option). Every codex process on this
+    /// daemon is one of OUR panes, and each rebuilds from its own
+    /// threadId after a respawn, so killing the OTHER codex panes
+    /// frees the lock at the cost of a self-healing respawn elsewhere
+    /// (2026-09-15 5090 stale-writer report). Bounded to one attempt
+    /// per connection — duplicate-threadId tabs must not ping-pong.
+    private var writerTakeoverAttempted = false
+
+    /// Reclaim a thread held by a stale codex pane, then retry. Runs
+    /// the pane kill off main (blocking socket I/O); `retry` lands on
+    /// main.
+    private func reclaimThreadFromStaleWriter(then retry: @escaping () -> Void) {
+        guard !writerTakeoverAttempted else { return }
+        writerTakeoverAttempted = true
+        let daemon = self.daemon
+        let own = self.paneId
+        DispatchQueue.global(qos: .userInitiated).async {
+            let others = daemon.listPanes().filter {
+                $0.id != own && ($0.fg ?? "").contains("codex")
+            }
+            for other in others { daemon.killPane(id: other.id) }
+            if !others.isEmpty {
+                // The rollout flock releases only when the killed
+                // process exits; the respawn race is short but real.
+                Thread.sleep(forTimeInterval: 1.0)
+            }
+            DispatchQueue.main.async { retry() }
+        }
+    }
+
     private(set) var commands: [AgentSlashCommand] = []
     /// The agent's declared skills (skills/list) — invoked with `$name`
     /// mentions, never listed flat in the / menu.
@@ -437,8 +475,14 @@ final class CodexSession: AgentSessioning {
     ) {
         guard let opened else {
             connected = false
-            delegate?.sessionDidFail(self, reason: "sessiond 不可用")
-            completion?(false)
+            // A nil open is usually a WINDOW, not a verdict: the remote
+            // link is booting or mid-heartbeat-rebuild and daemon==nil
+            // for tens of seconds. Terminal panes already retry every
+            // second — an agent pane that gives up on the first try
+            // showed a permanent "sessiond 不可用" the user could only
+            // escape by closing the tab (5090 report 2026-09-16).
+            // Retry until the link is back; shutdown stops the loop.
+            delegateRetryConnect(after: 2, completion: completion)
             return
         }
         // The reader thread was never started here — initialize went
@@ -461,6 +505,19 @@ final class CodexSession: AgentSessioning {
             }
         } else {
             handshake(completion)
+        }
+    }
+
+    /// Queue a connect retry while the transport open failed on a cold
+    private func delegateRetryConnect(after seconds: TimeInterval,
+                                      completion: ((Bool) -> Void)?) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            guard let self else { return }
+            if self.shuttingDown {
+                self.delegate?.sessionDidFail(self, reason: "sessiond 不可用")
+                return
+            }
+            self.connect(completion: completion)
         }
     }
 
@@ -506,11 +563,35 @@ final class CodexSession: AgentSessioning {
                 case .success:
                     self.ownershipDenied = false
                 case .failure(let err):
+                    if err.localizedDescription.contains("active writer"),
+                       !self.writerTakeoverAttempted {
+                        // The holder is one of our own stale codex
+                        // panes (GUI restart left it alive in the
+                        // daemon): reclaim once, then resume again
+                        // before falling back to read-only.
+                        self.reclaimThreadFromStaleWriter { [weak self] in
+                            guard let self else { return }
+                            self.client.request("thread/resume", ["threadId": restore]) { [weak self] r2 in
+                                guard let self else { return }
+                                switch r2 {
+                                case .success:
+                                    self.ownershipDenied = false
+                                case .failure:
+                                    self.ownershipDenied = true
+                                    self.emit([.notice("⚠︎ 会话正被另一个 codex 进程持有（goal runner 等）——当前只读，发送与 /compact 会被拒绝")])
+                                }
+                                self.rebuildAdoptedThread(restore)
+                            }
+                        }
+                        return
+                    }
                     self.ownershipDenied = true
                     if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
                         print("CODEX_ATTACH resume failed: \(err.localizedDescription)")
                     }
                     self.emit([.notice("⚠︎ 会话正被另一个 codex 进程持有（goal runner 等）——当前只读，发送与 /compact 会被拒绝")])
+                default:
+                    break
                 }
                 self.rebuildAdoptedThread(restore)
             }
@@ -755,8 +836,31 @@ final class CodexSession: AgentSessioning {
                     self.emit([.statusFlash("链接重启后已自动恢复会话线程")])
                     _ = self.send(text, images: images)
                 } else if case .failure(let resumeErr) = r {
-                    self.emit([.messageChunk("[codex] 自动恢复失败:\(resumeErr.localizedDescription)"),
-                               .turnEnded(stopReason: nil)])
+                    let reason = resumeErr.localizedDescription
+                    // Another codex pane of ours holds the rollout
+                    // lock ("active writer") — reclaim it once and
+                    // retry, which re-drives this send. Any other
+                    // failure re-arms the rescue so a later send can
+                    // heal once the holder is gone.
+                    self.attemptedThreadRescue = false
+                    guard reason.contains("active writer") else {
+                        self.emit([.messageChunk("[codex] 自动恢复失败:\(reason)"),
+                                   .turnEnded(stopReason: nil)])
+                        return
+                    }
+                    self.reclaimThreadFromStaleWriter {
+                        self.client.request("thread/resume", ["threadId": tid]) { [weak self] r2 in
+                            guard let self else { return }
+                            if case .success = r2 {
+                                self.ownershipDenied = false
+                                self.emit([.statusFlash("已回收被占用的会话线程")])
+                                _ = self.send(text, images: images)
+                            } else if case .failure(let err2) = r2 {
+                                self.emit([.messageChunk("[codex] 自动恢复失败:\(err2.localizedDescription)"),
+                                           .turnEnded(stopReason: nil)])
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1324,7 +1428,7 @@ final class CodexSession: AgentSessioning {
                 if case .failure(let err) = result {
                     // Bare resume failed too (dead link mid-restore,
                     // poisoned thread file, …). History still replays
-                    // cross-process, but every write will fail with
+
                     // "thread not found" — SAY so up front instead of
                     // looking healthy until the first send explodes
                     // (5090 report 2026-09-15). NOT ownershipDenied:
@@ -1346,6 +1450,7 @@ final class CodexSession: AgentSessioning {
 
 
     func shutdown() {
+        shuttingDown = true
         connectionGate.invalidate()
         client.failPending(reason: "codex transport closed")
         pane?.close()

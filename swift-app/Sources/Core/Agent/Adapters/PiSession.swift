@@ -18,6 +18,9 @@ import Foundation
 /// Probed live on omp 18.0.11 / pi 0.84.3.
 @MainActor
 class PiSession: AgentSessioning {
+    /// Set by shutdown(); fences connect retries on a cold link.
+    private var shuttingDown = false
+
     weak var delegate: AgentSessionDelegate?
 
     let cwd: String?
@@ -374,8 +377,13 @@ class PiSession: AgentSessioning {
     ) {
         guard let opened else {
             connected = false
-            delegate?.sessionDidFail(self, reason: "sessiond 不可用")
-            completion?(false)
+            // Cold-link window (boot / heartbeat rebuild): terminal panes
+            // retry every second; an agent pane that gave up on first
+            // try showed a permanent "sessiond 不可用" (5090 report).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, !self.shuttingDown else { return }
+                self.connect(completion: completion)
+            }
             return
         }
         pane = opened.session
@@ -669,6 +677,7 @@ class PiSession: AgentSessioning {
     }
 
     func shutdown() {
+        shuttingDown = true
         stopStatePolling()
         // Fence any in-flight open: its result must not resurrect a
         // pane on a stopped session.

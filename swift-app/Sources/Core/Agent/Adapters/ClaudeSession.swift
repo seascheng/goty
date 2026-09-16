@@ -13,6 +13,9 @@ import Foundation
 /// process for live continuation — identical UX to omp's session/load.
 @MainActor
 final class ClaudeSession: AgentSessioning {
+    /// Set by shutdown(); fences connect retries on a cold link.
+    private var shuttingDown = false
+
     weak var delegate: AgentSessionDelegate?
 
     let cwd: String?
@@ -248,8 +251,13 @@ final class ClaudeSession: AgentSessioning {
     ) {
         guard let opened else {
             connected = false
-            delegate?.sessionDidFail(self, reason: "sessiond 不可用")
-            completion?(false)
+            // Cold-link window (boot / heartbeat rebuild): terminal panes
+            // retry every second; an agent pane that gave up on first
+            // try showed a permanent "sessiond 不可用" (5090 report).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, !self.shuttingDown else { return }
+                self.connect(completion: completion)
+            }
             return
         }
         pane = opened.session
@@ -532,6 +540,7 @@ final class ClaudeSession: AgentSessioning {
     }
 
     func shutdown() {
+        shuttingDown = true
         // Fence any in-flight open: its result must not resurrect a
         // pane on a stopped session.
         connectionGate.invalidate()
