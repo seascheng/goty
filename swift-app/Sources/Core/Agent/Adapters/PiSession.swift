@@ -72,6 +72,10 @@ class PiSession: AgentSessioning {
     var currentModelDescriptor: [String: Any]?
     var thinkingLevelCache: String?
     var cachedModelCatalog: [[String: Any]] = []
+    /// Identifies the in-flight get_available_models round (omp child
+    /// override): its timeout notice must not fire after a later fetch
+    /// already landed.
+    var modelsFetchInFlight: UUID?
     let mapper: PiFrameMapper
     var pane: PaneSession?
 

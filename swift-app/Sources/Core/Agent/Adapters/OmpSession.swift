@@ -77,6 +77,7 @@ final class OmpSession: PiSession {
         // transcript replay's render — seconds of "empty models" for a
         // command that itself answers in 10ms.
         cachedModelCatalog = Self.loadCachedCatalog()
+        modelsFetchInFlight = nil
     }
 
     /// Daemon-side resume path for a session id: the store listing's
@@ -387,20 +388,26 @@ final class OmpSession: PiSession {
             guard let self else { return completion([]) }
             if let paths = result.paths {
                 self.daemonSessionPaths.merge(paths) { _, new in new }
-                self.noteStoreFallbackIfRemote(result.rows)
+                // paths present = the daemon ANSWERED the store RPC. An
+                // empty list just means no sessions exist for this cwd —
+                // that used to fire the "daemon too old" banner and sent
+                // the user chasing a version problem that wasn't there
+                // (5090 report 2026-09-16).
                 completion(result.rows)
             } else {
+                // No reply at all: link stall or a pre-store daemon.
                 let summaries = result.fallback ?? []
-                self.noteStoreFallbackIfRemote(summaries)
+                self.noteStoreUnreachableIfRemote()
                 completion(summaries)
             }
         })
     }
-    private func noteStoreFallbackIfRemote(_ summaries: [AgentSessionSummary]) {
-        guard daemon.isRemote, summaries.isEmpty, !warnedOldDaemonStore else { return }
+    private func noteStoreUnreachableIfRemote() {
+        guard daemon.isRemote, !warnedOldDaemonStore else { return }
         warnedOldDaemonStore = true
-        emit([.notice("远端 sessiond 版本过旧，无法读取该主机上的历史记录（升级远端守护进程后可用）")])
+        emit([.notice("无法读取该主机的历史记录（连接超时或守护进程无响应，可稍后重试）")])
     }
+
 
     // MARK: - ready-frame timeout (pre-ACP panes, rolled rings)
 
@@ -531,18 +538,27 @@ final class OmpSession: PiSession {
     }
 
     // MARK: - model catalog (config buttons)
-
-    /// The config buttons' dropdown contents. get_state carries
-    /// only the CURRENT model; the selectable list comes from
-    /// get_available_models (model ids as provider/id selectors — the
-    /// same shape set_model takes — and the current model's
-    /// thinking.efforts ladder).
     private func fetchAvailableModels() {
+        // A remote omp's first get_available_models can take a while
+        // (cold process, MCP probes, shaky link). Without feedback the
+        // dropdown just looks dead for tens of seconds — say so at 4s,
+        // then still land the catalog whenever the answer arrives.
+        let timeoutSentinel = UUID()
+        modelsFetchInFlight = timeoutSentinel
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            guard let self, self.modelsFetchInFlight == timeoutSentinel,
+                  self.cachedModelCatalog.isEmpty else { return }
+            self.emit([.statusFlash("模型列表仍在加载（远端响应较慢）…")])
+        }
         request("get_available_models") { [weak self] response in
             guard let self,
                   response["success"] as? Bool == true,
                   let data = response["data"] as? [String: Any],
-                  let models = data["models"] as? [[String: Any]] else { return }
+                  let models = data["models"] as? [[String: Any]] else {
+                self?.modelsFetchInFlight = nil
+                return
+            }
+            self.modelsFetchInFlight = nil
             self.cachedModelCatalog = models
             Self.persistCatalog(models)
             self.rebuildConfigOptions()
