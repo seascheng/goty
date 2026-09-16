@@ -850,17 +850,41 @@ class PiSession: AgentSessioning {
         let title = (frame["title"] as? String) ?? (frame["message"] as? String)
         switch method {
         case "select":
+            // omp ask multi-select (tools/ask.ts): one ROUND of a toggle
+            // loop — selectionMarker "checkbox" + checkedIndices ride the
+            // wire, the option list grows a "(N selected)" title prefix
+            // and an ANSI-colored "Done selecting" terminator. Parse the
+            // marker so the card renders checkboxes; strip ANSI so the
+            // terminator is legible instead of escape garbage.
+            let multi = (frame["selectionMarker"] as? String) == "checkbox"
+            let checked = (frame["checkedIndices"] as? [Int]) ?? []
             let details = frame["optionDetails"] as? [[String: Any]]
-            let options = ((frame["options"] as? [String]) ?? []).enumerated().map { index, label in
-                AgentPermissionOption(
-                    optionId: label, name: label, kind: nil,
-                    detail: details?[index]["description"] as? String)
+            let rawOptions = (frame["options"] as? [Any]) ?? []
+            let options = rawOptions.enumerated().compactMap { index, raw -> AgentPermissionOption? in
+                var label: String?
+                var description: String?
+                if let s = raw as? String {
+                    label = s
+                } else if let obj = raw as? [String: Any] {
+                    label = obj["label"] as? String
+                    description = obj["description"] as? String
+                }
+                guard let label else { return nil }
+                let clean = AgentPermissionPrompt.strippingANSI(label)
+                return AgentPermissionOption(
+                    optionId: label,
+                    name: clean,
+                    kind: AgentPermissionPrompt.isDoneLabel(clean) ? "done" : nil,
+                    detail: description.map(AgentPermissionPrompt.strippingANSI)
+                        ?? details?[index]["description"] as? String)
             }
             guard !options.isEmpty else { return }
             pendingDialogs[id.key] = (id.jsonId, method)
             emit([.permissionRequested(AgentPermissionPrompt(
-                requestID: id.key, toolCallTitle: title,
-                options: options, dialog: "select"))])
+                requestID: id.key,
+                toolCallTitle: title.map(AgentPermissionPrompt.strippingANSI),
+                options: options, dialog: "select",
+                multi: multi, checkedIndices: checked))])
         case "confirm":
             pendingDialogs[id.key] = (id.jsonId, method)
             emit([.permissionRequested(AgentPermissionPrompt(

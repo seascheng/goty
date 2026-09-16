@@ -1496,6 +1496,37 @@ enum AgentTest {
                   "second failure surfaces the error instead of looping")
         }
 
+        // — omp ask multi-select: one ROUND of a toggle loop. The wire
+        // carries selectionMarker/checkedIndices and an ANSI-colored
+        // "Done selecting" terminator; the card must strip ANSI, flag
+        // the terminator, and carry the checked set to the web. —
+        do {
+            let stripped = AgentPermissionPrompt.strippingANSI(
+                "\u{1B}[32m✔ Done selecting\u{1B}[0m")
+            check(stripped == "✔ Done selecting",
+                  "ANSI color codes stripped from option labels")
+            check(AgentPermissionPrompt.isDoneLabel(stripped),
+                  "done terminator recognized after stripping")
+            check(AgentPermissionPrompt.strippingANSI("(1 selected) 问题 (3/4)")
+                  == "(1 selected) 问题 (3/4)",
+                  "plain CJK titles pass through stripping unchanged")
+            let prompt = AgentPermissionPrompt(
+                requestID: "d1", toolCallTitle: "(1 selected) 挑选",
+                options: [
+                    AgentPermissionOption(optionId: "A", name: "A", kind: nil),
+                    AgentPermissionOption(optionId: "\u{1B}[32m✔ Done selecting\u{1B}[0m",
+                                          name: "✔ Done selecting", kind: "done"),
+                ],
+                dialog: "select", multi: true, checkedIndices: [0])
+            let js = AgentSessionEvent.permissionRequested(prompt).jsRepresentation
+            check(js["multi"] as? Bool == true
+                  && (js["checkedIndices"] as? [Int]) == [0],
+                  "multi round carries checkbox state to the web")
+            let opts = js["options"] as? [[String: Any]] ?? []
+            check((opts.last?["kind"] as? String) == "done",
+                  "done option is flagged for the card")
+        }
+
         // — a resumed thread whose newest turn is still RUNNING: the
         // replay must NOT fake its completion (probed 2026-09-15: a
         // resumed connection receives zero live events for another

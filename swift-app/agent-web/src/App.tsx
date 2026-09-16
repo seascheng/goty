@@ -2047,6 +2047,8 @@ function PermissionCard({ permission }: {
   const kind = permission.dialog === "select" ? "选择"
     : permission.dialog === "confirm" ? "确认"
     : isInput ? "输入" : "授权";
+  const multi = permission.multi === true;
+  const checked = new Set(permission.checkedIndices ?? []);
   return (
     <div className="permission">
       <div className="perm-title">
@@ -2068,14 +2070,26 @@ function PermissionCard({ permission }: {
         </div>
       ) : (
         <div className="perm-options">
-          {permission.options.map((o) => (
-            <button key={o.optionId}
-              className={"btn " + (o.kind?.startsWith("allow") ? "send" : "")}
-              onClick={() => postToHost({ type: "permission", optionId: o.optionId })}>
-              <span>{o.name}</span>
-              {o.detail && <span className="perm-opt-detail">{o.detail}</span>}
-            </button>
-          ))}
+          {multi && (
+            <div className="perm-multi-hint">
+              多选:点击选项切换勾选,选完后点「完成选择」提交
+            </div>
+          )}
+          {permission.options.map((o, index) => {
+            const isDone = o.kind === "done";
+            const isChecked = multi && checked.has(index);
+            return (
+              <button key={o.optionId}
+                className={"btn " + (isDone || isChecked ? "send" : "")}
+                onClick={() => postToHost({ type: "permission", optionId: o.optionId })}>
+                <span>
+                  {multi && (isChecked ? "☑ " : "☐ ")}
+                  {isDone ? "✅ " : ""}{o.name}
+                </span>
+                {o.detail && <span className="perm-opt-detail">{o.detail}</span>}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>

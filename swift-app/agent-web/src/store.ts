@@ -26,7 +26,11 @@ export type RuntimeState = { fastEnabled?: boolean | null; fastActive?: boolean 
   compacting?: boolean | null; streaming?: boolean | null };
 export type Permission = { requestID: string; toolCallTitle?: string | null;
   options: { optionId: string; name: string; kind?: string | null; detail?: string | null }[];
-  dialog?: string | null; placeholder?: string | null; defaultValue?: string | null };
+  dialog?: string | null; placeholder?: string | null; defaultValue?: string | null;
+  /** omp ask multi-select round: clicking toggles (agent re-asks with a
+   * fresh card); checkedIndices are already-selected option positions;
+   * a kind:"done" option commits the set. */
+  multi?: boolean | null; checkedIndices?: number[] | null };
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 /// Structural equality for plan snapshots — the dedup key the plan
 /// handler uses to ignore repeated identical snapshots (omp's get_state
@@ -141,10 +145,12 @@ export const IncomingEventSchema = z.discriminatedUnion("type", [
     type: z.literal("permission"),
     requestID: z.string(),
     toolCallTitle: z.string().nullish(),
+    defaultValue: z.string().nullish(),
+    multi: z.boolean().nullish(),
+    checkedIndices: z.array(z.number()).nullish(),
+    options: z.array(PermissionOptionSchema),
     dialog: z.string().nullish(),
     placeholder: z.string().nullish(),
-    defaultValue: z.string().nullish(),
-    options: z.array(PermissionOptionSchema),
   }),
   z.object({ type: z.literal("permissionResolved"),
              requestID: z.string().nullish() }),

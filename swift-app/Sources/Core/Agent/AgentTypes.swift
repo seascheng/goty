@@ -234,17 +234,61 @@ struct AgentPermissionPrompt {
     var dialog: String? = nil
     var placeholder: String? = nil
     var defaultValue: String? = nil
+    /// omp ask multi-select: the dialog is one ROUND of a toggle loop —
+    /// clicking an option toggles it and the agent re-asks with a fresh
+    /// card ("(N selected) …"); the trailing "Done selecting" option
+    /// (kind "done") commits the set. Nil/empty = ordinary single pick.
+    var multi: Bool = false
+    /// Option indices already checked when this round arrived.
+    var checkedIndices: [Int] = []
 
     init(requestID: String, toolCallTitle: String?,
          options: [AgentPermissionOption],
          dialog: String? = nil, placeholder: String? = nil,
-         defaultValue: String? = nil) {
+         defaultValue: String? = nil,
+         multi: Bool = false, checkedIndices: [Int] = []) {
         self.requestID = requestID
         self.toolCallTitle = toolCallTitle
         self.options = options
         self.dialog = dialog
         self.placeholder = placeholder
         self.defaultValue = defaultValue
+        self.multi = multi
+        self.checkedIndices = checkedIndices
+    }
+
+    /// omp's done/green labels ride ANSI color codes onto the wire
+    /// ("✓ Done selecting" with theme prefixes). Strip them before the
+    /// web renders — a checkbox card showing escape garbage hides the
+    /// only way OUT of a multi-select loop. Handles CSI (ESC [ … @~)
+    /// sequences; other ESC forms drop the next byte conservatively.
+    static func strippingANSI(_ s: String) -> String {
+        enum Scan { case plain, esc, csi }
+        var out = String.UnicodeScalarView()
+        out.reserveCapacity(s.unicodeScalars.count)
+        var state = Scan.plain
+        for scalar in s.unicodeScalars {
+            let v = scalar.value
+            switch state {
+            case .plain:
+                if v == 0x1B { state = .esc } else { out.append(scalar) }
+            case .esc:
+                if v == 0x5B { // '[': CSI — params then a final 0x40–0x7E
+                    state = .csi
+                } else {
+                    state = .plain // two-byte escape; both consumed
+                }
+            case .csi:
+                if v >= 0x40 && v <= 0x7E { state = .plain } // final byte
+                // else: parameter/intermediate bytes are consumed
+            }
+        }
+        return String(out)
+    }
+
+    /// True when the option is omp's multi-select terminator.
+    static func isDoneLabel(_ label: String) -> Bool {
+        label.contains("Done selecting")
     }
 
     /// The binary gate adapters synthesize when the wire protocol has no
@@ -624,6 +668,8 @@ extension AgentSessionEvent {
                     "dialog": prompt.dialog ?? NSNull(),
                     "placeholder": prompt.placeholder ?? NSNull(),
                     "defaultValue": prompt.defaultValue ?? NSNull(),
+                    "multi": prompt.multi,
+                    "checkedIndices": prompt.checkedIndices,
                     "options": prompt.options.map { option in
                         ["optionId": option.optionId,
                          "name": option.name,
