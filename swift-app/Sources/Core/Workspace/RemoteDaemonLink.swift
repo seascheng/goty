@@ -483,6 +483,16 @@ final class RemoteDaemonLink {
         process.arguments = [
             "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
             "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+            // The user's ~/.ssh/config sets `TCPKeepAlive no` globally
+            // (fine for interactive shells); on a forward it turns a
+            // lossy-path TCP stall into an UNDETECTABLE black hole — the
+            // ssh process stays alive, every pane spawn/echo queues into
+            // a dead socket, and nothing ever rebuilds the link (5090
+            // evening-peak report 2026-09-16: VERSION 15s no-reply
+            // through the forward while the remote daemon answered in
+            // 0ms locally). Keep the KERNEL probing so a stalled TCP
+            // dies and the termination handler reboots the forward.
+            "-o", "TCPKeepAlive=yes",
             "-L", path + ":" + remoteSocket, host,
         ]
         process.standardInput = FileHandle.nullDevice
