@@ -223,7 +223,7 @@ final class SessionDaemon {
     static let expectedCapability = 5
 
     func pingCapability() -> Int? {
-        let fd = Self.connect(path: socketPath)
+        let fd = Self.connect(path: socketPath, roundTripTimeoutSeconds: 10)
         guard fd >= 0 else { return nil }
         defer { Darwin.close(fd) }
         guard Self.writeFrame(fd: fd, kind: SessionFrame.version, payload: Data()),
@@ -250,7 +250,7 @@ final class SessionDaemon {
     /// a single first frame per connection). Runs on the caller's queue.
     private func storeRoundTrip(kind requestKind: UInt8, payload: Data,
                                 replyKind: UInt8) -> Data? {
-        let fd = Self.connect(path: socketPath)
+        let fd = Self.connect(path: socketPath, roundTripTimeoutSeconds: 10)
         guard fd >= 0 else { return nil }
         defer { Darwin.close(fd) }
         guard Self.writeFrame(fd: fd, kind: requestKind, payload: payload),
@@ -379,8 +379,21 @@ final class SessionDaemon {
                                 onDisconnect: @escaping () -> Void) -> OpenPaneResult? {
         guard ensureRunning() else { return nil }
 
+        // Handshake-phase timeout: a wedged remote forward parks this
+        // read forever otherwise (empty remote tabs, leaked threads).
+        // CLEARED before the fd becomes the pane's streaming socket —
+        // a ring replay legitimately streams for minutes on a WAN.
+        func handshakeDeadline(on fd: Int32) {
+            var tv = timeval(tv_sec: 10, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        }
+        func clearDeadline(on fd: Int32) {
+            var tv = timeval(tv_sec: 0, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        }
         var fd = Self.connect(path: socketPath)
         guard fd >= 0 else { return nil }
+        handshakeDeadline(on: fd)
         var initial: (UInt8, Data)?
         var attachedExisting = false
         let attach = ["pane_id": id]
@@ -397,6 +410,7 @@ final class SessionDaemon {
             Darwin.close(fd)
             fd = Self.connect(path: socketPath)
             guard fd >= 0 else { return nil }
+            handshakeDeadline(on: fd)
             var request = Self.agentSpawnPayload(
                 cwd: cwd, shell: shell, args: args, environment: environment,
                 grid: grid, noEcho: noEcho, ringBytes: ringBytes, ringInput: ringInput)
@@ -406,6 +420,7 @@ final class SessionDaemon {
                   let spawned = Self.readFrame(fd: fd), spawned.0 == SessionFrame.spawned
             else { Darwin.close(fd); return nil }
         }
+        clearDeadline(on: fd)
 
 
         return OpenPaneResult(
@@ -479,7 +494,7 @@ final class SessionDaemon {
 
     func listPanes() -> [PaneInfo] {
         guard ensureRunning() else { return [] }
-        let fd = Self.connect(path: socketPath)
+        let fd = Self.connect(path: socketPath, roundTripTimeoutSeconds: 10)
         guard fd >= 0 else { return [] }
         defer { Darwin.close(fd) }
         guard Self.writeFrame(fd: fd, kind: SessionFrame.list, payload: Data()),
@@ -559,7 +574,8 @@ final class SessionDaemon {
     /// Connect probe for transports we do not own (remote links).
     static func rawConnect(path: String) -> Int32 { connect(path: path) }
 
-    fileprivate static func connect(path: String) -> Int32 {
+    fileprivate static func connect(path: String,
+                                    roundTripTimeoutSeconds: UInt32? = nil) -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return -1 }
         var address = sockaddr_un()
@@ -579,6 +595,18 @@ final class SessionDaemon {
             }
         }
         guard result == 0 else { Darwin.close(fd); return -1 }
+        // Request/reply round trips ONLY (list, store reads, ping): a
+        // wedged remote forward (ssh alive, tunnel stalled) otherwise
+        // parks every caller in an UNBOUNDED read — the 2026-09-15
+        // evening: dozens of poll threads stuck in listPanes forever,
+        // remote tabs never finishing their attach. Pane-streaming fds
+        // must NOT get this — a ring replay legitimately streams for
+        // minutes on a slow link.
+        if let seconds = roundTripTimeoutSeconds {
+            var tv = timeval(tv_sec: time_t(seconds), tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        }
         return fd
     }
 
@@ -658,8 +686,19 @@ final class PaneSession {
             while let frame = SessionDaemon.readFrame(fd: readFD) {
                 self.deliver(frame)
             }
+            // The reader is done (EOF or error). THIS side owns the fd
+            // until close() is called — but if the owner never calls it
+            // (a reconnect superseded this session), the fd stays open
+            // and unread: a remote forward's ssh then has a "live" peer
+            // that never drains, its channel buffers pin the TCP window
+            // shut, and the WHOLE link blackholes while every retry
+            // piles another one on (5090 evening report 2026-09-16).
+            // Close it here; close() becomes idempotent via fd=-1.
             self.writeLock.lock()
             let notify = !self.stopped
+            Darwin.shutdown(readFD, SHUT_RDWR)
+            Darwin.close(readFD)
+            if self.fd == readFD { self.fd = -1 }
             self.writeLock.unlock()
             if notify {
                 DispatchQueue.main.async { [weak self] in self?.onDisconnect() }
@@ -671,7 +710,6 @@ final class PaneSession {
         guard !bytes.isEmpty else { return }
         send(kind: SessionFrame.input, payload: Data(bytes))
     }
-
     func resize(_ grid: SessionGrid) {
         send(kind: SessionFrame.resize, payload: grid.wire)
     }
@@ -679,13 +717,14 @@ final class PaneSession {
     func close() {
         writeLock.lock()
         defer { writeLock.unlock() }
-        guard !stopped else { return }
+        guard !stopped, fd >= 0 else { return }
         stopped = true
         _ = SessionDaemon.writeFrame(fd: fd, kind: SessionFrame.detach, payload: Data())
         Darwin.shutdown(fd, SHUT_RDWR)
         Darwin.close(fd)
         fd = -1
     }
+
 
     private func send(kind: UInt8, payload: Data) {
         writeLock.lock()

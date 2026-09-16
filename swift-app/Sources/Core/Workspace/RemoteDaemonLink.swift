@@ -78,6 +78,14 @@ final class RemoteDaemonLink {
     /// handler can tell itself apart from the live generation.
     private var forwardEpoch = 0
     private var stopping = false
+    /// Application-layer liveness: ssh's own keepalives ride the
+    /// protocol channel and can stay green while the FORWARDED data
+    /// path is wedged (2026-09-16, host 5090: forward process alive,
+    /// ServerAlive answered, every VERSION through the socket timed
+    /// out). A missed ping budget tears the link down ourselves.
+    private var heartbeat: DispatchSourceTimer?
+    private var heartbeatInFlight = false
+    private var heartbeatMisses = 0
     private var booting = false
     private let queue = DispatchQueue(label: "goty.remote-link", qos: .userInitiated)
     private var retryDelay: TimeInterval = 1
@@ -254,10 +262,55 @@ final class RemoteDaemonLink {
         retryDelay = 1
         self.daemon = daemon
         state = .ready
+        startHeartbeat()
         NSLog("remote-link %@: ready (shell %@, agents %@)", host, remoteShell,
               agentAvailability.filter { $0.value }.keys.sorted().joined(separator: ","))
     }
 
+
+    /// Queue-confined. One short-lived VERSION round every 20s; two
+    /// consecutive misses (a miss = no answer within the interval) mean
+    /// the forwarded data path is wedged even though the ssh process is
+    /// alive — tear the forward down and reboot before the user sits in
+    /// another blackhole. The ping itself runs on a utility queue so the
+    /// link queue (retries, teardown) never blocks on a dead socket.
+    private func startHeartbeat() {
+        heartbeat?.cancel()
+        heartbeatInFlight = false
+        heartbeatMisses = 0
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 20, repeating: 20)
+        timer.setEventHandler { [weak self] in
+            guard let self, !self.stopping else { return }
+            guard self.daemon != nil else { return }
+            if self.heartbeatInFlight {
+                self.heartbeatMisses += 1
+                NSLog("remote-link %@: heartbeat miss %d", self.host, self.heartbeatMisses)
+                if self.heartbeatMisses >= 2 {
+                    NSLog("remote-link %@: heartbeat dead — rebooting link", self.host)
+                    self.daemon = nil
+                    self.teardownForward()
+                    self.retryScheduled = false
+                    self.scheduleRetry(reason: "heartbeat timeout")
+                }
+                return
+            }
+            self.heartbeatInFlight = true
+            let daemon = self.daemon
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let alive = daemon?.pingCapability() != nil
+                self?.queue.async { [weak self] in
+                    guard let self else { return }
+                    self.heartbeatInFlight = false
+                    if alive {
+                        self.heartbeatMisses = 0
+                    }
+                }
+            }
+        }
+        timer.resume()
+        heartbeat = timer
+    }
     /// Three ssh execs: the user-shell env (agent panes spawn the CLI
     /// directly, so THIS becomes the process env) and which agent CLIs
     /// exist on the host — probed in that same env. Blocking ssh — the
@@ -525,8 +578,23 @@ final class RemoteDaemonLink {
         // handler's queue block runs after this block, so the epoch check
         // in rebootIfOrphaned always sees the bump.
         forwardEpoch += 1
-        if let process = forward, process.isRunning {
-            process.terminate()
+        heartbeat?.cancel()
+        heartbeat = nil
+        if let process = forward {
+            let pid = process.processIdentifier
+            if process.isRunning {
+                process.terminate()
+                // SIGTERM is a request; a wedged ssh (channels blocked on
+                // dead peers) can ignore it indefinitely. Each retry then
+                // leaked one forward — seven accumulated on laozhu, four
+                // on 5090 (2026-09-16), every one of them a black hole
+                // racing the fresh link for the socket path. Escalate.
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+                    if kill(pid, SIGKILL) == 0 || errno == ESRCH {
+                        // reaped or already gone — either is fine
+                    }
+                }
+            }
         }
         forward = nil
         if let path = forwardPath {
