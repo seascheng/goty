@@ -25,9 +25,9 @@ final class CodexSession: AgentSessioning {
     /// both the attach (thread/read) and respawn (thread/resume) paths.
     private let restoredSessionId: String?
 
-    /// "already has an active writer" means another codex process
-    /// holds the thread's rollout lock (codex-rs thread-store
-    /// writer_lock.rs — no force option). Every codex process on this
+    /// itemId → command/title for tool items started but not yet
+    /// completed — settled as cancelled when their turn dies.
+    private var openToolItems: [String: String] = [:]
     /// daemon is one of OUR panes, and each rebuilds from its own
     /// threadId after a respawn, so killing the OTHER codex panes
     /// frees the lock at the cost of a self-healing respawn elsewhere
@@ -519,6 +519,22 @@ final class CodexSession: AgentSessioning {
             }
             self.connect(completion: completion)
         }
+    }
+
+    /// Close every still-open tool card. Called on turn end: an
+    /// interrupted/aborted turn never sends item/completed for its
+    /// running tools, and the pane would show them as 运行中 forever.
+    private func settleOpenTools(cancelled: Bool) {
+        guard !openToolItems.isEmpty else { return }
+        var events: [AgentSessionEvent] = []
+        for (itemId, title) in openToolItems {
+            events.append(.toolCallUpdate(
+                id: itemId, title: title, kind: "command",
+                status: cancelled ? "cancelled" : "completed",
+                content: [], output: nil, rawInput: nil, oldText: nil))
+        }
+        openToolItems.removeAll()
+        emit(events)
     }
 
     /// The initial-connect attached-pane branch: adopt the live thread,
@@ -1493,6 +1509,26 @@ final class CodexSession: AgentSessioning {
     }
 
     private func handleNotification(method: String, params: [String: Any]) {
+        // Open-tool ledger: items that started but never completed. A
+        // turn that ends (interrupt, abort, server-side timeout) leaves
+        // these cards spinning "运行中" forever — settle them when the
+        // turn dies (5090 report: three Bash cards stuck after Esc).
+        if method == "item/started",
+           let item = params["item"] as? [String: Any],
+           let itemId = item["id"] as? String,
+           ["commandExecution", "fileChange", "webSearch", "mcpToolCall",
+            "todoList"].contains(item["type"] as? String ?? "") {
+            openToolItems[itemId] = (item["command"] as? String)
+                ?? (item["type"] as? String)
+        }
+        if method == "item/completed",
+           let item = params["item"] as? [String: Any],
+           let itemId = item["id"] as? String {
+            openToolItems.removeValue(forKey: itemId)
+        }
+        if method == "turn/completed" || method == "turn/aborted" {
+            settleOpenTools(cancelled: method == "turn/aborted")
+        }
         // Live user-echo suppression (pi-mono's rule): the composer
         // already renders the sent text optimistically, so the agent's
         // own userMessage echo must not render again — the "message
