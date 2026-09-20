@@ -493,7 +493,11 @@ final class RemoteDaemonLink {
 
     private func ssh(_ command: String, stdin: Data? = nil) -> String {
         // Best-effort like before: stdout regardless of exit status.
-        let result = Shell.exec(command, host: host, stdin: stdin)
+        // 25s ceiling: a wedged ssh here parked the whole boot with no
+        // log line for hours (laozhu, 2026-09-17) — a timeout returns
+        // junk output the caller already tolerates, and the retry loop
+        // gets another shot at a healthy connection.
+        let result = Shell.exec(command, host: host, stdin: stdin, timeout: 25)
         return String(decoding: result.stdout, as: UTF8.self)
     }
 

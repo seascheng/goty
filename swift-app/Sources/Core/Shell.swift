@@ -39,9 +39,15 @@ enum Shell {
     /// stdout/stderr/exit status. Six near-identical hand-rolled
     /// Process+Pipe blocks used to live across GitStatus/FileSources/
     /// RemoteDaemonLink/UserShellEnv — every new caller must go through
-    /// here. Blocking; call off the main thread.
+    /// here. Blocking; call off the main thread. `timeout` (nil =
+    /// unbounded, the historical behavior) terminates the process and
+    /// returns a failure tuple — a wedged ssh (half-open TCP, stalled
+    /// handshake) otherwise parks the CALLER forever: laozhu's link sat
+    /// in a boot step for hours with zero log output (2026-09-17).
     static func exec(_ command: String, host: String? = nil,
-                     stdin: Data? = nil) -> (code: Int32, stdout: Data, stderr: String) {
+                     stdin: Data? = nil,
+                     timeout: TimeInterval? = nil)
+            -> (code: Int32, stdout: Data, stderr: String) {
         let proc = Process()
         if let host {
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -54,6 +60,23 @@ enum Shell {
         let err = Pipe()
         proc.standardOutput = out
         proc.standardError = err
+        var timeoutTimer: DispatchSourceTimer?
+        if let timeout {
+            let timer = DispatchSource.makeTimerSource()
+            timer.schedule(deadline: .now() + timeout)
+            timer.setEventHandler {
+                if proc.isRunning {
+                    proc.terminate()
+                    // SIGTERM is a request; a wedged ssh ignores it.
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+                        if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+                    }
+                }
+            }
+            timer.resume()
+            timeoutTimer = timer
+        }
+        defer { timeoutTimer?.cancel() }
         if stdin != nil {
             let inPipe = Pipe()
             proc.standardInput = inPipe
@@ -81,6 +104,9 @@ enum Shell {
         let errText = String(data: err.fileHandleForReading.readDataToEndOfFile(),
                              encoding: .utf8) ?? ""
         proc.waitUntilExit()
+        if proc.terminationReason == .uncaughtSignal {
+            return (-1, data, "timeout after \(timeout.map { String(Int($0)) } ?? "-")s: \(errText)")
+        }
         return (proc.terminationStatus, data, errText)
     }
 }

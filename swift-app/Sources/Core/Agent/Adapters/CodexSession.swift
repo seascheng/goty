@@ -531,7 +531,7 @@ final class CodexSession: AgentSessioning {
             events.append(.toolCallUpdate(
                 id: itemId, title: title, kind: "command",
                 status: cancelled ? "cancelled" : "completed",
-                content: [], output: nil, rawInput: nil, oldText: nil))
+                content: [], output: [], rawInput: nil, oldText: nil))
         }
         openToolItems.removeAll()
         emit(events)
