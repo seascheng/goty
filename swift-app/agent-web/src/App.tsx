@@ -1601,6 +1601,39 @@ function TurnActions({ text, entryId }: { text: string; entryId: string | null |
     </div>
   );
 }
+/// Folded run of consecutive COMPLETED tool cards (beautifului tool
+/// chips): a long turn's read/grep/Edit×N tail collapses to one line
+/// so the conversation reads like a conversation. Errors and running
+/// cards break the run (store- or render-level) and always render
+/// standalone — a failure must never hide inside a fold.
+const TOOL_CLUSTER_MIN = 3;
+
+function ToolCluster({ blocks }: { blocks: Block[] }) {
+  const [open, setOpen] = useState(false);
+  const tally = new Map<string, number>();
+  for (const b of blocks) {
+    if (!("call" in b)) continue;
+    const k = b.call.kind ?? "other";
+    tally.set(k, (tally.get(k) ?? 0) + 1);
+  }
+  return (
+    <div className={"tool-cluster" + (open ? " open" : "")}>
+      <button className="tool-head" onClick={() => setOpen(!open)}
+        title="展开查看这组工具调用的详情">
+        <Chevron open={open} />
+        {[...tally.entries()].slice(0, 4).map(([k, n]) => (
+          <span key={k} className="tool-kind" aria-hidden><ToolGlyph kind={k} /></span>
+        ))}
+        <span className="tool-title">{blocks.length} 个工具调用</span>
+        <span className="tool-status st-completed" title="全部完成">
+          <span className="dot" aria-hidden>✓</span> 已完成
+        </span>
+      </button>
+      {open && blocks.map((b) => <BlockView key={b.id} block={b} />)}
+    </div>
+  );
+}
+
 /// One transcript row. Memoized: during replay only the newest blocks
 /// change identity, so scroll-up pagination re-renders just the newly
 /// revealed rows and streaming re-renders only the tail block.
@@ -1657,6 +1690,7 @@ function StatusLine() {
     return () => clearInterval(t);
   }, [s.phase]);
   const elapsed = s.turnStartedAt != null ? fmtElapsed(now - s.turnStartedAt) : null;
+
   const chips: React.ReactNode[] = [];
   // /compact runs as a normal model turn, so phase=thinking holds —
   // the compacting chip is the sharper truth; don't spin both.
@@ -1688,6 +1722,65 @@ function StatusLine() {
   }
   if (chips.length === 0) return null;
   return <div className="composer-status in-transcript">{chips}</div>;
+}
+
+/// beautifului selection actions: highlight a passage of the agent's
+/// answer, get a small floating bar to quote it into the composer.
+/// The anchor-walk checks the selection lives in AGENT content —
+/// quoting the user's own messages or tool output is noise.
+function SelectionQuote({ onQuote }: { onQuote: (text: string) => void }) {
+  const [sel, setSel] = useState<{ text: string; x: number; y: number } | null>(null);
+  const barRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const read = () => {
+      const s = window.getSelection();
+      const text = s != null && s.rangeCount > 0 ? s.toString().trim() : "";
+      if (!s || text === "" || text.length > 2000) { setSel(null); return; }
+      let node: Node | null = s.anchorNode;
+      let inAgent = false;
+      while (node) {
+        if (node instanceof HTMLElement && node.classList.contains("agent-markdown")) {
+          inAgent = true; break;
+        }
+        node = node.parentNode;
+      }
+      if (!inAgent) { setSel(null); return; }
+      const r = s.getRangeAt(0).getBoundingClientRect();
+      setSel({ text, x: r.left + r.width / 2, y: r.top });
+    };
+    const onUp = (e: MouseEvent) => {
+      if (barRef.current?.contains(e.target as Node)) return;
+      read();
+    };
+    const onSel = () => {
+      const s = window.getSelection();
+      if (s == null || s.toString().trim() === "") setSel(null);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setSel(null); };
+    document.addEventListener("mouseup", onUp);
+    document.addEventListener("selectionchange", onSel);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("selectionchange", onSel);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, []);
+  if (!sel) return null;
+  const act = (prefix: string) => {
+    onQuote(prefix + sel.text.split("\n").join("\n> ") + "\n\n");
+    window.getSelection()?.removeAllRanges();
+    setSel(null);
+  };
+  return (
+    <div className="sel-quote" ref={barRef}
+      style={{ left: Math.max(8, Math.min(sel.x - 60, window.innerWidth - 150)), top: Math.max(8, sel.y - 36) }}>
+      <button type="button" onClick={() => act("> ")}
+        title="把选中内容作为引用放进输入框">引用提问</button>
+      <button type="button" onClick={() => act("请解释这段内容：\n> ")}
+        title="生成一条“解释这段”的提问草稿">解释这段</button>
+    </div>
+  );
 }
 
 export function App() {
@@ -1950,33 +2043,6 @@ export function App() {
     // Explicit command: release parking AND revoke input evidence (the
     // user just told us they want the tail — stale intent must not
     // block the landing).
-  // Dock presence + plan fold: both change the transcript's height via
-  // a grid transition — a pinned (follow-mode) viewport must ride the
-  // transition frame-by-frame, or the tail drifts open/shut in a jump.
-  const dockOn = !!(store.plan || store.jobs.length > 0
-    || store.subagents.length > 0 || store.pendingQueue.length > 0);
-  const planOpen = useSyncExternalStore(
-    (onChange) => store.subscribe(onChange),
-    () => store.planDockOpen && !store.planFoldedBySettle,
-    () => true,
-  );
-  useEffect(() => {
-    const sc = scroller.current;
-    if (!sc) return;
-    const t0 = performance.now();
-    let raf = 0;
-    const tick = () => {
-      // Readers above the tail are top-anchored: the dock grows from
-      // the bottom edge and never moves what they see.
-      if (parked.current) return;
-      lastWriteAt.current = performance.now();
-      sc.scrollTop = sc.scrollHeight;
-      if (performance.now() - t0 < 320) raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [dockOn, planOpen]);
-
     lastRawInputAt.current = -Infinity;
     const sc = scroller.current;
     if (sc) {
@@ -2006,25 +2072,53 @@ export function App() {
         {(begin > 0 || store.hasOlder) && (
           <div className="history-more" ref={sentinelRef}>加载更早消息…</div>
         )}
-        {visible.map((block, i) => (
-          <BlockView key={block.id} block={block}
-            // Tail flag feeds the thought card's liveness (only the
-            // LAST block can still be thinking — streaming is ordered).
-            isTail={i + 1 >= visible.length}
-            // The turn-action row belongs at the END of a turn's LLM
-            // output, not on every entryId-stamped fragment before it
-            // (thought/tool interleaving splits one message into many
-            // agent blocks). Last content block of a SETTLED turn only
-            // — a running turn must not flash copy/branch mid-stream
-            // (the screenshot report); working flips false on settle
-            // and the parent re-renders, flipping showBranch on.
-            showBranch={block.kind === "agent"
-              && !store.working
-              && (i + 1 >= visible.length
-                  || (visible[i + 1].kind !== "agent"
-                      && visible[i + 1].kind !== "thought"
-                      && visible[i + 1].kind !== "tool"))} />
-        ))}
+        {/* beautifului tool chips: runs of consecutive completed tool
+            cards (>= TOOL_CLUSTER_MIN) fold into one cluster row. The
+            walk mirrors the old map's per-block props exactly for the
+            unfolded blocks; a cluster's members render with default
+            props (completed tools — no tail liveness, no branch row). */}
+        {(() => {
+          const tailId = visible.length > 0 ? visible[visible.length - 1].id : -1;
+          const rows: React.ReactNode[] = [];
+          let run: Block[] = [];
+          const flushRun = () => {
+            if (run.length === 0) return;
+            if (run.length >= TOOL_CLUSTER_MIN) {
+              rows.push(<ToolCluster key={"c" + run[0].id} blocks={run} />);
+            } else {
+              for (const b of run) rows.push(
+                <BlockView key={b.id} block={b} isTail={b.id === tailId} />);
+            }
+            run = [];
+          };
+          visible.forEach((block, i) => {
+            if (block.kind === "tool" && block.call.status === "completed") {
+              run.push(block);
+              return;
+            }
+            flushRun();
+            rows.push(
+              <BlockView key={block.id} block={block}
+                // Tail flag feeds the thought card's liveness (only the
+                // LAST block can still be thinking — streaming is ordered).
+                isTail={i + 1 >= visible.length}
+                // The turn-action row belongs at the END of a turn's LLM
+                // output, not on every entryId-stamped fragment before it
+                // (thought/tool interleaving splits one message into many
+                // agent blocks). Last content block of a SETTLED turn only
+                // — a running turn must not flash copy/branch mid-stream
+                // (the screenshot report); working flips false on settle
+                // and the parent re-renders, flipping showBranch on.
+                showBranch={block.kind === "agent"
+                  && !store.working
+                  && (i + 1 >= visible.length
+                      || (visible[i + 1].kind !== "agent"
+                          && visible[i + 1].kind !== "thought"
+                          && visible[i + 1].kind !== "tool"))} />);
+          });
+          flushRun();
+          return rows;
+        })()}
         <StatusLine />
       </div>
       {!atBottom && (
@@ -2068,6 +2162,7 @@ export function App() {
         draftKey={(store.meta?.workspace || store.meta?.directory)
           ? `draft:${store.meta.workspace ?? ""}|${store.meta.directory ?? ""}`
           : undefined} />
+      <SelectionQuote onQuote={(text) => setDraft({ text, seq: draft.seq + 1 })} />
       {store.stats && <StatsDialog stats={store.stats} />}
     </div>
   );
@@ -2092,6 +2187,11 @@ function PermissionCard({ permission }: {
       <div className="perm-title">
         {permission.toolCallTitle ?? "需要授权"}
         <span className="perm-kind">{kind}</span>
+        {(permission.pendingCount ?? 1) > 1 && (
+          <span className="perm-queue" title="codex 已排队的授权请求数">
+            第 1 / {permission.pendingCount} 个待授权
+          </span>
+        )}
       </div>
       {isInput ? (
         <div className="perm-input">

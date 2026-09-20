@@ -1025,3 +1025,36 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .popover-open { animation: none; }
 }
+/* beautifului tool chips: a folded run of consecutive completed tool
+   cards. Header reuses .tool-head geometry; the cluster body is plain
+   stacked cards. */
+.tool-cluster { margin: 2px 0; }
+.tool-cluster .tool-head { opacity: 0.92; }
+.tool-cluster:hover .tool-head { opacity: 1; }
+.tool-cluster .tool-status.st-completed .dot { color: var(--green, #6adc87); }
+.tool-cluster.open { background: var(--bg-raised, rgba(127,127,127,0.08)); border-radius: 8px; }
+
+/* beautifului selection actions: floating bar above a text selection
+   inside the agent's answer. */
+.sel-quote {
+  position: fixed; z-index: 40; display: flex; gap: 4px;
+  padding: 4px; border-radius: 8px;
+  background: var(--bg-raised, rgba(30,30,30,0.96));
+  border: 1px solid var(--border, rgba(127,127,127,0.35));
+  box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+}
+.sel-quote button {
+  background: none; border: none; color: var(--foreground);
+  font: inherit; font-size: 12px; padding: 3px 9px; cursor: pointer;
+  border-radius: 6px; white-space: nowrap;
+}
+.sel-quote button:hover { background: var(--bg-hover, rgba(127,127,127,0.2)); }
+
+/* beautifului approval card: queue position chip when the agent has
+   more than one authorization pending (codex queues them). */
+.perm-queue {
+  margin-left: auto; font-size: 10.5px; white-space: nowrap;
+  color: var(--fg-extra-muted);
+  border: 1px solid var(--border, rgba(127,127,127,0.35));
+  border-radius: 999px; padding: 1px 8px;
+}

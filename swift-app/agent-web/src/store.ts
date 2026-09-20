@@ -30,7 +30,10 @@ export type Permission = { requestID: string; toolCallTitle?: string | null;
   /** omp ask multi-select round: clicking toggles (agent re-asks with a
    * fresh card); checkedIndices are already-selected option positions;
    * a kind:"done" option commits the set. */
-  multi?: boolean | null; checkedIndices?: number[] | null };
+  multi?: boolean | null; checkedIndices?: number[] | null;
+  /** Authorization requests queued behind this one (codex); >1 shows
+   * a "第 1 / N 个待授权" position chip on the card. */
+  pendingCount?: number | null };
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 /// Structural equality for plan snapshots — the dedup key the plan
 /// handler uses to ignore repeated identical snapshots (omp's get_state
@@ -148,6 +151,7 @@ export const IncomingEventSchema = z.discriminatedUnion("type", [
     defaultValue: z.string().nullish(),
     multi: z.boolean().nullish(),
     checkedIndices: z.array(z.number()).nullish(),
+    pendingCount: z.number().nullish(),
     options: z.array(PermissionOptionSchema),
     dialog: z.string().nullish(),
     placeholder: z.string().nullish(),

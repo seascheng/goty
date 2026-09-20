@@ -1722,8 +1722,9 @@ final class CodexSession: AgentSessioning {
         } else {
             title = (params["title"] as? String) ?? "codex 请求授权"
         }
-        let prompt = AgentPermissionPrompt.codexApproval(
+        var prompt = AgentPermissionPrompt.codexApproval(
             requestID: String(id), title: title)
+        prompt.pendingCount = pendingApprovals.count
         emit([.permissionRequested(prompt)])
     }
 

@@ -241,6 +241,9 @@ struct AgentPermissionPrompt {
     var multi: Bool = false
     /// Option indices already checked when this round arrived.
     var checkedIndices: [Int] = []
+    /// Requests waiting behind this one (codex queues approvals):
+    /// >1 renders a "第 1 / N 个待授权" hint on the card. Nil/1 hides.
+    var pendingCount: Int? = nil
 
     init(requestID: String, toolCallTitle: String?,
          options: [AgentPermissionOption],
@@ -670,6 +673,7 @@ extension AgentSessionEvent {
                     "defaultValue": prompt.defaultValue ?? NSNull(),
                     "multi": prompt.multi,
                     "checkedIndices": prompt.checkedIndices,
+                    "pendingCount": prompt.pendingCount ?? NSNull(),
                     "options": prompt.options.map { option in
                         ["optionId": option.optionId,
                          "name": option.name,
