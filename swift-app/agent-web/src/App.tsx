@@ -312,8 +312,21 @@ function ToolCard({ id }: { id: string }) {
     }
   }
   const running = call.status === "in_progress" || call.status === "pending";
+  const ticking = call.status === "in_progress";
+  // Per-card age while running (beautifului loading-state): 运行中 · 8s.
+  // Cards mount at item/started, so first-seen-in_progress is the
+  // start time (adopted histories settle instantly and never tick).
+  const startedRef = useRef(0);
+  if (ticking && startedRef.current === 0) startedRef.current = Date.now();
+  if (!ticking) startedRef.current = 0;
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!ticking) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [ticking]);
   const statusLabel = call.status === "completed" ? "完成"
-    : call.status === "in_progress" ? "运行中"
+    : ticking ? `运行中 · ${fmtElapsed(now - startedRef.current)}`
     : call.status === "pending" ? "等待"
     : call.status === "error" ? "出错"
     : (call.status ?? "");
@@ -967,15 +980,29 @@ function ThoughtView({ text, isTail }: { text: string; isTail: boolean }) {
     () => false,
   );
   const live = isTail && thinking;
-  const [open, setOpen] = useState(live);
+  // Same turn clock as StatusLine, scoped to the live card: 思考中 · 12s
+  // in the header. Base is the turn start (multi-block turns keep one
+  // clock); mount time is the fallback for mid-stream adoption.
+  const baseRef = useRef(0);
+  if (live && baseRef.current === 0) baseRef.current = store.turnStartedAt ?? Date.now();
+  if (!live) baseRef.current = 0;
+  const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    if (!live) setOpen(false);
+    if (!live) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
   }, [live]);
+  const liveElapsed = live && baseRef.current > 0 ? now - baseRef.current : null;
+  const [open, setOpen] = useState(live);
   return (
     <div className={"thought-card" + (open ? " open" : "")}>
       <button className="thought-head" onClick={() => setOpen(!open)}>
         <span className={"thought-dot" + (live ? " live" : "")} aria-hidden />
-        <span className="thought-label">{live ? "思考中…" : "思考过程"}</span>
+        <span className="thought-label">
+          {live
+            ? `思考中${liveElapsed != null ? ` · ${fmtElapsed(liveElapsed)}` : ""}…`
+            : "思考过程"}
+        </span>
         <Chevron open={open} />
       </button>
       {open && (
@@ -1619,11 +1646,22 @@ const BlockView = React.memo(
 function StatusLine() {
   const s = store;
   const rt = store.runtime;
+  // Live turn clock (beautifului loading-state pattern): every live
+  // chip carries the elapsed wall time, ticking client-side from
+  // turnStartedAt — "hung or working?" is answered at a glance
+  // (the 5090 stuck-tool report: cards said 运行中 with no age).
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (s.phase == null) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [s.phase]);
+  const elapsed = s.turnStartedAt != null ? fmtElapsed(now - s.turnStartedAt) : null;
   const chips: React.ReactNode[] = [];
   // /compact runs as a normal model turn, so phase=thinking holds —
   // the compacting chip is the sharper truth; don't spin both.
   if (s.phase === "thinking" && !rt?.compacting) {
-    chips.push(<span key="th" className="cstat" title="模型思考中"><span className="spin" />思考中…</span>);
+    chips.push(<span key="th" className="cstat" title="模型思考中"><span className="spin" />思考中{elapsed ? ` · ${elapsed}` : ""}…</span>);
   } else if (s.phase === "executing") {
     // Live tool telemetry: name the tool actually running (claude TUI
     // parity — a bare 执行中 hides which of the turn's tools is active).
@@ -1634,7 +1672,7 @@ function StatusLine() {
     }
     chips.push(
       <span key="ex" className="cstat" title="工具执行中">
-        <span className="spin" />执行中{running ? ` · ${toolDisplayTitle(running)}` : ""}…
+        <span className="spin" />执行中{elapsed ? ` · ${elapsed}` : ""}{running ? ` · ${toolDisplayTitle(running)}` : ""}…
       </span>);
   } else if (s.phase === "awaitingPermission") {
     chips.push(<span key="ap" className="cstat awaiting" title="等待你在下方授权">等待授权</span>);
