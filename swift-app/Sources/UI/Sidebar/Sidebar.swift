@@ -32,6 +32,13 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
     private var plusShifted: NSLayoutConstraint!
     /// Group marker bar — see the hierarchy comment in init.
     private let tickBar = NSView()
+    /// Top-level title glyph (Servers/Terminals/Spaces) — the icon that
+    /// makes the three page titles read apart from group headers.
+    private let glyphView = NSImageView()
+    private var lastGlyph: String?
+    private var labelAtTick: NSLayoutConstraint!
+    private var glyphLeading: NSLayoutConstraint!
+    private var labelAfterGlyph: NSLayoutConstraint!
     init(emphasized: Bool = false) {
         self.emphasized = emphasized
         super.init(frame: .zero)
@@ -58,9 +65,19 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         plusFlush = plusButton.trailingAnchor.constraint(equalTo: trailingAnchor,
                                                         constant: 0)
         plusFlush.isActive = true
+        glyphView.translatesAutoresizingMaskIntoConstraints = false
+        glyphView.contentTintColor = Chrome.theme.foreground
+        addSubview(glyphView)
+        // Label column: at the tick (group headers) or right of the
+        // glyph (top-level titles) — exactly one may be active.
+        labelAtTick = label.leadingAnchor.constraint(
+            equalTo: leadingAnchor, constant: SidebarRowView.iconLeading + 9)
+        glyphLeading = glyphView.leadingAnchor.constraint(
+            equalTo: leadingAnchor, constant: SidebarRowView.iconLeading + 9)
+        labelAfterGlyph = label.leadingAnchor.constraint(
+            equalTo: glyphView.trailingAnchor, constant: 6)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor,
-                                           constant: SidebarRowView.iconLeading),
+            labelAtTick,
             heightAnchor.constraint(equalToConstant: 18),
             toggleButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0),
             toggleButton.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -99,15 +116,34 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
 
     required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
     func configure(text: String, plus: ((NSView) -> Void)?, count: Int?,
-                   toggle: (() -> Void)? = nil, expanded: Bool = true) {
+                   toggle: (() -> Void)? = nil, expanded: Bool = true,
+                   glyph: String?? = nil) {
         lastText = text
         lastCount = count
         lastExpanded = expanded
+        if let glyph { lastGlyph = glyph }
         label.attributedStringValue = NSAttributedString(string: text.uppercased(), attributes: [
             .font: NSFont.systemFont(ofSize: emphasized ? 11 : 10, weight: .semibold),
             .foregroundColor: emphasized ? Chrome.theme.foreground : Chrome.theme.sidebarText,
             .kern: emphasized ? 0.8 : 1.1,
         ])
+        // Glyph column swap: top-level titles carry a symbol; group
+        // headers keep the bare tick.
+        if let glyphName = lastGlyph {
+            glyphView.image = NSImage(systemSymbolName: glyphName,
+                                      accessibilityDescription: text)?
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+            glyphView.contentTintColor = Chrome.theme.foreground
+            glyphView.isHidden = false
+            labelAtTick.isActive = false
+            glyphLeading.isActive = true
+            labelAfterGlyph.isActive = true
+        } else {
+            glyphView.isHidden = true
+            glyphLeading.isActive = false
+            labelAfterGlyph.isActive = false
+            labelAtTick.isActive = true
+        }
         plusButton.isHidden = plus == nil
         onPlus = plus
         onToggle = toggle
@@ -152,7 +188,7 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
     /// passes, so without this they carry the launch theme forever.
     func retheme() {
         configure(text: lastText, plus: onPlus, count: lastCount,
-                  toggle: onToggle, expanded: lastExpanded)
+                  toggle: onToggle, expanded: lastExpanded, glyph: lastGlyph)
     }
 }
 
@@ -160,9 +196,11 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
 /// the Spaces section headers go through SectionHeaderView reuse.
 func sectionHeader(_ text: String, plus: ((NSView) -> Void)? = nil, count: Int? = nil,
                    emphasized: Bool = false,
-                   toggle: (() -> Void)? = nil, expanded: Bool = true) -> SectionHeaderView {
+                   toggle: (() -> Void)? = nil, expanded: Bool = true,
+                   glyph: String? = nil) -> SectionHeaderView {
     let v = SectionHeaderView(emphasized: emphasized)
-    v.configure(text: text, plus: plus, count: count, toggle: toggle, expanded: expanded)
+    v.configure(text: text, plus: plus, count: count, toggle: toggle,
+                expanded: expanded, glyph: glyph)
     return v
 }
 
@@ -428,7 +466,8 @@ final class SidebarView: NSView {
                         entries: self.hostPickerEntries(hosts: SSHConfig.hosts()),
                         onPick: { [weak self] entry in self?.fireHostPicker(entry) })
     }, emphasized: true,
-       toggle: { [weak self] in self?.setServersExpanded(!(self?.serversExpanded ?? true)) })
+       toggle: { [weak self] in self?.setServersExpanded(!(self?.serversExpanded ?? true)) },
+       glyph: "server.rack")
 
     /// SERVERS fold: rows hidden, header keeps its chevron + '+'.
     /// Persisted through onServersExpandChange (AppPreferences).
@@ -578,7 +617,7 @@ final class SidebarView: NSView {
     private lazy var tabsHeader: NSView = sectionHeader("Spaces",
                                                         plus: { [weak self] _ in
         self?.onNewSpace?()
-    })   // NOT emphasized: Servers is the parent, these are its children
+    }, emphasized: true, glyph: "square.grid.2x2")   // page title, not a group — carries a glyph
     private let wsStack = NSStackView()
     private let contentScroll = NSScrollView()
     private weak var contentClip: NSView?
@@ -594,7 +633,7 @@ final class SidebarView: NSView {
     private lazy var termHeader: NSView = sectionHeader("Terminals",
                                                         plus: { [weak self] _ in
         self?.onNewTab?()
-    })   // NOT emphasized: Servers is the parent, these are its children
+    }, emphasized: true, glyph: "terminal")   // page title, not a group — carries a glyph
     private let termStack = NSStackView()
     private let divider2 = HairlineView()
     private let tabsStack = NSStackView()

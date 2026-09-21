@@ -1074,6 +1074,7 @@ body {
   --vit-violet: #b197fc; /* thinking: reasoning, search */
   --vit-cyan: #35c4c8;   /* network: fetch/web */
   --vit-rose: #f27d9d;   /* agents: subagent machinery */
+  --vit-slate: #9fb2cf;  /* machinery: hub, todos, misc tools */
 }
 
 /* Tool identity: the 12px glyph is the strongest color signal a
@@ -1088,7 +1089,10 @@ body {
 .tool-kind[data-kind="search"] { color: var(--vit-violet); }
 .tool-kind[data-kind="fetch"] { color: var(--vit-cyan); }
 .tool-kind[data-kind="agent"] { color: var(--vit-rose); }
-/* "other" (and nil) intentionally stays fg-muted — no identity, no hue. */
+/* "other" (the wrench glyph: hub, todo lists, misc machinery) gets a
+   calm blue-gray — hue without shouting, distinct from all named
+   identities. Nil keeps fg-muted. */
+.tool-kind[data-kind="other"] { color: var(--vit-slate); }
 .tool-head:hover .tool-kind { filter: brightness(1.15); }
 
 /* Status dots: age-old traffic-light semantics. */
