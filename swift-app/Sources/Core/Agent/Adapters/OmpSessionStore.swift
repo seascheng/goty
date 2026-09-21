@@ -235,7 +235,8 @@ enum OmpSessionStore {
                         events.append(.toolCallUpdate(
                             id: toolCallId,
                             title: message["toolName"] as? String,
-                            kind: nil,
+                            kind: PiFrameMapper.toolKind(
+                                (message["toolName"] as? String) ?? ""),
                             status: "completed",
                             content: content,
                             output: ACPContentNormalizer.resultItems(

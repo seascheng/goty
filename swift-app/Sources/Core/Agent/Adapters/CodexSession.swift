@@ -395,6 +395,17 @@ final class CodexSession: AgentSessioning {
         client.onRequest = { [weak self] id, method, params in
             self?.handleServerRequest(id: id, method: method, params: params)
         }
+        // Ring-replayed server requests: codex re-issues pending
+        // approvals when its process restarts, and those frames land in
+        // the NEXT attach's replay window — the 2026-09-21 5090 freeze
+        // (parallel batch awaiting approvals the GUI never saw; every
+        // delivery fell in a detach/replay window, cards spun 运行中
+        // forever). Buffer them here; a waitingOnApproval signal
+        // confirms the live process still waits, then they adopt as
+        // real prompts.
+        client.onReplayRequest = { [weak self] id, method, params in
+            self?.bufferReplayedServerRequest(id: id, method: method, params: params)
+        }
         client.onOrphanResult = { [weak self] result in
             guard let self, self.threadId == nil,
                   let thread = result["thread"] as? [String: Any],
@@ -492,6 +503,7 @@ final class CodexSession: AgentSessioning {
         // must too.
         pane = opened.session
         opened.session.start()
+        startStallWatchdog()
         if opened.attachedExisting {
             switch intent {
             case .initial:
@@ -529,7 +541,7 @@ final class CodexSession: AgentSessioning {
         var events: [AgentSessionEvent] = []
         for (itemId, title) in openToolItems {
             events.append(.toolCallUpdate(
-                id: itemId, title: title, kind: "command",
+                id: itemId, title: title, kind: "execute",
                 status: cancelled ? "cancelled" : "completed",
                 content: [], output: [], rawInput: nil, oldText: nil))
         }
@@ -1095,6 +1107,7 @@ final class CodexSession: AgentSessioning {
         // server request that must be answered).
         let outstanding = pendingApprovals
         pendingApprovals.removeAll()
+        pendingApprovalPrompts.removeAll()
         for id in outstanding {
             client.respond(id: id, result: ["decision": "decline"])
         }
@@ -1116,8 +1129,12 @@ final class CodexSession: AgentSessioning {
     func respondPermission(requestID: String, optionId: String) {
         guard let id = Int(requestID) else { return }
         pendingApprovals.removeAll { $0 == id }
+        pendingApprovalPrompts.removeValue(forKey: id)
         client.respond(id: id,
                        result: ["decision": Self.approvalDecision(optionId)])
+        // Pop the queue: the single-slot page cleared this card — the
+        // next pending approval must surface immediately.
+        repushPendingApprovals()
     }
 
     /// codex CommandExecution/FileChange ApprovalDecision literals:
@@ -1441,6 +1458,15 @@ final class CodexSession: AgentSessioning {
                     resume(bare: true)
                     return
                 }
+                // Resume landed with the thread still awaiting approvals:
+                // the ring replay that just streamed past us carried the
+                // (possibly missed) approval requests — adopt them now.
+                if case .success(let value) = result,
+                   let thread = value["thread"] as? [String: Any],
+                   let flags = (thread["status"] as? [String: Any])?["activeFlags"]
+                       as? [String], flags.contains("waitingOnApproval") {
+                    adoptReplayedApprovals()
+                }
                 if case .failure(let err) = result {
                     // Bare resume failed too (dead link mid-restore,
                     // poisoned thread file, …). History still replays
@@ -1467,6 +1493,7 @@ final class CodexSession: AgentSessioning {
 
     func shutdown() {
         shuttingDown = true
+        stallWatchTimer?.invalidate()
         connectionGate.invalidate()
         client.failPending(reason: "codex transport closed")
         pane?.close()
@@ -1566,11 +1593,11 @@ final class CodexSession: AgentSessioning {
                 || method == "turn/aborted" {
             return
         }
+        lastNotificationAt = Date()
         // Turn lifecycle bookkeeping ahead of the mapper: steer needs
         // the live turn id, and every terminal clears it.
         switch method {
         case "turn/started":
-            activeTurnId = (params["turn"] as? [String: Any])?["id"] as? String
             // A turn can start WITHOUT our send(): a freshly set goal
             // makes the agent begin working on its own (probed: /goal
             // → thread/goal/set, then a turn with no user turn in
@@ -1586,7 +1613,9 @@ final class CodexSession: AgentSessioning {
                 ?? (params["requestId"] as? String).flatMap(Int.init)
             if let rid {
                 pendingApprovals.removeAll { $0 == rid }
+                pendingApprovalPrompts.removeValue(forKey: rid)
                 emit([.permissionResolved(requestID: String(rid))])
+                repushPendingApprovals()
             }
         case "thread/name/updated":
             // /rename and codex's own auto-naming — follow the live
@@ -1628,13 +1657,31 @@ final class CodexSession: AgentSessioning {
             loadCommands()
         case "thread/status/changed":
             // waitingOnApproval = commands parked on an approval the
-            // user may never have seen (the 5090 report: three tool
-            // cards spinning for minutes while codex waited). Flash it
-            // so the pane explains WHY it is quiet.
+            // user may never have seen (the 5090 report: tool cards
+            // spinning while codex waited — deliveries lost to detach/
+            // replay windows). The signal doubles as liveness proof for
+            // buffered replay approvals: adopt them NOW, and re-push
+            // every held prompt (self-heals a page that churned and
+            // lost the cards; idempotent by requestID).
             if let status = params["status"] as? [String: Any],
-               let flags = status["activeFlags"] as? [String],
-               flags.contains("waitingOnApproval") {
-                emit([.statusFlash("⏸ codex 正在等待命令批准…")])
+               let flags = status["activeFlags"] as? [String] {
+                if flags.contains("waitingOnApproval") {
+                    adoptReplayedApprovals()
+                    repushPendingApprovals()
+                    emit([.statusFlash("⏸ codex 正在等待命令批准…")])
+                } else if !pendingApprovals.isEmpty,
+                          !flags.contains("waitingOnUserInput") {
+                    // The wait is OVER without our answers (server-side
+                    // resolutions this connection never saw, or a stale
+                    // replay adoption): drain every held prompt so the
+                    // page doesn't stack unanswerable cards.
+                    let stale = pendingApprovals
+                    pendingApprovals.removeAll()
+                    pendingApprovalPrompts.removeAll()
+                    for id in stale {
+                        emit([.permissionResolved(requestID: String(id))])
+                    }
+                }
             }
         case "turn/completed", "turn/aborted":
             activeTurnId = nil
@@ -1662,6 +1709,7 @@ final class CodexSession: AgentSessioning {
             $0.trimmingCharacters(in: .whitespacesAndNewlines) == text
         }
     }
+
     func steer(_ text: String, images: [AgentImage]) {
         guard isWorking, let threadId, let turnId = activeTurnId else {
             enqueueMidTurn(text, images: images)
@@ -1713,8 +1761,13 @@ final class CodexSession: AgentSessioning {
             return
         }
         pendingApprovals.append(id)
+        // Title: the live frame carries the command at the TOP LEVEL
+        // (kind/threadId/turnId/itemId/command — probed 2026-09-21);
+        // item-embedded shapes cover the replay/other variants.
         let title: String
-        if let item = params["item"] as? [String: Any] {
+        if let command = params["command"] as? String {
+            title = command
+        } else if let item = params["item"] as? [String: Any] {
             let command = (item["command"] as? [String: Any])?["command"] as? String
                 ?? (item["command"] as? String)
             let path = item["path"] as? String
@@ -1725,13 +1778,111 @@ final class CodexSession: AgentSessioning {
         var prompt = AgentPermissionPrompt.codexApproval(
             requestID: String(id), title: title)
         prompt.pendingCount = pendingApprovals.count
-        emit([.permissionRequested(prompt)])
+        pendingApprovalPrompts[id] = prompt
+        // Single-slot page: only the FRONT of the pending queue renders
+        // (a second push would REPLACE the visible card and strand it —
+        // the parallel-batch freeze). Retirement re-emits the next.
+        if pendingApprovals.first == id {
+            emit([.permissionRequested(prompt)])
+        }
     }
+
+    /// Stall watchdog: a remote pane stream can die SILENTLY (the
+    /// 2026-09-21 5090 freeze — server kept working, ring kept filling,
+    /// goty saw zero notifications for half an hour and the page froze
+    /// mid-turn). While working, no notification for 25s triggers a
+    /// liveness round-trip; no reply in 6s declares the transport dead
+    /// and rides the existing reconnect machinery. The same tick
+    /// re-pushes the front approval prompt — universal self-heal for a
+    /// page that reloaded or churned and lost the card.
+    private var lastNotificationAt = Date()
+    private var stallWatchTimer: Timer?
+
+    func startStallWatchdog() {
+        stallWatchTimer?.invalidate()
+        lastNotificationAt = Date()
+        stallWatchTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) {
+            [weak self] _ in
+            guard let self, self.isWorking else { return }
+            if !self.pendingApprovals.isEmpty {
+                self.repushPendingApprovals()
+            }
+            guard Date().timeIntervalSince(self.lastNotificationAt) > 25 else { return }
+            self.lastNotificationAt = Date()   // one probe per stall window
+            if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                print("CODEX stall suspected — probing liveness")
+            }
+            var answered = false
+            self.client.request("thread/list",
+                                ["archived": false, "limit": 1]) { _ in answered = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+                guard let self, !answered, self.isWorking else { return }
+                if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+                    print("CODEX stall confirmed — transport dead, reconnecting")
+                }
+                self.transportDisconnected()
+            }
+        }
+    }
+
+
 
     /// Server request ids awaiting our decision (requestApproval /
     /// requestUserInput). cancel() declines them all; responses and
     /// server-side resolutions retire entries.
     private var pendingApprovals: [Int] = []
+
+    /// The rendered prompt per pending id — the page can LOSE a rendered
+    /// card across link churn (rebuild/replay wipes it while codex still
+    /// waits; the 2026-09-21 ids 8/9 freeze: prompts delivered, page
+    /// churned, never re-shown). Every waitingOnApproval signal re-pushes
+    /// them; the page store upserts by requestID, so re-push is
+    /// idempotent.
+    private var pendingApprovalPrompts: [Int: AgentPermissionPrompt] = [:]
+
+    private func repushPendingApprovals() {
+        guard let first = pendingApprovals.first,
+              var prompt = pendingApprovalPrompts[first] else { return }
+        // The page holds ONE prompt slot (store.ts `permission` is a
+        // single value — a second push REPLACES the first, stranding it
+        // unanswerable: the parallel-batch freeze). Serialize: only the
+        // OLDEST pending approval is shown; answering it pops the queue
+        // (answerPermission / resolved retirement re-emit the next).
+        prompt.pendingCount = pendingApprovals.count
+        if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+            print("CODEX pushApproval id=\(first) remaining=\(pendingApprovals.count)")
+        }
+        emit([.permissionRequested(prompt)])
+    }
+
+    /// Server→client approval requests captured from the ring replay,
+    /// awaiting liveness confirmation before adoption. Keyed by request
+    /// id: replays repeat across attaches; each id adopts at most once.
+    private var replayedServerRequests: [Int: (method: String, params: [String: Any])] = [:]
+
+    private func bufferReplayedServerRequest(id: Int, method: String, params: [String: Any]) {
+        guard method.hasSuffix("requestApproval") || method.hasSuffix("requestUserInput"),
+              !pendingApprovals.contains(id),
+              replayedServerRequests[id] == nil else { return }
+        replayedServerRequests[id] = (method, params)
+    }
+
+    /// The live process still waits on approvals — every buffered replay
+    /// request is real (its ids belong to the CURRENT process) and rides
+    /// the normal prompt path. Dead-process phantoms never reach here:
+    /// nothing confirms them waiting.
+    private func adoptReplayedApprovals() {
+        guard !replayedServerRequests.isEmpty else { return }
+        let entries = replayedServerRequests
+        replayedServerRequests.removeAll()
+        if ProcessInfo.processInfo.environment["GOTY_CODEX_DEBUG"] != nil {
+            print("CODEX adoptReplayedApprovals ids=\(entries.keys.sorted())")
+        }
+        for id in entries.keys.sorted() {
+            let entry = entries[id]!
+            handleServerRequest(id: id, method: entry.method, params: entry.params)
+        }
+    }
 
     private func emit(_ events: [AgentSessionEvent]) {
         guard !events.isEmpty else { return }

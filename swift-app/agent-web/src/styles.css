@@ -147,11 +147,10 @@ body {
 .agent-markdown ul li::marker { color: var(--accent-bright); }
 .agent-markdown a:hover { text-decoration: underline; }
 /* ——— agent markdown (streamdown body + monocode hierarchy) ———
-   Body text at FULL content brightness (the Arthur "正文不够明显"
-   report: 78% → 88% → user asked brighter still); hierarchy now rides
-   on weight/size alone, thinking stays far dimmer at 48%. */
+   Body text at 94% content (the Arthur brightness pass: 78% → too
+   dim, 100% → indistinct from strong; 94% keeps a visible step). */
 .agent-markdown p, .agent-markdown li {
-  color: var(--color-content);
+  color: color-mix(in srgb, var(--color-content) 94%, transparent);
 }
 .agent-markdown p strong, .agent-markdown li strong,
 .agent-markdown p [data-streamdown="strong"],
@@ -1078,22 +1077,18 @@ body {
 }
 
 /* Tool identity: the 12px glyph is the strongest color signal a
-   transcript row can carry (beautifului's colored tool icons). */
+   transcript row can carry (beautifului's colored tool icons). The
+   kind vocabulary is the ACP-ish taxonomy ALL adapters normalize to
+   (ClaudeFrameMapper.toolKind / PiFrameMapper.toolKind / CodexFrame
+   literal kinds): execute|read|edit|search|agent|fetch|other. */
 .tool-kind { color: var(--fg-muted); transition: color 0.15s; }
-.tool-kind[data-kind="execute"], .tool-kind[data-kind="bash"],
-.tool-kind[data-kind="shell"], .tool-kind[data-kind="command"] { color: var(--vit-amber); }
-.tool-kind[data-kind="read"], .tool-kind[data-kind="grep"],
-.tool-kind[data-kind="glob"], .tool-kind[data-kind="list"],
-.tool-kind[data-kind="ls"] { color: var(--vit-blue); }
-.tool-kind[data-kind="edit"], .tool-kind[data-kind="write"],
-.tool-kind[data-kind="multiedit"], .tool-kind[data-kind="apply_patch"],
-.tool-kind[data-kind="patch"] { color: var(--vit-green); }
-.tool-kind[data-kind="search"], .tool-kind[data-kind="web_search"],
-.tool-kind[data-kind="webSearch"] { color: var(--vit-violet); }
-.tool-kind[data-kind="fetch"], .tool-kind[data-kind="web"],
-.tool-kind[data-kind="browser"] { color: var(--vit-cyan); }
-.tool-kind[data-kind="agent"], .tool-kind[data-kind="task"],
-.tool-kind[data-kind="subagent"] { color: var(--vit-rose); }
+.tool-kind[data-kind="execute"] { color: var(--vit-amber); }
+.tool-kind[data-kind="read"] { color: var(--vit-blue); }
+.tool-kind[data-kind="edit"] { color: var(--vit-green); }
+.tool-kind[data-kind="search"] { color: var(--vit-violet); }
+.tool-kind[data-kind="fetch"] { color: var(--vit-cyan); }
+.tool-kind[data-kind="agent"] { color: var(--vit-rose); }
+/* "other" (and nil) intentionally stays fg-muted — no identity, no hue. */
 .tool-head:hover .tool-kind { filter: brightness(1.15); }
 
 /* Status dots: age-old traffic-light semantics. */
