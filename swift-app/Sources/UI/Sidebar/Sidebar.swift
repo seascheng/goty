@@ -29,6 +29,8 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
     private let emphasized: Bool
     private var plusFlush: NSLayoutConstraint!
     private var plusShifted: NSLayoutConstraint!
+    /// Group marker bar — see the hierarchy comment in init.
+    private let tickBar = NSView()
     init(emphasized: Bool = false) {
         self.emphasized = emphasized
         super.init(frame: .zero)
@@ -74,6 +76,24 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         plusShifted = plusButton.trailingAnchor.constraint(
             equalTo: toggleButton.leadingAnchor, constant: -2)
         plusShifted.isActive = false
+
+        // Group tick (2026-09-21 hierarchy pass): a small rounded bar
+        // marks each space header — with the label pushed right of it,
+        // child rows sit at the OLD label column, so the header reads
+        // as a parent and the rows as its indented children instead of
+        // one flat top-to-bottom list.
+        tickBar.translatesAutoresizingMaskIntoConstraints = false
+        tickBar.wantsLayer = true
+        tickBar.layer?.cornerRadius = 1.5
+        addSubview(tickBar)
+        NSLayoutConstraint.activate([
+            tickBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            tickBar.centerYAnchor.constraint(equalTo: centerYAnchor),
+            tickBar.widthAnchor.constraint(equalToConstant: 3),
+            tickBar.heightAnchor.constraint(equalToConstant: 10),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor,
+                                           constant: SidebarRowView.iconLeading + 9),
+        ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
@@ -84,7 +104,7 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         lastExpanded = expanded
         label.attributedStringValue = NSAttributedString(string: text.uppercased(), attributes: [
             .font: NSFont.systemFont(ofSize: emphasized ? 11 : 10, weight: .semibold),
-            .foregroundColor: emphasized ? Chrome.theme.foreground : Chrome.theme.secondaryText,
+            .foregroundColor: emphasized ? Chrome.theme.foreground : Chrome.theme.sidebarText,
             .kern: emphasized ? 0.8 : 1.1,
         ])
         plusButton.isHidden = plus == nil
@@ -97,6 +117,12 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         plusFlush.isActive = toggle == nil
         plusShifted.isActive = toggle != nil
         toggleButton.symbol = expanded ? "chevron.down" : "chevron.right"
+        // Tick: structural marker, NOT color signal — muted lift of the
+        // sidebar text. Top-level headers (SERVERS/SPACES) are page
+        // titles, not groups — they render without a tick.
+        tickBar.isHidden = emphasized
+        tickBar.layer?.backgroundColor =
+            Chrome.theme.sidebarText.withAlphaComponent(0.38).cgColor
         if let count {
             countField.attributedStringValue = NSAttributedString(
                 string: String(count),
@@ -493,7 +519,7 @@ final class SidebarView: NSView {
                               keyEquivalent: "")
         term.target = self
         term.representedObject = dir
-        term.image = menuItemIcon("terminal", pointSize: 10)
+        term.applyIcon(menuItemIcon("terminal", pointSize: 10))
         menu.addItem(term)
         if isGit {
             let worktree = NSMenuItem(title: "New Worktree…",
@@ -501,7 +527,7 @@ final class SidebarView: NSView {
                                       keyEquivalent: "")
             worktree.target = self
             worktree.representedObject = dir
-            worktree.image = menuItemIcon("arrow.triangle.branch", pointSize: 10)
+            worktree.applyIcon(menuItemIcon("arrow.triangle.branch", pointSize: 10))
             menu.addItem(worktree)
         }
         menu.addItem(.separator())
@@ -514,7 +540,7 @@ final class SidebarView: NSView {
                                   keyEquivalent: "")
             item.target = self
             item.representedObject = [entry.key, dir ?? ""]
-            item.image = AgentBrandIcons.menuImage(for: entry.key)
+            item.applyIcon(AgentBrandIcons.menuImage(for: entry.key))
             menu.addItem(item)
         }
         return menu
@@ -949,9 +975,11 @@ final class SidebarView: NSView {
                     // recreating it is invisible. NEVER folds: a
                     // collapsed section keeps its distance from whatever
                     // is above it, so folding doesn't shift the layout
-                    // (the position-jump report).
+                    // (the position-jump report). 14pt (2026-09-21):
+                    // whitespace IS the group separator — at 6pt every
+                    // section read as one flat top-to-bottom list.
                     let gap = NSView()
-                    gap.heightAnchor.constraint(equalToConstant: 6).isActive = true
+                    gap.heightAnchor.constraint(equalToConstant: 14).isActive = true
                     desired.append(gap)
                 }
                 // The group's "+" opens the SAME add menu for every

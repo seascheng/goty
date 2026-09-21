@@ -30,6 +30,9 @@ final class SidebarRowView: NSView {
     private let badgeView = SpaceStatusView()
     /// Unselected row fill while a TUI status badge is up (status wash).
     private var statusRowWash: NSColor?
+    /// Full-saturation state color for the leading edge bar — the state
+    /// signal that survives selection and hover (vitality pass).
+    private var statusAccent: NSColor?
     /// The row's current meta line (branch name or agent label).
     var metaText: String { metaField.stringValue }
 
@@ -354,9 +357,11 @@ final class SidebarRowView: NSView {
         // carries the live signal now).
         if let git {
             metaField.stringValue = git.branch
+            metaField.textColor = Chrome.theme.gitBranchTint
             metaField.isHidden = false
         } else {
             metaField.stringValue = meta ?? ""
+            metaField.textColor = Chrome.theme.secondaryText
             metaField.isHidden = (meta ?? "").isEmpty
         }
         if let brandImage {
@@ -376,7 +381,7 @@ final class SidebarRowView: NSView {
         labelField.font = .systemFont(ofSize: 12, weight: selected ? .semibold : .regular)
         labelField.textColor = !rowEnabled
             ? Chrome.theme.secondaryText.withAlphaComponent(0.5)
-            : (selected ? Chrome.theme.foreground : Chrome.theme.secondaryText)
+            : (selected ? Chrome.theme.foreground : Chrome.theme.sidebarText)
         // Brand images stand alone (no accent disc underneath). A pure
         // monochrome glyph (mask) is tinted white for the dark sidebar;
         // colored marks keep their native palette untouched.
@@ -405,6 +410,7 @@ final class SidebarRowView: NSView {
         // trailing column keeps one consistent shape); a quiet row
         // with no known transition shows nothing at all.
         statusRowWash = nil
+        statusAccent = nil
         let quiet = status.map { $0.activity == .idle && $0.seen } ?? false
         let timeText = (quiet ? status?.at.map(Self.timeAgo) : nil) ?? nil
         if let status, status.activity != .unknown, !quiet {
@@ -414,11 +420,20 @@ final class SidebarRowView: NSView {
             badgeView.isHidden = closeRevealed
             dotView.isHidden = true
             avatarDot = nil
+            // WHOLE-ROW state color (2026-09-21 vitality pass): the
+            // wash is always on for live states — not just hover — and
+            // a leading edge bar carries the hue through selection.
+            // Unread-done rows get a soft green so completions pop.
             switch status.activity {
-            case .working: statusRowWash = SpaceStatusView.color(for: status)
-                .withAlphaComponent(0.10)
-            case .blocked: statusRowWash = SpaceStatusView.color(for: status)
-                .withAlphaComponent(0.12)
+            case .working: fallthrough
+            case .blocked, .error:
+                statusAccent = SpaceStatusView.color(for: status)
+                statusRowWash = statusAccent?.withAlphaComponent(
+                    status.activity == .working ? 0.16
+                    : status.activity == .blocked ? 0.18 : 0.10)
+            case .idle:
+                statusAccent = SpaceStatusView.color(for: status)
+                statusRowWash = statusAccent?.withAlphaComponent(0.10)
             default: break
             }
         } else if let timeText {
@@ -446,7 +461,7 @@ final class SidebarRowView: NSView {
                 dotView.isHidden = true
             }
         }
-        hoverColor = selected ? .clear : (statusRowWash ?? Chrome.theme.hoverFill)
+        hoverColor = selected ? .clear : Chrome.theme.hoverFill
         // State→style writes MUST invalidate: reused rows repaint only
         // when dirty, and hover events are not a substitute — clicking a
         // different tab deselected this row inside configure while its
@@ -459,6 +474,16 @@ final class SidebarRowView: NSView {
     var selectionPaintedForTest: Bool { pillColor != .clear }
 
     override func draw(_ dirtyRect: NSRect) {
+        // WHOLE-ROW state wash first: live rows carry their tint at all
+        // times; hover and selection stack above it. Selected rows keep
+        // the pill only — the leading edge bar below still names the
+        // state, so selection never hides "is this one running?".
+        if let wash = statusRowWash, pillColor == .clear {
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 1.5, dy: 1.5),
+                         xRadius: 8, yRadius: 8).setClip()
+            wash.setFill()
+            bounds.fill()
+        }
         let fill = pillColor != .clear
             ? pillColor
             : (isHovered ? hoverColor : .clear)
@@ -467,6 +492,15 @@ final class SidebarRowView: NSView {
                          xRadius: 8, yRadius: 8).setClip()
             fill.setFill()
             bounds.fill()
+        }
+        if let accent = statusAccent {
+            // Leading edge bar: 3pt of full-saturation state color at
+            // the row's left edge — the design twin of the group tick,
+            // visible through hover AND selection.
+            let bar = NSRect(x: bounds.minX + 2, y: bounds.minY + 4,
+                             width: 3, height: bounds.height - 8)
+            accent.setFill()
+            NSBezierPath(roundedRect: bar, xRadius: 1.5, yRadius: 1.5).fill()
         }
         guard let avatarColor else { return }
         // Brand disc under the glyph; near-black brands get a hairline so

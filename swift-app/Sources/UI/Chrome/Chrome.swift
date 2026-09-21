@@ -225,6 +225,14 @@ struct ChromeTheme: Equatable {
         lift(background, toward: foreground, ratio: 4.5, from: 0.62)
     }
 
+    /// Sidebar text — titles and tab rows are PRIMARY navigation (the
+    /// "sidebar titles/tabs not bright enough" report on Arthur), one
+    /// step above secondaryText's muted chrome step. Same WCAG floor:
+    /// only ever brighter, never below readable.
+    var sidebarText: NSColor {
+        lift(background, toward: foreground, ratio: 4.5, from: 0.78)
+    }
+
     /// Quietest solid step (row counts, footnotes) — same rule at
     /// 3.5:1 (small but non-essential text).
     var tertiaryText: NSColor {
@@ -330,6 +338,11 @@ struct ChromeTheme: Equatable {
     var wsConnected: NSColor { NSColor(hex: "#22C55E") ?? .systemGreen }
     var wsConnecting: NSColor { NSColor(hex: "#F59E0B") ?? .systemOrange }
     var wsDisconnected: NSColor { NSColor(hex: "#EF4444") ?? .systemRed }
+    /// Git branch line in sidebar rows — the one meta that repeats on
+    /// nearly every row: a mid-saturation green (matches the web pane's
+    /// --vit-green family) so the list reads alive without shouting.
+    /// Readable on both light and dark hosts.
+    var gitBranchTint: NSColor { NSColor(hex: "#5BBF87") ?? .systemGreen }
     /// Destructive fill — THE red the Dialog card already uses,
     /// extracted so every control shares it (one source, ghostty-
     /// themed app: no second palette).
@@ -351,15 +364,19 @@ struct ChromeTheme: Equatable {
     }
 
     var selectionPill: NSColor {
-        // Solid blend, not an alpha wash: the pill must read over the
-        // sidebar surface whatever the window composites behind it.
-        // TRANSLUCENT: overlay form instead (see hoverFill) — a solid
-        // pill reads as an opaque patch, stacking kills the translucency.
+        // Vitality pass (2026-09-21): the old neutral white/black wash
+        // left every list — sidebar, tabs, settings, files — feeling
+        // gray. The SYSTEM ACCENT is the Mac-correct hue for "selected"
+        // (source lists have used it since forever); a whisper alpha
+        // keeps row text dominant and honors the user's own accent
+        // choice in System Settings. hoverFill stays neutral, so the
+        // selected row still reads one step above hover.
+        // TRANSLUCENT: overlay form (see hoverFill) — a solid pill
+        // reads as an opaque patch, stacking kills the translucency.
         if backgroundOpacity < 0.999 {
-            return isDark ? NSColor.white.withAlphaComponent(0.16)
-                          : NSColor.black.withAlphaComponent(0.11)
+            return NSColor.controlAccentColor.withAlphaComponent(isDark ? 0.26 : 0.18)
         }
-        return blend(background, with: foreground, fraction: isDark ? 0.16 : 0.12)
+        return NSColor.controlAccentColor.withAlphaComponent(isDark ? 0.30 : 0.20)
     }
     var lineHighlight: NSColor {
         if backgroundOpacity < 0.999 {
