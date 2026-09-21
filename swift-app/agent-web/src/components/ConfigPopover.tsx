@@ -110,14 +110,15 @@ export function ConfigPopover({ anchor, option, onDismiss, onPick }: {
           return (
             <div key={o.value} ref={highlighted ? activeRow : undefined}
               onMouseEnter={() => setActive(index)}
-              className={"flex w-full items-center gap-1 rounded-lg px-1"
-                + (highlighted || selected ? " bg-content/10" : " hover:bg-content/5")}>
+              className={"pop-row"
+                + (selected ? " cur" : "")
+                + (highlighted && !selected ? " hot" : "")}>
               <button role="option" aria-selected={selected}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => onPick(o.value)}
                 className="flex min-w-0 flex-1 items-center gap-2 px-1.5 py-1.5 text-left text-content">
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[12.5px] font-medium leading-5">{o.name}</span>
+                  <span className={"block truncate text-[12.5px] font-medium leading-5" + (selected ? " text-accent" : "")}>{o.name}</span>
                   {o.source && (
                     <span className="mt-0.5 block truncate text-[11px] leading-4 text-content/50">{o.source}</span>
                   )}

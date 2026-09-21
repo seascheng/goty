@@ -498,8 +498,13 @@ function ConfigChip({ option, icon, open, onToggle, onPick }: {
   const wrap = useRef<HTMLSpanElement>(null);
   return (
     <span ref={wrap} className="chip-wrap">
-      <button className={"chip" + (open ? " open" : "")} onClick={onToggle}
-        onMouseDown={(e) => e.preventDefault()} title={option.name}>
+      {/* WKWebView: mousedown-preventDefault + click-synth drops the
+          FIRST click on the chip (the open-then-second-click report).
+          Open on pointerDOWN — immediate on every engine — and let the
+          Popover's own anchor-contains rule ignore this same press. */}
+      <button className={"chip" + (open ? " open" : "")}
+        onPointerDown={(e) => { e.preventDefault(); onToggle(); }}
+        title={option.name}>
         {icon}
         <span className="chip-value">{current?.name ?? option.currentValue ?? "—"}</span>
         <span className="chip-caret">▾</span>

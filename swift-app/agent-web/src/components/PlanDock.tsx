@@ -25,7 +25,7 @@ export function PlanPanel({ entries }: { entries: PlanEntry[] }) {
     else phases.push({ name: e.priority ?? null, items: [e] });
   }
   return (
-    <div className={"dock-plan" + (open ? "" : " folded")}>
+    <div className={"dock-plan card" + (open ? "" : " folded")}>
       <button className="dock-head"
         onClick={() => store.togglePlanDock()}
         title={open ? "收起计划面板" : "展开计划面板"}>

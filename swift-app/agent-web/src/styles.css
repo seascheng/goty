@@ -1253,3 +1253,55 @@ textarea { caret-color: var(--accent-bright); }
 }
 .code-nums span { font-variant-numeric: tabular-nums; }
 .code-block pre code { flex: 1; padding-left: 12px; }
+
+/* ── popover + slash + plan card unification (prompt-bar pass) ── */
+
+/* Config rows: SELECTED (current value) is unmistakable — accent rail,
+   tinted fill, accent text. Hover/keyboard highlight stays quiet. */
+.pop-row {
+  display: flex; width: 100%; align-items: center; gap: 4px;
+  padding: 0 4px; margin: 1px 0; border-radius: 9px;
+  border-left: 2px solid transparent;
+}
+.pop-row.hot { background: color-mix(in srgb, var(--foreground) 5%, transparent); }
+.pop-row.cur {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-left-color: var(--accent-bright);
+}
+
+/* /command and @file popovers: the same card language as the config
+   knobs (08 prompt bar: one popover system, not three). */
+.slash-pop {
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--foreground) 14%, transparent);
+  background: color-mix(in srgb, var(--surface0) 92%, var(--foreground));
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.45);
+  padding: 6px;
+}
+.slash-opt {
+  border-radius: 9px; padding: 6px 10px;
+  border-left: 2px solid transparent;
+}
+.slash-opt.cur {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-left-color: var(--accent-bright);
+}
+
+/* Plan card: same floating-card language as the approval card. */
+.dock-plan.card {
+  margin: 0 16px 6px;
+  background: color-mix(in srgb, var(--surface0) 88%, var(--foreground));
+  border: 1px solid color-mix(in srgb, var(--foreground) 12%, transparent);
+  border-radius: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+.dock-plan.card .dock-head { padding: 7px 14px; }
+.dock-plan.card .plan-clip .plan-body { padding: 0 10px 8px; }
+.dock-plan.card .plan-phase-name { padding: 0 6px; }
+.dock-plan.card .plan-row { padding: 2px 6px; }
+.plan-progress {
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent-bright); border-radius: 999px;
+  padding: 0 8px; font-size: 10.5px;
+}
