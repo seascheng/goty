@@ -420,20 +420,21 @@ final class SidebarRowView: NSView {
             badgeView.isHidden = closeRevealed
             dotView.isHidden = true
             avatarDot = nil
-            // WHOLE-ROW state color (2026-09-21 vitality pass): the
-            // wash is always on for live states — not just hover — and
-            // a leading edge bar carries the hue through selection.
-            // Unread-done rows get a soft green so completions pop.
+            // WHOLE-ROW state color (2026-09-21 vitality pass) — TONED
+            // DOWN after live review ("太明显了，很突兀"): the wash is a
+            // TINT of the surface, not a state-colored skin. Whisper
+            // alphas; the edge bar carries the hue, the wash only warms
+            // the row.
             switch status.activity {
             case .working: fallthrough
             case .blocked, .error:
                 statusAccent = SpaceStatusView.color(for: status)
                 statusRowWash = statusAccent?.withAlphaComponent(
-                    status.activity == .working ? 0.16
-                    : status.activity == .blocked ? 0.18 : 0.10)
+                    status.activity == .working ? 0.08
+                    : status.activity == .blocked ? 0.10 : 0.06)
             case .idle:
                 statusAccent = SpaceStatusView.color(for: status)
-                statusRowWash = statusAccent?.withAlphaComponent(0.10)
+                statusRowWash = statusAccent?.withAlphaComponent(0.05)
             default: break
             }
         } else if let timeText {
@@ -493,14 +494,15 @@ final class SidebarRowView: NSView {
             fill.setFill()
             bounds.fill()
         }
-        if let accent = statusAccent {
-            // Leading edge bar: 3pt of full-saturation state color at
-            // the row's left edge — the design twin of the group tick,
-            // visible through hover AND selection.
+        if var accent = statusAccent {
+            // Leading edge bar: 2.5pt of state color at the row's left
+            // edge — the design twin of the group tick. Slightly dimmed
+            // (0.9) so it leads without glowing.
+            accent = accent.withAlphaComponent(0.9)
             let bar = NSRect(x: bounds.minX + 2, y: bounds.minY + 4,
-                             width: 3, height: bounds.height - 8)
+                             width: 2.5, height: bounds.height - 8)
             accent.setFill()
-            NSBezierPath(roundedRect: bar, xRadius: 1.5, yRadius: 1.5).fill()
+            NSBezierPath(roundedRect: bar, xRadius: 1.25, yRadius: 1.25).fill()
         }
         guard let avatarColor else { return }
         // Brand disc under the glyph; near-black brands get a hairline so
