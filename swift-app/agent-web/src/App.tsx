@@ -389,7 +389,7 @@ function JobsLine({ jobs }: { jobs: { id: string; kind: string;
     return () => clearInterval(t);
   }, []);
   return (
-    <div className="dock-jobs">
+    <div className="dock-jobs card">
       {jobs.map((job) => (
         <div key={job.id} className="job-row" title={job.label}>
           <span className="job-glyph">⏳</span>
@@ -414,7 +414,7 @@ function SubagentLine({ rows }: { rows: { id: string; state?: string | null;
     !(r.state ?? "").match(/exit|done|fail|released|complete|abort/i));
   if (live.length === 0) return null;
   return (
-    <div className="dock-agents">
+    <div className="dock-agents card">
       {live.map((r) => (
         <span key={r.id} className="agent-chip"
           title={r.detail ?? r.id}>
