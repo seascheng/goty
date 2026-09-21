@@ -1,5 +1,6 @@
 // goty — see CLAUDE.md for the working principles.
 import AppKit
+import QuartzCore
 
 // MARK: - Sidebar (Ghostty-style unified chrome)
 
@@ -31,6 +32,29 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
     private var plusShifted: NSLayoutConstraint!
     /// Group marker bar — see the hierarchy comment in init.
     private let tickBar = NSView()
+    /// Group panel role (spaces pass): .head rounds the VISUAL top of
+    /// the group's slab (member rows continue it), .single rounds all
+    /// four corners (folded sections), .bare = top-level titles.
+    enum HeaderRole { case bare, head, single }
+    var headerRole: HeaderRole = .bare {
+        didSet { applyHeaderRole() }
+    }
+    private func applyHeaderRole() {
+        wantsLayer = true
+        guard headerRole != .bare else {
+            layer?.backgroundColor = nil
+            return
+        }
+        layer?.cornerRadius = 8
+        // Raw CACornerMask bits — the build's custom module map hides
+        // the Swift member names (kCALayerMaxXMinYCorner = 1<<1 …):
+        // bit2|bit3 = the two MaxY corners = the VISUAL top (AppKit
+        // layer geometry is bottom-anchored).
+        layer?.maskedCorners = headerRole == .head
+            ? CACornerMask(rawValue: 12)
+            : CACornerMask(rawValue: 15)
+        layer?.backgroundColor = Chrome.theme.groupPanel.cgColor
+    }
     init(emphasized: Bool = false) {
         self.emphasized = emphasized
         super.init(frame: .zero)
@@ -123,6 +147,7 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         tickBar.isHidden = emphasized
         tickBar.layer?.backgroundColor =
             Chrome.theme.sidebarText.withAlphaComponent(0.38).cgColor
+        applyHeaderRole()
         if let count {
             countField.attributedStringValue = NSAttributedString(
                 string: String(count),
@@ -1011,11 +1036,17 @@ final class SidebarView: NSView {
                    expanded: !spaceFolds.contains(foldKey))
                 nextHeaders[name] = header
                 nextFoldHeaders[foldKey] = header
+                // Folded: the header IS the whole panel — round all four
+                // corners until the section expands again.
+                header.headerRole = spaceFolds.contains(foldKey) ? .single : .head
                 desired.append(header)
             }
-            for idx in section.tabIndexs {
+            let sectionCount = section.tabIndexs.count
+            for (position, idx) in section.tabIndexs.enumerated() {
                 let row = renderTabRow(workspace.tabs[idx], idx: idx, foldKey: foldKey,
                                        stack: tabsStack)
+                row.groupRole = sectionCount == 1 ? .single
+                    : (position == 0 ? .mid : position == sectionCount - 1 ? .tail : .mid)
                 sectionViews.append(row)
             }
             if let name = section.name {

@@ -343,6 +343,18 @@ struct ChromeTheme: Equatable {
     /// --vit-green family) so the list reads alive without shouting.
     /// Readable on both light and dark hosts.
     var gitBranchTint: NSColor { NSColor(hex: "#5BBF87") ?? .systemGreen }
+    /// Group panel slab (2026-09-21 spaces pass): each space section
+    /// (header + its rows) sits on ONE continuous panel — the clearest
+    /// possible "these rows belong together" short of drawing boxes
+    /// around them. One step above the sidebar surface; a 14pt gap of
+    /// raw background separates panels.
+    var groupPanel: NSColor {
+        if backgroundOpacity < 0.999 {
+            return isDark ? NSColor.white.withAlphaComponent(0.05)
+                          : NSColor.black.withAlphaComponent(0.035)
+        }
+        return blend(background, with: foreground, fraction: isDark ? 0.055 : 0.04)
+    }
     /// Destructive fill — THE red the Dialog card already uses,
     /// extracted so every control shares it (one source, ghostty-
     /// themed app: no second palette).

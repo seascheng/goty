@@ -30,9 +30,32 @@ final class SidebarRowView: NSView {
     private let badgeView = SpaceStatusView()
     /// Unselected row fill while a TUI status badge is up (status wash).
     private var statusRowWash: NSColor?
-    /// Full-saturation state color for the leading edge bar — the state
-    /// signal that survives selection and hover (vitality pass).
-    private var statusAccent: NSColor?
+    /// Position inside the group panel (spaces pass): head/mid/tail rows
+    /// paint the continuous group slab with only the outer corners
+    /// rounded (head = top, tail = bottom); free rows (.none) stay bare.
+    enum GroupRole { case none, head, mid, tail, single }
+    var groupRole: GroupRole = .none {
+        didSet { applyGroupRole() }
+    }
+    private func applyGroupRole() {
+        wantsLayer = true
+        guard groupRole != .none else {
+            layer?.backgroundColor = nil
+            layer?.maskedCorners = CACornerMask(rawValue: 15)
+            return
+        }
+        layer?.cornerRadius = 8
+        // Raw CACornerMask bits (see SectionHeaderView): the custom
+        // module map hides the Swift member names. Visual TOP = MaxY
+        // bits (4|8 = 12); BOTTOM = MinY bits (1|2 = 3).
+        switch groupRole {
+        case .head: layer?.maskedCorners = CACornerMask(rawValue: 12)
+        case .tail: layer?.maskedCorners = CACornerMask(rawValue: 3)
+        case .single: layer?.maskedCorners = CACornerMask(rawValue: 15)
+        case .mid, .none: layer?.maskedCorners = CACornerMask(rawValue: 0)
+        }
+        layer?.backgroundColor = Chrome.theme.groupPanel.cgColor
+    }
     /// The row's current meta line (branch name or agent label).
     var metaText: String { metaField.stringValue }
 
@@ -410,33 +433,32 @@ final class SidebarRowView: NSView {
         // trailing column keeps one consistent shape); a quiet row
         // with no known transition shows nothing at all.
         statusRowWash = nil
-        statusAccent = nil
         let quiet = status.map { $0.activity == .idle && $0.seen } ?? false
         let timeText = (quiet ? status?.at.map(Self.timeAgo) : nil) ?? nil
-        if let status, status.activity != .unknown, !quiet {
+        // RULE (2026-09-21): if the row shows the trailing status badge
+        // — icon OR quiet time pill — the whole row carries the state
+        // tint. No more some-colored-some-not: the wash is the state
+        // signal, toned to a whisper (working 8% / blocked 10% / error
+        // 6% / unread-done 5% / quiet-seen 4%).
+        if !quiet, let status, status.activity != .unknown {
+            let tint = SpaceStatusView.color(for: status)
+            statusRowWash = tint.withAlphaComponent(
+                status.activity == .working ? 0.08
+                : status.activity == .blocked ? 0.10
+                : status.activity == .error ? 0.06 : 0.05)
+        } else if let timeText, let status {
+            statusRowWash = SpaceStatusView.color(for: status)
+                .withAlphaComponent(0.04)
+        } else {
+            statusRowWash = nil
+        }
+        if !quiet, let status, status.activity != .unknown {
             badgeView.quietTime = nil
             badgeView.status = status
             badgeUp = true
             badgeView.isHidden = closeRevealed
             dotView.isHidden = true
             avatarDot = nil
-            // WHOLE-ROW state color (2026-09-21 vitality pass) — TONED
-            // DOWN after live review ("太明显了，很突兀"): the wash is a
-            // TINT of the surface, not a state-colored skin. Whisper
-            // alphas; the edge bar carries the hue, the wash only warms
-            // the row.
-            switch status.activity {
-            case .working: fallthrough
-            case .blocked, .error:
-                statusAccent = SpaceStatusView.color(for: status)
-                statusRowWash = statusAccent?.withAlphaComponent(
-                    status.activity == .working ? 0.08
-                    : status.activity == .blocked ? 0.10 : 0.06)
-            case .idle:
-                statusAccent = SpaceStatusView.color(for: status)
-                statusRowWash = statusAccent?.withAlphaComponent(0.05)
-            default: break
-            }
         } else if let timeText {
             badgeView.status = status
             badgeView.quietTime = timeText
@@ -476,9 +498,7 @@ final class SidebarRowView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         // WHOLE-ROW state wash first: live rows carry their tint at all
-        // times; hover and selection stack above it. Selected rows keep
-        // the pill only — the leading edge bar below still names the
-        // state, so selection never hides "is this one running?".
+        // times; hover and selection stack above it.
         if let wash = statusRowWash, pillColor == .clear {
             NSBezierPath(roundedRect: bounds.insetBy(dx: 1.5, dy: 1.5),
                          xRadius: 8, yRadius: 8).setClip()
@@ -493,16 +513,6 @@ final class SidebarRowView: NSView {
                          xRadius: 8, yRadius: 8).setClip()
             fill.setFill()
             bounds.fill()
-        }
-        if var accent = statusAccent {
-            // Leading edge bar: 2.5pt of state color at the row's left
-            // edge — the design twin of the group tick. Slightly dimmed
-            // (0.9) so it leads without glowing.
-            accent = accent.withAlphaComponent(0.9)
-            let bar = NSRect(x: bounds.minX + 2, y: bounds.minY + 4,
-                             width: 2.5, height: bounds.height - 8)
-            accent.setFill()
-            NSBezierPath(roundedRect: bar, xRadius: 1.25, yRadius: 1.25).fill()
         }
         guard let avatarColor else { return }
         // Brand disc under the glyph; near-black brands get a hairline so
