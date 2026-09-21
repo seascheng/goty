@@ -32,29 +32,6 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
     private var plusShifted: NSLayoutConstraint!
     /// Group marker bar — see the hierarchy comment in init.
     private let tickBar = NSView()
-    /// Group panel role (spaces pass): .head rounds the VISUAL top of
-    /// the group's slab (member rows continue it), .single rounds all
-    /// four corners (folded sections), .bare = top-level titles.
-    enum HeaderRole { case bare, head, single }
-    var headerRole: HeaderRole = .bare {
-        didSet { applyHeaderRole() }
-    }
-    private func applyHeaderRole() {
-        wantsLayer = true
-        guard headerRole != .bare else {
-            layer?.backgroundColor = nil
-            return
-        }
-        layer?.cornerRadius = 8
-        // Raw CACornerMask bits — the build's custom module map hides
-        // the Swift member names (kCALayerMaxXMinYCorner = 1<<1 …):
-        // bit2|bit3 = the two MaxY corners = the VISUAL top (AppKit
-        // layer geometry is bottom-anchored).
-        layer?.maskedCorners = headerRole == .head
-            ? CACornerMask(rawValue: 12)
-            : CACornerMask(rawValue: 15)
-        layer?.backgroundColor = Chrome.theme.groupPanel.cgColor
-    }
     init(emphasized: Bool = false) {
         self.emphasized = emphasized
         super.init(frame: .zero)
@@ -147,7 +124,6 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         tickBar.isHidden = emphasized
         tickBar.layer?.backgroundColor =
             Chrome.theme.sidebarText.withAlphaComponent(0.38).cgColor
-        applyHeaderRole()
         if let count {
             countField.attributedStringValue = NSAttributedString(
                 string: String(count),
@@ -188,6 +164,24 @@ func sectionHeader(_ text: String, plus: ((NSView) -> Void)? = nil, count: Int? 
     let v = SectionHeaderView(emphasized: emphasized)
     v.configure(text: text, plus: plus, count: count, toggle: toggle, expanded: expanded)
     return v
+}
+
+/// Inter-section separator: a hairline centered in whitespace. The
+/// surface stays CONTINUOUS — groups divide by rhythm (space + line),
+/// never by slicing the list into slabs.
+final class SectionGapView: NSView, ThemeRefreshable {
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 17).isActive = true
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder: not implemented") }
+    override func draw(_ dirtyRect: NSRect) {
+        Chrome.theme.hairline.setFill()
+        NSRect(x: bounds.minX + 12, y: bounds.midY.rounded(.down),
+               width: max(0, bounds.width - 24), height: 1).fill()
+    }
+    func retheme() { needsDisplay = true }
 }
 
 final class WidthHandle: NSView {
@@ -996,15 +990,13 @@ final class SidebarView: NSView {
             let foldKey = section.name != nil ? (dir ?? section.name!) : nil
             if let name = section.name, let foldKey {
                 if !desired.isEmpty {
-                    // Plain spacing tile — no identity, no interaction;
-                    // recreating it is invisible. NEVER folds: a
-                    // collapsed section keeps its distance from whatever
-                    // is above it, so folding doesn't shift the layout
-                    // (the position-jump report). 14pt (2026-09-21):
-                    // whitespace IS the group separator — at 6pt every
-                    // section read as one flat top-to-bottom list.
-                    let gap = NSView()
-                    gap.heightAnchor.constraint(equalToConstant: 14).isActive = true
+                    // Section separator (2026-09-21, second take): the
+                    // group-PANEL experiment read as 碎片感 — floating
+                    // islands, not groups. Back to ONE continuous
+                    // surface: a hairline centered in generous
+                    // whitespace divides the sections the way
+                    // Mail/Notes do, without slicing the list apart.
+                    let gap = SectionGapView()
                     desired.append(gap)
                 }
                 // The group's "+" opens the SAME add menu for every
@@ -1036,17 +1028,11 @@ final class SidebarView: NSView {
                    expanded: !spaceFolds.contains(foldKey))
                 nextHeaders[name] = header
                 nextFoldHeaders[foldKey] = header
-                // Folded: the header IS the whole panel — round all four
-                // corners until the section expands again.
-                header.headerRole = spaceFolds.contains(foldKey) ? .single : .head
                 desired.append(header)
             }
-            let sectionCount = section.tabIndexs.count
-            for (position, idx) in section.tabIndexs.enumerated() {
+            for idx in section.tabIndexs {
                 let row = renderTabRow(workspace.tabs[idx], idx: idx, foldKey: foldKey,
                                        stack: tabsStack)
-                row.groupRole = sectionCount == 1 ? .single
-                    : (position == 0 ? .mid : position == sectionCount - 1 ? .tail : .mid)
                 sectionViews.append(row)
             }
             if let name = section.name {

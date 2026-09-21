@@ -30,32 +30,6 @@ final class SidebarRowView: NSView {
     private let badgeView = SpaceStatusView()
     /// Unselected row fill while a TUI status badge is up (status wash).
     private var statusRowWash: NSColor?
-    /// Position inside the group panel (spaces pass): head/mid/tail rows
-    /// paint the continuous group slab with only the outer corners
-    /// rounded (head = top, tail = bottom); free rows (.none) stay bare.
-    enum GroupRole { case none, head, mid, tail, single }
-    var groupRole: GroupRole = .none {
-        didSet { applyGroupRole() }
-    }
-    private func applyGroupRole() {
-        wantsLayer = true
-        guard groupRole != .none else {
-            layer?.backgroundColor = nil
-            layer?.maskedCorners = CACornerMask(rawValue: 15)
-            return
-        }
-        layer?.cornerRadius = 8
-        // Raw CACornerMask bits (see SectionHeaderView): the custom
-        // module map hides the Swift member names. Visual TOP = MaxY
-        // bits (4|8 = 12); BOTTOM = MinY bits (1|2 = 3).
-        switch groupRole {
-        case .head: layer?.maskedCorners = CACornerMask(rawValue: 12)
-        case .tail: layer?.maskedCorners = CACornerMask(rawValue: 3)
-        case .single: layer?.maskedCorners = CACornerMask(rawValue: 15)
-        case .mid, .none: layer?.maskedCorners = CACornerMask(rawValue: 0)
-        }
-        layer?.backgroundColor = Chrome.theme.groupPanel.cgColor
-    }
     /// The row's current meta line (branch name or agent label).
     var metaText: String { metaField.stringValue }
 
