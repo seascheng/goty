@@ -9,9 +9,11 @@ extension AgentBrandIcons {
     /// for the agent webview: mask brands render in the given tint
     /// (Chrome.theme.iconTint — the sidebar's exact recipe), palette
     /// brands stay native. Theme flips re-push a fresh tint.
+    /// The agent webview's pane-head icon: MONO source (template/
+    /// tinted) — the color marks live in the sidebar only.
     static func tintedDataURL(for kind: String?, color: NSColor,
                               px: CGFloat = 36) -> String? {
-        guard let image = image(for: kind) else { return nil }
+        guard let image = monoImage(for: kind) else { return nil }
         let tinted = NSImage(size: NSSize(width: px, height: px))
         tinted.lockFocus()
         let rect = NSRect(x: 0, y: 0, width: px, height: px)
@@ -34,7 +36,7 @@ extension AgentBrandIcons {
     /// same menu. The 18pt image stays the sidebar-row size.
     /// (Lives here, not in the GENERATED AgentIcons.swift.)
     static func menuImage(for kind: String?) -> NSImage? {
-        guard let image = image(for: kind) else { return nil }
+        guard let image = monoImage(for: kind) else { return nil }
         let small = image.copy() as! NSImage
         small.size = NSSize(width: 11, height: 11)
         return small

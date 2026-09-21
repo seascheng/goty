@@ -20,6 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "Assets" / "AgentIcons"
+MONO_ASSETS = ROOT / "Assets" / "AgentIconsMono"
 TARGET = ROOT / "Sources" / "UI" / "Agents" / "AgentIcons.swift"
 
 def is_monochrome(png: Path) -> bool:
@@ -58,18 +59,34 @@ def main() -> None:
         if kind not in masks and is_monochrome(png):
             masks.add(kind)
 
-    rows = []
-    for kind in sorted(kinds):
-        scales = kinds[kind]
-        missing = [s for s in (2, 3, 4) if s not in scales]
-        if missing:
-            raise SystemExit(f"{kind}: missing {missing}x scales")
-        inner = ", ".join(f'{sc}: "{scales[sc]}"' for sc in (2, 3, 4))
-        rows.append(f'        "{kind}": [{inner}],')
-    if not rows:
+    # Mono table (AgentIconsMono): the pre-vitality black-silhouette
+    # set, kept for every NON-sidebar surface — tab strip, menus, the
+    # web pane-head tinted icon — which all render the old way
+    # (template/tinted), per user preference.
+    mono_kinds: dict[str, dict[int, str]] = {}
+    for png in sorted(MONO_ASSETS.glob("*.png")):
+        stem = png.stem
+        kind, _, scale = stem.rpartition("@")
+        if not scale.endswith("x"):
+            raise SystemExit(f"unrecognized asset name: {png.name}")
+        mono_kinds.setdefault(kind, {})[int(scale[:-1])] = base64.b64encode(png.read_bytes()).decode()
+
+    def emit(table: dict[str, dict[int, str]]) -> str:
+        rows = []
+        for kind in sorted(table):
+            scales = table[kind]
+            missing = [s for s in (2, 3, 4) if s not in scales]
+            if missing:
+                raise SystemExit(f"{kind}: missing {missing}x scales")
+            inner = ", ".join(f'{sc}: "{scales[sc]}"' for sc in (2, 3, 4))
+            rows.append(f'        "{kind}": [{inner}],')
+        return "\n".join(rows)
+
+    if not kinds:
         raise SystemExit(f"no assets found in {ASSETS}")
 
-    table = "\n".join(rows)
+    table = emit(kinds)
+    mono_table = emit(mono_kinds)
     mask_list = ", ".join(f'"{k}"' for k in sorted(masks))
     swift = f'''import AppKit
 
@@ -77,8 +94,16 @@ def main() -> None:
 /// Regenerate: python3 tools/gen_agent_icons.py (or just build).
 
 enum AgentBrandIcons {{
+    /// COLOR marks (official logos) — the SIDEBAR ROW surface only.
     static let pngs: [String: [Int: String]] = [
 {table}
+    ]
+
+    /// The legacy black-silhouette set: every surface EXCEPT sidebar
+    /// rows (tab strip, menus, the web pane-head icon) renders the old
+    /// way, per user preference.
+    static let monoPngs: [String: [Int: String]] = [
+{mono_table}
     ]
 
     /// Brands whose glyph is a pure monochrome mask (black lines +
@@ -101,10 +126,25 @@ enum AgentBrandIcons {{
         image.isTemplate = maskKinds.contains(key)
         return image
     }}
+
+    /// The mono/tintable variant — tab strip, menus, web pane head.
+    static func monoImage(for kind: String?) -> NSImage? {{
+        guard let key = kind?.lowercased(), !key.isEmpty,
+              let scales = monoPngs[key] else {{ return nil }}
+        let image = NSImage(size: NSSize(width: 18, height: 18))
+        for (_, b64) in scales.sorted(by: {{ $0.key < $1.key }}) {{
+            guard let data = Data(base64Encoded: b64),
+                  let rep = NSBitmapImageRep(data: data) else {{ continue }}
+            rep.size = NSSize(width: 18, height: 18)
+            image.addRepresentation(rep)
+        }}
+        image.isTemplate = true
+        return image
+    }}
 }}
 '''
     TARGET.write_text(swift)
-    print(f"AgentIcons.swift: {len(kinds)} brands "
+    print(f"AgentIcons.swift: {len(kinds)} color + {len(mono_kinds)} mono brands "
           f"({len(masks)} tintable masks), {sum(len(s) for s in kinds.values())} scales")
 
 

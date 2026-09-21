@@ -113,8 +113,8 @@ final class TabStripView: NSView {
         let term = NSMenuItem(title: "新建终端", action: #selector(plusTerminalAction(_:)),
                               keyEquivalent: "")
         term.target = self
-        term.image = NSImage(systemSymbolName: "terminal",
-                             accessibilityDescription: nil)
+        term.applyIcon(NSImage(systemSymbolName: "terminal",
+                               accessibilityDescription: nil))
         menu.addItem(term)
         menu.addItem(.separator())
         let available = agentAvailable ?? { key in
@@ -126,7 +126,7 @@ final class TabStripView: NSView {
                                   keyEquivalent: "")
             item.target = self
             item.representedObject = entry.key
-            item.image = AgentBrandIcons.menuImage(for: entry.key)
+            item.applyIcon(AgentBrandIcons.menuImage(for: entry.key))
             menu.addItem(item)
         }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.maxY + 4),
@@ -174,9 +174,11 @@ final class TabStripView: NSView {
             let spec = AgentCatalog.spec(for: command)
             let running = AgentCatalog.isAgent(command)
             // Official logo glyph when we have one; a custom user icon
-            // wins over everything (the sidebar row's rule).
+            // wins over everything (the sidebar row's rule). The tab
+            // strip renders the MONO set — the color marks live in the
+            // sidebar only (user preference).
             let brand = (tab.icon == nil && running)
-                ? AgentBrandIcons.image(for: AgentCatalog.manifestKey(for: command))
+                ? AgentBrandIcons.monoImage(for: AgentCatalog.manifestKey(for: command))
                 : nil
             let title = titleFor?(tab)
             let display = tab.userTitle ?? tab.agentTitle ?? spec?.label ?? title ?? tab.name
