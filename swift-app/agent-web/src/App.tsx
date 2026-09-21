@@ -1,9 +1,15 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Streamdown } from "streamdown";
-import rehypeHighlight from "rehype-highlight";
 import { store, fmtTokens, type Block, type ConfigChoice, type PlanEntry, type ToolCall } from "./store";
 import { Popover, type PopoverAnchor } from "./ui/Popover";
 import { postToHost } from "./bridge";
+import { Chevron, Icon } from "./components/Icon";
+import { fmtElapsed, LoaderGrid } from "./components/Loader";
+import { copyText, streamdownProps } from "./components/CodeBlock";
+import { ThoughtView } from "./components/ThoughtCard";
+import { PermissionCard } from "./components/PermissionCard";
+import { PlanPanel } from "./components/PlanDock";
+import { ConfigPopover } from "./components/ConfigPopover";
 
 /* ——— omp-TUI-style line diff (renderDiff design: ±N gutter, dim context,
    word-level highlight on single-line replacements, … gap collapse) ——— */
@@ -372,68 +378,6 @@ function ToolCard({ id }: { id: string }) {
 }
 
 
-/// Dock plan panel: pinned above the composer (TUI model), phase-
-/// grouped, collapsible. The fold lives in the STORE, persisted to
-/// localStorage: the dock remounts whenever plan/jobs flush to null
-/// and back, and WKWebView can crash-reload the page — component or
-/// module state resurrected the panel the user had folded, and the
-/// taller dock then shoved the transcript (2026-09-02 report).
-function PlanPanel({ entries }: { entries: PlanEntry[] }) {
-  // LOCAL subscription: togglePlanDock no longer bumps the store
-  // revision, so folding re-renders ONLY this panel — never the whole
-  // transcript (the reported fold jank).
-  const open = useSyncExternalStore(
-    (onChange) => store.subscribe(onChange),
-    () => store.planDockOpen && !store.planFoldedBySettle,
-    () => true,
-  );
-  const done = entries.filter((e) => e.status === "completed").length;
-  const phases: { name: string | null; items: PlanEntry[] }[] = [];
-  for (const e of entries) {
-    const last = phases[phases.length - 1];
-    if (last && last.name === (e.priority ?? null)) last.items.push(e);
-    else phases.push({ name: e.priority ?? null, items: [e] });
-  }
-  return (
-    <div className={"dock-plan" + (open ? "" : " folded")}>
-      <button className="dock-head"
-        onClick={() => store.togglePlanDock()}
-        title={open ? "收起计划面板" : "展开计划面板"}>
-        <span className="plan-title">计划</span>
-        <span className="plan-progress">{done}/{entries.length}</span>
-      </button>
-      {/* The body ALWAYS mounts — folding animates the clip's grid row
-          (0fr↔1fr) instead of unmounting, so the transcript's height
-          change is a transition, not a jump. */}
-      <div className="plan-clip">
-        <div className="plan-body">
-          {phases.map((phase, i) => (
-            <div key={i} className="plan-phase">
-              {phase.name && <div className="plan-phase-name">{phase.name}</div>}
-              {phase.items.map((e, j) => (
-                <div key={j} className={"plan-row " + (e.status ?? "")}>
-                  <span className="plan-mark">{e.status === "completed" ? "✓"
-                    : e.status === "in_progress" ? "◐" : "○"}</span>
-                  <span>{e.content}</span>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function fmtElapsed(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  return h > 0
-    ? `${h}h${String(m).padStart(2, "0")}m`
-    : `${m}:${String(sec).padStart(2, "0")}`;
-}
 
 /// Background async-job rows — the omp TUI's `bg_2 ⟨bash⟩ … 18m53s`
 /// line, elapsed ticking client-side from startTime.
@@ -483,56 +427,6 @@ function SubagentLine({ rows }: { rows: { id: string; state?: string | null;
 }
 
 
-/// One clickable config knob (mode / model / thinking …) with its option
-/// popover. Selection posts `setConfig`; the OK response re-syncs the
-/// whole knob list, so this component is stateless about current values.
-/// Minimal 24px stroke icons (lucide-style geometry, no dependency).
-function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking" | "speed"
-  | "stop" | "send" | "folder" | "branch" | "copy" | "check" | "messages" }) {
-  const common = { width: 13, height: 13, viewBox: "0 0 24 24", fill: "none",
-                   stroke: "currentColor", strokeWidth: 2,
-                   strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
-  switch (kind) {
-    case "history":
-      return <svg {...common}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></svg>;
-    case "model":
-      return <svg {...common}><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z" /></svg>;
-    case "mode":
-      return <svg {...common}><circle cx="12" cy="12" r="9" /><path d="M15.5 8.5 10 10l-1.5 5.5L14 13.5z" /></svg>;
-    case "speed":
-      return <svg {...common}><path d="M3.34 19a10 10 0 1 1 17.32 0" /><path d="m12 14 4-6" /><path d="m12 14-4-6" /></svg>;
-    case "thinking":
-      return <svg {...common}><path d="M3 12h4l3-8 4 16 3-8h4" /></svg>;
-    case "stop":
-      return <svg {...common}><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" /></svg>;
-    case "send":
-      return <svg {...common}><path d="M12 19V5" /><path d="M5 12l7-7 7 7" /></svg>;
-    case "folder":
-      return <svg {...common}><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg>;
-    case "branch":
-      return <svg {...common}><line x1="6" x2="6" y1="3" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></svg>;
-    case "copy":
-      return <svg {...common}><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>;
-    case "check":
-      return <svg {...common}><path d="M20 6 9 17l-5-5" /></svg>;
-    case "messages":
-      return <svg {...common}><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" /></svg>;
-  }
-}
-
-/// Fold indicator for tool/thought cards. The old glyph was a 10px
-/// text "▸" in the extra-muted color — read as a dot at arm's length
-/// (the screenshot report). An SVG at the Icon family's stroke reads
-/// as a real affordance; `.up` still rotates it open.
-function Chevron({ open }: { open?: boolean }) {
-  return (
-    <span className={"chevron" + (open ? " up" : "")} aria-hidden>
-      <svg width={12} height={12} viewBox="0 0 24 24" fill="none"
-        stroke="currentColor" strokeWidth={2.4}
-        strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
-    </span>
-  );
-}
 
 /// omp-TUI parity for the tool row: label + PRIMARY ARGUMENT —
 /// `Read ~/…/PiSession.swift:145-172`, `Bash cargo test -- …`,
@@ -593,7 +487,6 @@ function toolDisplayTitle(call: ToolCall): string {
 
 /// Options long enough to warrant the search row (monocode shows it for
 /// big catalogs; thinking/mode knobs stay short and skip it).
-const CONFIG_SEARCH_THRESHOLD = 8;
 
 function ConfigChip({ option, icon, open, onToggle, onPick }: {
   option: { id: string; name: string; currentValue?: string | null;
@@ -619,138 +512,6 @@ function ConfigChip({ option, icon, open, onToggle, onPick }: {
   );
 }
 
-/// Popover body for a config knob: search row (long catalogs) +
-/// monocode-ModelPicker-style rows with keyboard navigation. Mounted only
-/// while open, so search/keyboard state resets on every open.
-function ConfigPopover({ anchor, option, onDismiss, onPick }: {
-  anchor: PopoverAnchor;
-  option: { id: string; name: string; currentValue?: string | null;
-            options: ConfigChoice[] };
-  onDismiss: () => void; onPick: (value: string) => void;
-}) {
-  const [query, setQuery] = useState("");
-  const [active, setActive] = useState(0);
-  const search = useRef<HTMLInputElement>(null);
-  const activeRow = useRef<HTMLDivElement>(null);
-  const searchable = option.options.length > CONFIG_SEARCH_THRESHOLD;
-  const needle = query.trim().toLowerCase();
-  const visible = useMemo(() => needle
-    ? option.options.filter((o) => `${o.name} ${o.value}`.toLowerCase().includes(needle))
-    : option.options,
-    [option.options, needle]);
-
-  useEffect(() => {
-    const i = visible.findIndex((o) => o.value === option.currentValue);
-    setActive(i >= 0 ? i : 0);
-  }, [visible, option.currentValue]);
-
-  useEffect(() => {
-    if (searchable) search.current?.focus();
-  }, [searchable]);
-
-  useEffect(() => {
-    activeRow.current?.scrollIntoView({ block: "nearest" });
-  }, [active]);
-
-  const onKey = (e: React.KeyboardEvent) => {
-    if (e.nativeEvent.isComposing) return;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setActive((i) => Math.min(visible.length - 1, i + 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setActive((i) => Math.max(0, i - 1));
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      const item = visible[active];
-      if (item) onPick(item.value);
-    }
-  };
-
-  // Pills size to their content — a 4-option knob must not stretch to
-  // the model list's 300px column.
-  const pillMode = !searchable && option.options.length <= 5;
-  return (
-    <Popover anchor={anchor} side="top"
-      width={pillMode ? undefined : 300}
-      minHeight={pillMode ? undefined : 120} maxHeight={pillMode ? undefined : 340}
-      onDismiss={onDismiss} role="dialog" aria-label={option.name}
-      className="flex flex-col overflow-hidden"
-      // No search row → the surface itself takes the arrow keys.
-      autoFocus={!searchable} tabIndex={searchable ? undefined : -1}
-      onKeyDown={searchable ? undefined : onKey}>
-      {searchable && (
-        <label className="flex items-center gap-2 border-b border-content/10 px-2 py-2.5 text-content/50">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-            stroke="currentColor" strokeWidth="2" strokeLinecap="round"
-            strokeLinejoin="round" aria-hidden>
-            <circle cx="11" cy="11" r="7" />
-            <line x1="21" x2="16.5" y1="21" y2="16.5" />
-          </svg>
-          <input ref={search} value={query} placeholder="搜索…"
-            aria-label={`搜索${option.name}`}
-            className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/40"
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={onKey} />
-        </label>
-      )}
-      {!searchable && option.options.length <= 5 ? (
-        // happier's SessionConfigOptionControl: short enums read as
-        // capsule pills — one glance, no rows.
-        <div className="pop-pills" role="listbox" aria-label={option.name}>
-          {visible.map((o, index) => (
-            <button key={o.value} role="option"
-              aria-selected={o.value === option.currentValue}
-              onMouseDown={(e) => e.preventDefault()}
-              onMouseEnter={() => setActive(index)}
-              onClick={() => onPick(o.value)}
-              className={"pop-pill"
-                + (o.value === option.currentValue ? " cur" : "")
-                + (index === active ? " act" : "")}>
-              {o.name}
-            </button>
-          ))}
-        </div>
-      ) : (
-      <div role="listbox" aria-label={option.name}
-        className="min-h-0 flex-1 overflow-y-auto overscroll-none px-1.5 pb-1.5">
-        {visible.length === 0 && (
-          <div className="px-3 py-4 text-[12px] text-content/50">无匹配选项</div>
-        )}
-        {visible.map((o, index) => {
-          const selected = o.value === option.currentValue;
-          const highlighted = index === active;
-          return (
-            <div key={o.value} ref={highlighted ? activeRow : undefined}
-              onMouseEnter={() => setActive(index)}
-              className={"flex w-full items-center gap-1 rounded-lg px-1"
-                + (highlighted || selected ? " bg-content/10" : " hover:bg-content/5")}>
-              <button role="option" aria-selected={selected}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => onPick(o.value)}
-                className="flex min-w-0 flex-1 items-center gap-2 px-1.5 py-1.5 text-left text-content">
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[12.5px] font-medium leading-5">{o.name}</span>
-                  {o.source && (
-                    <span className="mt-0.5 block truncate text-[11px] leading-4 text-content/50">{o.source}</span>
-                  )}
-                </span>
-                {selected && (
-                  <svg className="shrink-0 text-accent" width="14" height="14"
-                    viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                )}
-              </button>
-            </div>
-          );
-        })}
-      </div>
-      )}
-    </Popover>
-  );
-}
 
 /// Untitled sessions: omp names them asynchronously, so fresh ones have
 /// no title yet — show the activity timestamp instead of a raw hex id.
@@ -874,143 +635,6 @@ function SubmitButton({ working, hasValue, awaiting, action }: {
       <span className={"ic" + (stopMode ? " off" : "")} aria-hidden><Icon kind="send" /></span>
       <span className={"ic" + (stopMode ? "" : " off")} aria-hidden><Icon kind="stop" /></span>
     </button>
-  );
-}
-
-function codeTextOf(node: React.ReactNode): string {
-  if (node == null || typeof node === "boolean") return "";
-  if (typeof node === "string" || typeof node === "number") return String(node);
-  if (Array.isArray(node)) return node.map(codeTextOf).join("");
-  if (typeof node === "object" && "props" in node) {
-    return codeTextOf((node as React.ReactElement).props.children);
-  }
-  return "";
-}
-
-function execCommandCopy(text: string): void {
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.style.position = "fixed";
-  ta.style.opacity = "0";
-  document.body.appendChild(ta);
-  ta.select();
-  document.execCommand("copy");
-  ta.remove();
-}
-
-function copyText(text: string): void {
-  // goty:// is not a secure context — navigator.clipboard can be absent
-  // in WKWebView; degrade to the execCommand path.
-  if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).catch(() => execCommandCopy(text));
-  } else {
-    execCommandCopy(text);
-  }
-}
-
-/// Code-block frame for agent markdown (monocode/happier pattern):
-/// language header + copy (1.2s check) around the hljs body — the
-/// highlighting stays rehype-highlight so every token keeps coming from
-/// the Ghostty-bridged palette.
-function AgentCodeBlock({ children, ...rest }: React.ComponentPropsWithoutRef<"pre">) {
-  const [copied, setCopied] = useState(false);
-  const child = Array.isArray(children) ? children[0] : children;
-  const cls = child != null && typeof child === "object" && "props" in child
-    ? String((child as React.ReactElement).props.className ?? "") : "";
-  const lang = /language-([\w+#-]+)/.exec(cls)?.[1] ?? "";
-  return (
-    <div className="code-block">
-      <div className="code-head">
-        <span className="code-lang">{lang || "text"}</span>
-        <button type="button" className="code-copy"
-          onClick={() => {
-            copyText(codeTextOf(children));
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1200);
-          }}>
-          {copied ? "✓ 已复制" : "复制"}
-        </button>
-      </div>
-      <pre {...rest}>{children}</pre>
-    </div>
-  );
-}
-
-const streamdownProps = {
-  mode: "streaming" as const,
-  rehypePlugins: [rehypeHighlight],
-  components: { pre: AgentCodeBlock },
-};
-
-/// Thinking renders as a collapsible dim card (happier timeline row):
-/// OPEN while the model is actively thinking, folded once the turn
-/// moves on — the reasoning stays one click away, not sprawled between
-/// the answer's paragraphs.
-/// Thinking streams are chatty: models emit double-blank-line breaks
-/// between every volley AND bare list markers ("-", "*") with no
-/// content — markdown renders those as empty <li> rows while UA-default
-/// list margins (1em + 40px indent, no tailwind loaded to tame them)
-/// blow every marker into an airy paragraph. Drop marker-only lines,
-/// collapse blank runs, trim the edges — the card reads as a compact
-/// reasoning trace, not a blog post.
-function compactThought(text: string): string {
-  // Reasoning often carries literal "\n" escapes AS TEXT (the model
-  // wrote them inside code-ish thinking — the stream replays them
-  // verbatim): un-escape first, or the card shows "\n\n" walls with no
-  // line breaks at all. Display-only layer; the answer's faithful
-  // contract is untouched.
-  const unescaped = text.replace(/\\r\\n?/g, "\n").replace(/\\n/g, "\n").replace(/\\t/g, " ");
-  return unescaped
-    .split("\n")
-    .filter((line) => !/^\s*[-*•]\s*$/.test(line) && !/^\s*\d+[.)]\s*$/.test(line))
-    .join("\n")
-    .replace(/[ \t]+$/gm, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/^\n+|\n+$/g, "");
-}
-
-function ThoughtView({ text, isTail }: { text: string; isTail: boolean }) {
-  // Liveness is POSITIONAL, not global: the model streams sequentially,
-  // so only the LAST transcript block can still be thinking — every
-  // earlier thought card is already settled history (the 2026-09-02
-  // report: all cards pulsed "思考中…" in lockstep). The phase itself is
-  const thinking = useSyncExternalStore(
-    (onChange) => store.subscribe(onChange),
-    () => store.working && store.phase === "thinking",
-    () => false,
-  );
-  const live = isTail && thinking;
-  // Same turn clock as StatusLine, scoped to the live card: 思考中 · 12s
-  // in the header. Base is the turn start (multi-block turns keep one
-  // clock); mount time is the fallback for mid-stream adoption.
-  const baseRef = useRef(0);
-  if (live && baseRef.current === 0) baseRef.current = store.turnStartedAt ?? Date.now();
-  if (!live) baseRef.current = 0;
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    if (!live) return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [live]);
-  const liveElapsed = live && baseRef.current > 0 ? now - baseRef.current : null;
-  const [open, setOpen] = useState(live);
-  return (
-    <div className={"thought-card" + (open ? " open" : "") + (live ? " live" : "")}>
-      <button className="thought-head" onClick={() => setOpen(!open)}>
-        <span className={"thought-dot" + (live ? " live" : "")} aria-hidden />
-        <span className="thought-label">
-          {live
-            ? `思考中${liveElapsed != null ? ` · ${fmtElapsed(liveElapsed)}` : ""}…`
-            : "思考过程"}
-        </span>
-        <Chevron open={open} />
-      </button>
-      {open && (
-        <div className="thought agent-reasoning agent-markdown">
-          <Streamdown {...streamdownProps}>{compactThought(text)}</Streamdown>
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -1695,7 +1319,7 @@ function StatusLine() {
   // /compact runs as a normal model turn, so phase=thinking holds —
   // the compacting chip is the sharper truth; don't spin both.
   if (s.phase === "thinking" && !rt?.compacting) {
-    chips.push(<span key="th" className="cstat" title="模型思考中"><span className="spin" />思考中{elapsed ? ` · ${elapsed}` : ""}…</span>);
+    chips.push(<span key="th" className="cstat" title="模型思考中"><LoaderGrid />思考中{elapsed ? ` · ${elapsed}` : ""}…</span>);
   } else if (s.phase === "executing") {
     // Live tool telemetry: name the tool actually running (claude TUI
     // parity — a bare 执行中 hides which of the turn's tools is active).
@@ -1706,7 +1330,7 @@ function StatusLine() {
     }
     chips.push(
       <span key="ex" className="cstat" title="工具执行中">
-        <span className="spin" />执行中{elapsed ? ` · ${elapsed}` : ""}{running ? ` · ${toolDisplayTitle(running)}` : ""}…
+        <LoaderGrid />执行中{elapsed ? ` · ${elapsed}` : ""}{running ? ` · ${toolDisplayTitle(running)}` : ""}…
       </span>);
   } else if (s.phase === "awaitingPermission") {
     chips.push(<span key="ap" className="cstat awaiting" title="等待你在下方授权">等待授权</span>);
@@ -1718,7 +1342,7 @@ function StatusLine() {
     chips.push(<span key="tps" className="cstat" title="输出吞吐">{rt.tokensPerSecond.toFixed(1)} tok/s</span>);
   }
   if (rt?.compacting) {
-    chips.push(<span key="compact" className="cstat warn" title="上下文压缩中"><span className="spin" />压缩中…</span>);
+    chips.push(<span key="compact" className="cstat warn" title="上下文压缩中"><LoaderGrid />压缩中…</span>);
   }
   if (chips.length === 0) return null;
   return <div className="composer-status in-transcript">{chips}</div>;
@@ -2164,72 +1788,6 @@ export function App() {
           : undefined} />
       <SelectionQuote onQuote={(text) => setDraft({ text, seq: draft.seq + 1 })} />
       {store.stats && <StatsDialog stats={store.stats} />}
-    </div>
-  );
-}
-
-/// The agent asked a question / needs approval — RPC extension dialogs
-/// ride the same card: option lists (select/approvals/ask questions,
-/// each option may carry a muted explanation line), 确认/取消
-/// (confirm), or a text entry (input/editor — ask "Other" answers).
-function PermissionCard({ permission }: {
-  permission: NonNullable<typeof store.permission>;
-}) {
-  const [value, setValue] = useState(permission.defaultValue ?? "");
-  const isInput = permission.dialog === "input" || permission.dialog === "editor";
-  const kind = permission.dialog === "select" ? "选择"
-    : permission.dialog === "confirm" ? "确认"
-    : isInput ? "输入" : "授权";
-  const multi = permission.multi === true;
-  const checked = new Set(permission.checkedIndices ?? []);
-  return (
-    <div className="permission">
-      <div className="perm-title">
-        {permission.toolCallTitle ?? "需要授权"}
-        <span className="perm-kind">{kind}</span>
-        {(permission.pendingCount ?? 1) > 1 && (
-          <span className="perm-queue" title="codex 已排队的授权请求数">
-            第 1 / {permission.pendingCount} 个待授权
-          </span>
-        )}
-      </div>
-      {isInput ? (
-        <div className="perm-input">
-          <input autoFocus value={value}
-            placeholder={permission.placeholder ?? ""}
-            onChange={(e) => setValue(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && value.trim()) {
-                postToHost({ type: "permission", optionId: value });
-              }
-            }} />
-          <button className="btn send" disabled={!value.trim()}
-            onClick={() => postToHost({ type: "permission", optionId: value })}>提交</button>
-        </div>
-      ) : (
-        <div className="perm-options">
-          {multi && (
-            <div className="perm-multi-hint">
-              多选:点击选项切换勾选,选完后点「完成选择」提交
-            </div>
-          )}
-          {permission.options.map((o, index) => {
-            const isDone = o.kind === "done";
-            const isChecked = multi && checked.has(index);
-            return (
-              <button key={o.optionId}
-                className={"btn " + (isDone || isChecked ? "send" : "")}
-                onClick={() => postToHost({ type: "permission", optionId: o.optionId })}>
-                <span>
-                  {multi && (isChecked ? "☑ " : "☐ ")}
-                  {isDone ? "✅ " : ""}{o.name}
-                </span>
-                {o.detail && <span className="perm-opt-detail">{o.detail}</span>}
-              </button>
-            );
-          })}
-        </div>
-      )}
     </div>
   );
 }
