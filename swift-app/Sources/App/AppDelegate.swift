@@ -29,6 +29,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var clickMonitor: Any?
     /// Foreground-process poll (agent identity for typed-in agents).
     private var editorPanelBacking: EditorPanelView?
+    /// The workspace the editor overlay is currently bound to (nil
+    /// while hidden). tty7 keeps this per-tab (TabCode); goty's single
+    /// overlay scopes only its VISIBILITY this way — open documents
+    /// stay shared across workspaces.
+    var editorWorkspaceId: UUID?
     private var sshWindowBacking: SSHConfigWindowController?
     var settingsWindowBacking: SettingsWindowController?
     /// Sparkle auto-updates — created here (before launch finishes,
@@ -353,18 +358,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 
 
-    /// First use builds the editor overlay and wires it to the terminal
-    /// region. While hidden it is OUT of the view tree entirely — a
-    /// hidden zero-size container still solves its children's
-    /// constraints, and that fight is what once broke the window.
     private func editorPanel() -> EditorPanelView {
         if let panel = editorPanelBacking { return panel }
         let panel = EditorPanelView()
         panel.onVisibilityChange = { [weak self] visible in
             guard let self, let area = self.wc?.terminalArea else { return }
             if visible {
+                // Shown = bound to the workspace on screen (tty7's code
+                // panel belongs to its tab). Focus switches then hide
+                // the overlay and switches back restore it — see
+                // syncEditorOverlayWithFocusedWorkspace().
+                self.editorWorkspaceId = self.coordinator.store?.focused?.id
                 area.presentOverlay(panel, kind: .editor)   // flush to the window top
             } else {
+                self.editorWorkspaceId = nil
                 area.dismissOverlay(kind: .editor)
                 // Back to the terminal — the user just left the editor.
                 if let first = area.paneGrid.visibleHosts.first {
@@ -374,6 +381,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         editorPanelBacking = panel
         return panel
+    }
+
+    /// Test surface: the app-presented editor — owner binding and
+    /// overlay wiring included. The headless suite cannot run the
+    /// launch path that builds it (no Ghostty.App in tools).
+    func editorPanelForTest() -> EditorPanelView { editorPanel() }
+
+    /// The editor follows its workspace (tty7's per-tab TabCode, one
+    /// granularity up): switching focus away dismisses the overlay but
+    /// keeps panel.visible — files, dirty state and the loaded page all
+    /// survive; switching back re-presents it. Idempotent by
+    /// construction (only acts when slot state and ownership disagree),
+    /// so every .structure/.connection pass may run it. Focus only
+    /// moves when the hidden editor still held the keyboard — a
+    /// sidebar click does not resign it, and keystrokes must never
+    /// land in an invisible page.
+    func syncEditorOverlayWithFocusedWorkspace() {
+        guard let panel = editorPanelBacking, panel.visible,
+              let area = wc?.terminalArea else { return }
+        let editorShowing = area.isShowingOverlay && area.overlayKind == .editor
+        if coordinator.store?.focused?.id == editorWorkspaceId {
+            // The offline cover outranks the editor: a disconnected
+            // workspace must show its reconnect page, not a stale
+            // editor floating above it. The next .connection pass
+            // re-runs this sync once the cover drops.
+            if editorShowing
+                || (area.isShowingOverlay && area.overlayKind == .offline) { return }
+            panel.show()
+        } else if editorShowing {
+            let editorHeldKeyboard = firstResponderInsideEditor(panel)
+            area.dismissOverlay(kind: .editor)
+            if editorHeldKeyboard, let first = area.paneGrid.visibleHosts.first {
+                first.focusAsPane()
+            }
+        }
+    }
+
+    /// Walk the responder chain from the window's firstResponder —
+    /// the editor's WKContentView sits below the panel, so containment
+    /// is the reliable keyboard test.
+    private func firstResponderInsideEditor(_ panel: EditorPanelView) -> Bool {
+        var responder: NSResponder? = window?.firstResponder
+        while let current = responder {
+            if current === panel { return true }
+            responder = current.nextResponder
+        }
+        return false
     }
 
     /// The SSH config manager: a STANDALONE window (nothing in the main
@@ -895,6 +949,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // toggle and right-panel toggle are wired by the window
         // controller itself (it owns those state machines).
         wc.titlebar.onOpenSettings = { [weak self] in
+            if ProcessInfo.processInfo.environment["GOTY_SETTINGS_DEBUG"] == "1" {
+                FileHandle.standardError.write("GEAR click received\n".data(using: .utf8)!)
+            }
             self?.settingsWindow().show(over: self?.window)
         }
         sidebar.onWidthChange = { [weak self] width in
@@ -1125,7 +1182,18 @@ extension AppDelegate {
 
 extension AppDelegate {
     @objc func menuToggleEditor() {
-        editorPanel().toggle()
+        let panel = editorPanel()
+        let area = wc?.terminalArea
+        let showingHere = area?.isShowingOverlay == true && area?.overlayKind == .editor
+        // Suppressed (its workspace lost focus): ⌘E means "bring it
+        // HERE", rebinding it to the current workspace — a plain toggle
+        // would hide an already-invisible overlay and demand a second
+        // press to show anything.
+        if panel.visible, !showingHere {
+            panel.show()
+        } else {
+            panel.toggle()
+        }
     }
 }
 

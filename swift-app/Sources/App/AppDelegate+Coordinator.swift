@@ -10,6 +10,12 @@ extension AppDelegate {
         switch domain {
         case .structure:
             refresh()
+            // The editor overlay belongs to the workspace it was opened
+            // on: a focus switch hides it, a switch back restores it.
+            // (Sync is idempotent — .structure also fires for tab churn
+            // inside the focused workspace, and must not churn a
+            // correctly-presented overlay.)
+            syncEditorOverlayWithFocusedWorkspace()
             // Structure events rebuild the visible pane set only. Grid
             // changes flow per pane: PaneHost.layout emits a Resize marker
             // on its own sessiond stream when its settled grid changes,
@@ -21,6 +27,10 @@ extension AppDelegate {
             // on an unreachable host) must not be able to touch what a
             // user is editing somewhere else in the window.
             refreshConnectionChrome()
+            // Reconnect edge: the offline cover outranked the editor on
+            // its own workspace; once the cover drops, the editor comes
+            // back. Other connection passes no-op inside the sync.
+            syncEditorOverlayWithFocusedWorkspace()
         case .cwd:
             updateRightPanel()   // cheap path — no pane-grid rebuild
             refreshSidebarSpaces()   // grouping follows directory changes

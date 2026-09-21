@@ -147,10 +147,11 @@ body {
 .agent-markdown ul li::marker { color: var(--accent-bright); }
 .agent-markdown a:hover { text-decoration: underline; }
 /* ——— agent markdown (streamdown body + monocode hierarchy) ———
-   Body text dims to 78% content so headings/strong (full content) carry
-   the hierarchy — weight+contrast as a set, not size alone. */
+   Body text at FULL content brightness (the Arthur "正文不够明显"
+   report: 78% → 88% → user asked brighter still); hierarchy now rides
+   on weight/size alone, thinking stays far dimmer at 48%. */
 .agent-markdown p, .agent-markdown li {
-  color: color-mix(in srgb, var(--color-content) 78%, transparent);
+  color: var(--color-content);
 }
 .agent-markdown p strong, .agent-markdown li strong,
 .agent-markdown p [data-streamdown="strong"],
@@ -1058,3 +1059,78 @@ body {
   border: 1px solid var(--border, rgba(127,127,127,0.35));
   border-radius: 999px; padding: 1px 8px;
 }
+
+/* ── Vitality layer (2026-09-21) ─────────────────────────────────
+   The Ghostty-bridged palette is monochrome by design; long sessions
+   read as black-and-white. This layer adds a SEMANTIC color system on
+   top of the bridge: mid-saturation hues readable on both light and
+   dark hosts, applied only to state and identity surfaces (icons,
+   status dots, live edges, the user bubble, the send button) — never
+   to reading surfaces (body text, code, diffs keep their tokens). */
+
+:root {
+  --vit-blue: #58a6ff;   /* reading: read/grep/glob */
+  --vit-green: #57d97a;  /* changing: edits, completed */
+  --vit-amber: #f5a524;  /* running: shells, work in flight */
+  --vit-violet: #b197fc; /* thinking: reasoning, search */
+  --vit-cyan: #35c4c8;   /* network: fetch/web */
+  --vit-rose: #f27d9d;   /* agents: subagent machinery */
+}
+
+/* Tool identity: the 12px glyph is the strongest color signal a
+   transcript row can carry (beautifului's colored tool icons). */
+.tool-kind { color: var(--fg-muted); transition: color 0.15s; }
+.tool-kind[data-kind="execute"], .tool-kind[data-kind="bash"],
+.tool-kind[data-kind="shell"], .tool-kind[data-kind="command"] { color: var(--vit-amber); }
+.tool-kind[data-kind="read"], .tool-kind[data-kind="grep"],
+.tool-kind[data-kind="glob"], .tool-kind[data-kind="list"],
+.tool-kind[data-kind="ls"] { color: var(--vit-blue); }
+.tool-kind[data-kind="edit"], .tool-kind[data-kind="write"],
+.tool-kind[data-kind="multiedit"], .tool-kind[data-kind="apply_patch"],
+.tool-kind[data-kind="patch"] { color: var(--vit-green); }
+.tool-kind[data-kind="search"], .tool-kind[data-kind="web_search"],
+.tool-kind[data-kind="webSearch"] { color: var(--vit-violet); }
+.tool-kind[data-kind="fetch"], .tool-kind[data-kind="web"],
+.tool-kind[data-kind="browser"] { color: var(--vit-cyan); }
+.tool-kind[data-kind="agent"], .tool-kind[data-kind="task"],
+.tool-kind[data-kind="subagent"] { color: var(--vit-rose); }
+.tool-head:hover .tool-kind { filter: brightness(1.15); }
+
+/* Status dots: age-old traffic-light semantics. */
+.tool-status.st-completed .dot { color: var(--vit-green); }
+.tool-status.st-error .dot { color: var(--destructive); }
+.tool-cluster .tool-status.st-completed { color: color-mix(in srgb, var(--vit-green) 70%, var(--fg-muted)); }
+
+/* User bubble: a whisper of the accent — enough warmth to separate
+   sides of the conversation without shouting. */
+.user {
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface2));
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border-accent));
+}
+
+/* Live thinking: violet edge + glow while the dot pulses; collapses
+   back to quiet when settled. */
+.thought-card.live {
+  border-color: color-mix(in srgb, var(--vit-violet) 26%, transparent);
+  background: color-mix(in srgb, var(--vit-violet) 4%, var(--surface0));
+  box-shadow: 0 0 14px color-mix(in srgb, var(--vit-violet) 10%, transparent);
+}
+.thought-card.live .thought-dot { background: var(--vit-violet); }
+
+/* Send button: accent gradient + soft bloom — the one saturated
+   control in the pane, where the eye goes to act. */
+.submit-btn.send:not(:disabled) {
+  background: linear-gradient(140deg,
+    color-mix(in srgb, var(--accent-bright) 45%, var(--accent)),
+    var(--accent) 55%,
+    color-mix(in srgb, var(--accent) 70%, black));
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 38%, transparent);
+}
+.submit-btn.send:not(:disabled):hover {
+  box-shadow: 0 3px 16px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* Composer caret follows the accent; selection tint too. */
+textarea { caret-color: var(--accent-bright); }
+
+/* Turn stats row: the ⏱ reads as accent-bright already; leave it. */

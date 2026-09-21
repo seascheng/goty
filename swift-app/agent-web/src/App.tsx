@@ -340,7 +340,7 @@ function ToolCard({ id }: { id: string }) {
     <div className={"tool st-" + (call.status ?? "none") + (open ? " open" : "") + (running ? " run" : "")}>
       <button className="tool-head" onClick={() => setOpen(!open)}>
         <Chevron open={open} />
-        <span className="tool-kind" aria-hidden><ToolGlyph kind={kind} /></span>
+        <span className="tool-kind" data-kind={kind} aria-hidden><ToolGlyph kind={kind} /></span>
         <span className="tool-title">{toolDisplayTitle(call)}</span>
         {(running || call.status === "error" || call.status === "pending") && (
           <span className={"tool-status st-" + (call.status ?? "")}>
@@ -995,7 +995,7 @@ function ThoughtView({ text, isTail }: { text: string; isTail: boolean }) {
   const liveElapsed = live && baseRef.current > 0 ? now - baseRef.current : null;
   const [open, setOpen] = useState(live);
   return (
-    <div className={"thought-card" + (open ? " open" : "")}>
+    <div className={"thought-card" + (open ? " open" : "") + (live ? " live" : "")}>
       <button className="thought-head" onClick={() => setOpen(!open)}>
         <span className={"thought-dot" + (live ? " live" : "")} aria-hidden />
         <span className="thought-label">
@@ -1622,7 +1622,7 @@ function ToolCluster({ blocks }: { blocks: Block[] }) {
         title="展开查看这组工具调用的详情">
         <Chevron open={open} />
         {[...tally.entries()].slice(0, 4).map(([k, n]) => (
-          <span key={k} className="tool-kind" aria-hidden><ToolGlyph kind={k} /></span>
+          <span key={k} className="tool-kind" data-kind={k} aria-hidden><ToolGlyph kind={k} /></span>
         ))}
         <span className="tool-title">{blocks.length} 个工具调用</span>
         <span className="tool-status st-completed" title="全部完成">
