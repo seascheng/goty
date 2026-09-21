@@ -163,8 +163,8 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         // sidebar text. Top-level headers (SERVERS/SPACES) are page
         // titles, not groups — they render without a tick.
         tickBar.isHidden = emphasized
-        tickBar.layer?.backgroundColor =
-            Chrome.theme.sidebarText.withAlphaComponent(0.38).cgColor
+        // Same ink as the title itself — a marker, not a second color.
+        tickBar.layer?.backgroundColor = Chrome.theme.sidebarText.cgColor
         if let count {
             countField.attributedStringValue = NSAttributedString(
                 string: String(count),
