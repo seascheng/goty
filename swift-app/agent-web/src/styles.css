@@ -824,16 +824,19 @@ body {
 .dock-wrap:not(.on) .dock { border-color: transparent; }
 .dock {
   flex: none;
-  border: 1px solid var(--border);
+  border: none;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--surface0) 60%, transparent);
-  overflow: hidden;
+  background: none;
+  overflow: visible;
 }
 /* Plan fold: same trick one level down — the body stays mounted and
    the clip's grid row animates (the old display:none snapped). */
 .plan-clip {
   display: grid; grid-template-rows: 0fr;
   transition: grid-template-rows 0.22s ease;
+  /* 0fr clamps the row, but the body's own padding still pokes past
+     it — the folded card leaked a sliver of first-line text. */
+  overflow: hidden;
 }
 .dock-plan:not(.folded) .plan-clip { grid-template-rows: 1fr; }
 .plan-clip > .plan-body { min-height: 0; overflow: hidden; }
@@ -1291,7 +1294,6 @@ textarea { caret-color: var(--accent-bright); }
 .dock-plan.card {
   margin: 0 16px 6px;
   background: color-mix(in srgb, var(--surface0) 88%, var(--foreground));
-  border: 1px solid color-mix(in srgb, var(--foreground) 12%, transparent);
   border-radius: 14px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
   overflow: hidden;
