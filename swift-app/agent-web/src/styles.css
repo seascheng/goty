@@ -1299,7 +1299,12 @@ textarea { caret-color: var(--accent-bright); }
   overflow: hidden;
 }
 .dock-plan.card .dock-head { padding: 7px 14px; }
-.dock-plan.card .plan-clip .plan-body { padding: 0 10px 8px; }
+/* Spacing lives INSIDE the content (phase), never on the clip's grid
+   item: min-height:0 clamps the body's CONTENT, but its own padding
+   props the 0fr row open — the folded card stood 8px taller than its
+   header, leaking a sliver of the first line (worst on WebKit). */
+.dock-plan.card .plan-clip .plan-body { padding: 0; }
+.dock-plan.card .plan-phase { padding: 0 8px 8px; }
 .dock-plan.card .plan-phase-name { padding: 0 6px; }
 .dock-plan.card .plan-row { padding: 2px 6px; }
 .plan-progress {
