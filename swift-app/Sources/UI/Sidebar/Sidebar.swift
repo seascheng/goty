@@ -69,7 +69,10 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         glyphView.contentTintColor = Chrome.theme.foreground
         addSubview(glyphView)
         // Label column: at the tick (group headers) or right of the
-        // glyph (top-level titles) — exactly one may be active.
+        // glyph (top-level titles) — exactly one may be active. The
+        // label/glyph CENTER vertically: the label had no y constraint
+        // at all (Auto Layout ambiguity) and sat visibly off the
+        // tick's centerline — the tick-vs-title misalignment report.
         labelAtTick = label.leadingAnchor.constraint(
             equalTo: leadingAnchor, constant: SidebarRowView.iconLeading + 9)
         glyphLeading = glyphView.leadingAnchor.constraint(
@@ -78,6 +81,8 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
             equalTo: glyphView.trailingAnchor, constant: 6)
         NSLayoutConstraint.activate([
             labelAtTick,
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            glyphView.centerYAnchor.constraint(equalTo: centerYAnchor),
             heightAnchor.constraint(equalToConstant: 18),
             toggleButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 0),
             toggleButton.centerYAnchor.constraint(equalTo: centerYAnchor),
