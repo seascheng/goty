@@ -1263,14 +1263,13 @@ textarea { caret-color: var(--accent-bright); }
    tinted fill, accent text. Hover/keyboard highlight stays quiet. */
 .pop-row {
   display: flex; width: 100%; align-items: center; gap: 4px;
-  padding: 0 4px; margin: 1px 0; border-radius: 9px;
-  border-left: 2px solid transparent;
+  padding: 0 4px; margin: 1px 0; border-radius: 8px;
 }
+/* ONE selection language across every popover (models / thinking /
+   commands) — the sidebar tab pill: a soft accent fill, no rails,
+   brightest text. Hover/keyboard stays a quiet neutral wash. */
 .pop-row.hot { background: color-mix(in srgb, var(--foreground) 5%, transparent); }
-.pop-row.cur {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  border-left-color: var(--accent-bright);
-}
+.pop-row.cur { background: color-mix(in srgb, var(--accent) 32%, transparent); }
 
 /* /command and @file popovers: the same card language as the config
    knobs (08 prompt bar: one popover system, not three). */
@@ -1281,14 +1280,8 @@ textarea { caret-color: var(--accent-bright); }
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.45);
   padding: 6px;
 }
-.slash-opt {
-  border-radius: 9px; padding: 6px 10px;
-  border-left: 2px solid transparent;
-}
-.slash-opt.cur {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  border-left-color: var(--accent-bright);
-}
+.slash-opt { border-radius: 8px; padding: 6px 10px; }
+.slash-opt.cur { background: color-mix(in srgb, var(--accent) 32%, transparent); }
 
 /* Plan card: same floating-card language as the approval card. */
 .dock-plan.card {

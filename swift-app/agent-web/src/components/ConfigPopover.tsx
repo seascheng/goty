@@ -32,7 +32,12 @@ export function ConfigPopover({ anchor, option, onDismiss, onPick }: {
   }, [visible, option.currentValue]);
 
   useEffect(() => {
-    if (searchable) search.current?.focus();
+    if (!searchable) return;
+    search.current?.focus({ preventScroll: true });
+    // First paint can be pre-placement (visibility hidden) — WebKit
+    // silently drops focus() there. Retry once post-paint.
+    const raf = requestAnimationFrame(() => search.current?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(raf);
   }, [searchable]);
 
   useEffect(() => {
@@ -120,7 +125,7 @@ export function ConfigPopover({ anchor, option, onDismiss, onPick }: {
                 <span className="min-w-0 flex-1">
                   <span className={"block truncate text-[12.5px] font-medium leading-5" + (selected ? " text-accent" : "")}>{o.name}</span>
                   {o.source && (
-                    <span className="mt-0.5 block truncate text-[11px] leading-4 text-content/50">{o.source}</span>
+                    <span className="block truncate text-[11px] leading-[13.5px] text-content/50">{o.source}</span>
                   )}
                 </span>
                 {selected && (
