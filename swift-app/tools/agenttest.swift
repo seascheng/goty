@@ -932,6 +932,11 @@ enum AgentTest {
                                          activeToolCount: 0,
                                          secondsSinceSend: 2) == false,
               "optimistic send window (<4s) vetoes heal")
+        check(PiSession.missedSettleHeal(isWorking: true, streaming: false,
+                                         queued: 0, compacting: false,
+                                         activeToolCount: 0,
+                                         secondsSinceSend: nil) == true,
+              "attach without send (nil lastSendAt) heals on idle reads")
         check(PiSession.missedSettleHeal(isWorking: false, streaming: false,
                                          queued: 0, compacting: false,
                                          activeToolCount: 0,
@@ -1394,9 +1399,9 @@ enum AgentTest {
         // RuntimeMode mapping parity (monocode codexProtocol.ts:20 /
         // claudeProtocol.ts:244; paseo claude control-plane notes).
         check(RuntimeModeMapping.codexParams(.supervised)["approvalPolicy"] as? String == "untrusted"
-              && (RuntimeModeMapping.codexParams(.supervised)["sandboxPolicy"] as? [String: Any])?["type"] as? String == "readOnly"
+              && (RuntimeModeMapping.codexParams(.supervised)["sandboxPolicy"] as? [String: Any])?["type"] as? String == "workspaceWrite"
               && RuntimeModeMapping.codexParams(.supervised)["approvalsReviewer"] as? String == "user",
-              "runtimeMode supervised → codex untrusted/read-only/user reviewer")
+              "runtimeMode supervised → codex untrusted/workspace-write/user reviewer (0.155 read-only kills tools)")
         check(RuntimeModeMapping.codexParams(.autoEdits)["approvalPolicy"] as? String == "on-request"
               && (RuntimeModeMapping.codexParams(.autoEdits)["sandboxPolicy"] as? [String: Any])?["type"] as? String == "workspaceWrite",
               "runtimeMode autoEdits → codex on-request/workspace-write")

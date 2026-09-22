@@ -287,7 +287,9 @@ final class ChromePopup: NSView, ThemeRefreshable {
             item.target = self
             item.representedObject = i
             item.state = i == selected ? .on : .off
-            item.image = swatches?[option.label]
+            item.applyIcon(swatches?[option.label],
+                           gutter: swatches?.isEmpty == false
+                               ? NSSize(width: 22, height: 12) : nil)
             menu.addItem(item)
         }
         // Position ON the current item: the menu opens with it

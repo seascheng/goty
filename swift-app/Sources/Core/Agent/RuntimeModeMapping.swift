@@ -10,12 +10,18 @@ import Foundation
 /// the stream-json control protocol (`set_permission_mode`).
 enum RuntimeModeMapping {
     /// turn/start params: sandbox takes the OBJECT shape.
+    /// supervised rides workspaceWrite (NOT readOnly): `untrusted`
+    /// already asks for every command, and codex 0.155 stopped
+    /// offering exec/write tools under a read-only sandbox entirely
+    /// (5090 report 2026-09-22: "没有向我提供终端或文件写入工具"
+    /// the day its server codex went 0.154→0.155 — same tier, same
+    /// params, tools gone). The approval UX is the tier's contract.
     static func codexParams(_ mode: AgentRuntimeMode) -> [String: Any] {
         switch mode {
         case .supervised:
             return ["approvalPolicy": "untrusted",
                     "approvalsReviewer": "user",
-                    "sandboxPolicy": ["type": "readOnly"]]
+                    "sandboxPolicy": ["type": "workspaceWrite"]]
         case .autoEdits:
             return ["approvalPolicy": "on-request",
                     "approvalsReviewer": "user",
@@ -53,7 +59,7 @@ enum RuntimeModeMapping {
 
     private static func sandboxString(_ mode: AgentRuntimeMode) -> String {
         switch mode {
-        case .supervised: return "read-only"
+        case .supervised: return "workspace-write"
         case .autoEdits, .auto: return "workspace-write"
         case .fullAccess: return "danger-full-access"
         }

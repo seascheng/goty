@@ -233,17 +233,34 @@ final class OmpSession: PiSession {
     }
 
     override func interceptProtocolFrame(_ frame: [String: Any]) -> Bool {
+        let type = frame["type"] as? String
         // The ready frame of a LIVE pane arrives only inside the ring
         // replay (the process emitted it once at boot); gating the
         // handshake behind suppressReplay would deadlock attach.
-        guard frame["type"] as? String == "ready", !handshakeStarted else {
-            return false
+        if type == "ready", !handshakeStarted {
+            handshakeStarted = true
+            let completion = readyCompletion
+            readyCompletion = nil
+            handshake(completion: completion)
+            return true
         }
-        handshakeStarted = true
-        let completion = readyCompletion
-        readyCompletion = nil
-        handshake(completion: completion)
-        return true
+        // omp 18.2+: get_available_models answers from the registry
+        // snapshot and discovery results arrive as available_models_
+        // update pushes (registry refresh settles). Applying them here
+        // keeps the dropdown live without a re-request; a replayed
+        // boot-time push is same-machines stale at worst and the next
+        // live push overwrites it. Intercepted BEFORE the replay
+        // suppression so attaches mine it from the ring like the
+        // commands frame.
+        if type == "available_models_update",
+           let models = frame["models"] as? [[String: Any]] {
+            modelsFetchInFlight = nil
+            cachedModelCatalog = models
+            Self.persistCatalog(models)
+            rebuildConfigOptions()
+            return true
+        }
+        return false
     }
 
     /// Tail-first reads only apply once the session is BIG: below the

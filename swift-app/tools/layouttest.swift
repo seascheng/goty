@@ -1170,6 +1170,73 @@ func run() {
     content.layoutSubtreeIfNeeded()
     check(editor.findBarEnabledForTest, "search armed (page Mod-F)")
 
+    // — Editor overlay follows its workspace (tty7's TabCode rule) —
+    // The overlay belongs to the workspace it was opened on: a sidebar
+    // switch hides it (files stay open), switching back restores it,
+    // the offline cover outranks it, and ⌘E on a foreign workspace
+    // rebinds instead of phantom-hiding. Driven through the real
+    // coordinator mutations + the sync the .structure case runs.
+    print("— editor overlay follows its workspace —")
+    do {
+        editor.hide()
+        let ad = AppDelegate()
+        ad.wc = wc
+        let storeURL = URL(fileURLWithPath:
+            NSTemporaryDirectory() + "goty-edsync-\(UUID().uuidString).json")
+        let store = WorkspaceStore(sessionName: "goty-edsync", fileURL: storeURL)
+        let wsA = store.workspaces[0]
+        store.workspaces.append(WorkspaceState(
+            id: UUID(), name: "Local-b",
+            tabs: [TabState(id: UUID().uuidString, name: "1",
+                            panes: [PaneState(id: "edsync-b", cwd: "/tmp")])],
+            focusedTabIndex: 0, sshHost: nil))
+        ad.coordinator.store = store
+
+        let owned = ad.editorPanelForTest()
+        owned.show()
+        check(wc.terminalArea.isShowingOverlay && wc.terminalArea.overlayKind == .editor,
+              "editor presents on its workspace")
+        check(ad.editorWorkspaceId == wsA.id,
+              "owner bound to the focused workspace")
+
+        ad.coordinator.selectWorkspace(1)
+        ad.syncEditorOverlayWithFocusedWorkspace()
+        check(!wc.terminalArea.isShowingOverlay,
+              "switching workspaces dismisses the editor overlay")
+        check(owned.visible,
+              "editor stays open across the switch (files survive)")
+
+        ad.coordinator.selectWorkspace(0)
+        ad.syncEditorOverlayWithFocusedWorkspace()
+        check(wc.terminalArea.isShowingOverlay && wc.terminalArea.overlayKind == .editor,
+              "switching back restores the editor")
+
+        // Offline cover outranks the editor: a disconnected workspace
+        // must show its reconnect page, not a stale editor above it.
+        ad.coordinator.selectWorkspace(1)
+        ad.syncEditorOverlayWithFocusedWorkspace()
+        wc.terminalArea.presentOverlay(
+            ServerStatusView(wsName: "b", phase: .unreachable) {}, kind: .offline)
+        ad.coordinator.selectWorkspace(0)
+        ad.syncEditorOverlayWithFocusedWorkspace()
+        check(wc.terminalArea.overlayKind == .offline,
+              "offline cover outranks the editor on its own workspace")
+        wc.terminalArea.dismissOverlay(kind: .offline)
+
+        // ⌘E while suppressed: rebind to the CURRENT workspace, not a
+        // phantom hide of an already-hidden overlay.
+        ad.coordinator.selectWorkspace(1)
+        ad.menuToggleEditor()
+        check(wc.terminalArea.isShowingOverlay && wc.terminalArea.overlayKind == .editor
+              && ad.editorWorkspaceId == store.workspaces[1].id,
+              "⌘E on a foreign workspace rebinds the editor there")
+
+        owned.hide()
+        check(!wc.terminalArea.isShowingOverlay && ad.editorWorkspaceId == nil,
+              "hide after the round trip clears slot and owner")
+        try? FileManager.default.removeItem(atPath: storeURL.path)
+    }
+
     // 2026-08-22's real root cause, locked in: the renderer once put an
     // NSColor into a .font slot (ordered-list marker). AppKit's
     // attribute fixer then throws inside any layout pass. Render a doc

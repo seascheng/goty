@@ -62,6 +62,31 @@ func menuItemIcon(_ symbol: String, pointSize: CGFloat = 11) -> NSImage? {
                 .applying(.init(paletteColors: [Chrome.theme.iconTint])))
 }
 
+extension NSMenuItem {
+    /// macOS 27 stopped rendering `NSMenuItem.image` in menus popped via
+    /// `menu.popUp(positioning:)` (probe-verified 2026-09-16: bitmap and
+    /// SF-symbol item images both drop on that path, while
+    /// `NSMenu.popUpContextMenu` — the native right-click path — still
+    /// renders them). Inline the icon as a leading attachment: native
+    /// highlight, keyboard navigation and the state checkmark are
+    /// untouched. `gutter` (the icon box of sibling rows) keeps icon-less
+    /// titles aligned in mixed menus via a transparent spacer attachment.
+    func applyIcon(_ image: NSImage?, title: String? = nil, gutter: NSSize? = nil) {
+        attributedTitle = nil
+        if let title { self.title = title }
+        guard image != nil || gutter != nil else { return }
+        let box = image?.size ?? gutter!
+        let attachment = NSTextAttachment()
+        attachment.image = image ?? NSImage(size: box)   // blank = transparent gutter
+        // Center the box on the 13pt menu line: 4pt above the baseline.
+        attachment.bounds = NSRect(x: 0, y: -box.height / 2 + 4,
+                                   width: box.width, height: box.height)
+        let text = NSMutableAttributedString(attributedString: NSAttributedString(attachment: attachment))
+        text.append(NSAttributedString(string: "  " + self.title))
+        attributedTitle = text
+    }
+}
+
 /// 1px separator surface (sidebar splits, panel edge).
 final class HairlineView: NSView {
     override func draw(_ dirtyRect: NSRect) {

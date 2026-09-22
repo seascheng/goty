@@ -128,8 +128,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>Goty AI</string>
     <key>CFBundleDisplayName</key><string>Goty AI</string>
     <key>CFBundleIdentifier</key><string>com.goty.ai</string>
-    <key>CFBundleVersion</key><string>5</string>
-    <key>CFBundleShortVersionString</key><string>0.3.1</string>
+    <key>CFBundleVersion</key><string>6</string>
+    <key>CFBundleShortVersionString</key><string>0.3.2</string>
     <key>CFBundleExecutable</key><string>goty</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
@@ -145,17 +145,27 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Ad-hoc sign everything we ship. The linker's automatic adhoc signature
+# Sign everything we ship. The linker's automatic adhoc signature
 # covers only the bare main binary (Info.plist unbound, resources
 # unsealed): macOS TCC could not persist a Downloads-folder grant against
 # that broken bundle signature and re-prompted on every access (2026-08-26:
 # endless "Goty wants to access files in your Downloads folder" dialogs).
 # Nested Mach-O first, then the bundle; the linux-musl ELF is a resource
 # uploaded over ssh, never executed on macOS, so it stays unsigned.
-codesign --force --sign - --identifier com.goty.ai.sessiond \
+#
+# Prefer a stable identity over ad-hoc: a locally held "Apple Development"
+# certificate (free Apple ID, created once in Xcode) pins TCC grants to
+# the team id instead of the cdhash, so Screen Recording / Accessibility
+# grants survive every rebuild. Ad-hoc (cdhash) dies with each build and
+# re-prompts forever. CI keychains hold no identity → ad-hoc fallback.
+SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/^.*"\(Apple Development: [^"]*\)".*$/\1/p' | head -1)
+SIGN_ID=${SIGN_ID:--}
+[ "$SIGN_ID" != "-" ] && echo "==> signing with stable identity: $SIGN_ID"
+codesign --force --sign "$SIGN_ID" --identifier com.goty.ai.sessiond \
     "$APP/Contents/MacOS/goty-sessiond"
-codesign --force --sign - --identifier com.goty.ai.libghostty \
+codesign --force --sign "$SIGN_ID" --identifier com.goty.ai.libghostty \
     "$APP/Contents/MacOS/CGhostty/lib/libghostty-internal.dylib"
-codesign --force --sign - --identifier com.goty.ai "$APP"
+codesign --force --sign "$SIGN_ID" --identifier com.goty.ai "$APP"
 
 echo "built: $(pwd)/goty and $APP"

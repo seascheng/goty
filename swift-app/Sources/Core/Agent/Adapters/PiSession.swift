@@ -759,11 +759,14 @@ class PiSession: AgentSessioning {
                                  secondsSinceSend: Double?) -> Bool {
         // Any sign of life vetoes the heal: still streaming, queued
         // follow-ups, an open compaction, a tool mid-flight, or a send
-        // so recent the agent may just not have started yet.
+        // so recent the agent may just not have started yet. nil
+        // secondsSinceSend (attach mid-turn — this process never sent)
+        // has NO optimistic window to protect: two consecutive
+        // fully-idle reads are already the authoritative settle.
         guard isWorking, !streaming, queued == 0, !compacting,
               activeToolCount == 0 else { return false }
-        guard let since = secondsSinceSend, since > 4 else { return false }
-        return true
+        guard let since = secondsSinceSend else { return true }
+        return since > 4
     }
 
     private static func planEntries(_ state: [String: Any]) -> [AgentPlanEntry] {

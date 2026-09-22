@@ -7,13 +7,7 @@
 **A native macOS terminal workbench: Ghostty's core, your sessions, your servers, your agents.**
 
 <sub>Swift · AppKit · libghostty · Rust session daemon</sub>
-
-<br />
-
 <sub>v0.3.0 · macOS 13+ · themed by your own Ghostty config · MPL-2.0</sub>
-
-<br />
-
 <img src="images/goty.png" alt="The @ai task card over the terminal grid: fixed title bar, streaming markdown body" width="900" />
 <br />
 <sub>Type <code>@ai</code> in any pane — a card opens over the grid: streaming markdown, executable proposals.</sub>

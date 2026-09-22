@@ -1083,8 +1083,22 @@ fn store_root_path(relative: &str) -> anyhow::Result<PathBuf> {
 }
 
 fn stream_pane(stream: UnixStream, pane: Arc<Pane>) -> anyhow::Result<()> {
-    const QUEUE_FRAMES: usize = 512;
-    let (sender, receiver) = mpsc::sync_channel::<OutFrame>(QUEUE_FRAMES);
+    // SO_SNDTIMEO: a client whose TCP path died silently (the wedged-ssh
+    // 5090 wedge, 2026-09-22) otherwise blocks write_output's write_all
+    // FOREVER — its channel never drains, the pane reader pins the state
+    // lock on a full channel, and the whole daemon starves. A send
+    // timeout turns that into a writer exit → channel closes → reader's
+    // try_send errors → subscriber dropped → goty reconnects.
+    let timeout = std::time::Duration::from_secs(10);
+    let _ = stream.set_write_timeout(Some(timeout));
+    // UNBOUNDED channel: send() never blocks, so the pane reader never
+    // stalls under state.lock() (the 2026-09-22 daemon-wide deadlock),
+    // and a slow client's big ring replay cannot fail or drop frames
+    // (a bounded channel + stall-drop killed slow-link respawns — the
+    // "Codex 启动超时" regression the same day). Memory is bounded by
+    // the writer's SO_SNDTIMEO below: a dead client's channel stops
+    // growing when its writer exits and the sender reports Disconnected.
+    let (sender, receiver) = mpsc::channel::<OutFrame>();
     let Some(epoch) = pane.attach(sender) else {
         return write_error(&stream, "failed to attach pane".to_string());
     };

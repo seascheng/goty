@@ -283,7 +283,7 @@ final class PromptCard: DialogCard {
         if let detail, !detail.isEmpty {
             let detailLabel = NSTextField(labelWithString: detail)
             detailLabel.font = .systemFont(ofSize: 12)
-            detailLabel.textColor = Chrome.theme.secondaryText
+            detailLabel.textColor = Chrome.theme.sidebarText
             detailLabel.alignment = .left
             detailLabel.lineBreakMode = .byWordWrapping
             detailLabel.maximumNumberOfLines = 6

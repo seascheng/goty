@@ -3,7 +3,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -122,8 +122,11 @@ impl ReplayRing {
             }
         }
     }
-
-    fn replay(&self, sender: &SyncSender<OutFrame>) -> bool {
+    /// Replay into the subscriber channel. The channel is UNBOUNDED, so
+    /// send() never blocks (the reader/attach hold state.lock() — the
+    /// 2026-09-22 daemon-wide deadlock contract) and a big ring on a
+    /// slow link replays losslessly.
+    fn replay(&self, sender: &Sender<OutFrame>) -> bool {
         for segment in &self.segments {
             if sender
                 .send(OutFrame::new(
@@ -279,7 +282,7 @@ impl BracketedPasteTracker {
 struct PaneState {
     ring: ReplayRing,
     bracketed_paste: BracketedPasteTracker,
-    subscriber: Option<SyncSender<OutFrame>>,
+    subscriber: Option<Sender<OutFrame>>,
     subscriber_epoch: u64,
     alive: bool,
     exit_code: Option<i32>,
@@ -363,8 +366,9 @@ impl Pane {
 
     /// Replay and subscriber installation happen under the same lock used by
     /// the PTY reader. Output is therefore either in the replay or after it;
-    /// no byte can fall between the two channels.
-    pub fn attach(&self, sender: SyncSender<OutFrame>) -> Option<u64> {
+    /// no byte can fall between the two channels. The channel is unbounded:
+    /// send never blocks, so the lock is never pinned (DEADLOCK CONTRACT).
+    pub fn attach(&self, sender: Sender<OutFrame>) -> Option<u64> {
         let mut state = self.state.lock().ok()?;
         state.subscriber_epoch = state.subscriber_epoch.wrapping_add(1);
         let epoch = state.subscriber_epoch;
@@ -743,11 +747,14 @@ fn spawn_reader(
                         // Build the frame only when someone is attached —
                         // headless panes (parked servers, background
                         // sessions) would otherwise copy every chunk.
-                        // Blocking send is the backpressure contract: a slow
-                        // display slows the PTY reader, exactly like a real
-                        // terminal. try_send dropped the subscriber forever
-                        // at 512 queued frames and froze the pane silently
-                        // (socket alive, no EXITED, no reconnect).
+                        // DEADLOCK CONTRACT (2026-09-22 5090 wedge): this
+                        // send runs under state.lock(); the channel is
+                        // UNBOUNDED so send() never blocks and the lock can
+                        // never be pinned. A dead client is reaped by the
+                        // writer's SO_SNDTIMEO (stream_pane): its writer
+                        // exits, the receiver drops, and the next send here
+                        // returns Disconnected → subscriber cleared → goty
+                        // reconnects and replays from the ring.
                         if let Some(sender) = state.subscriber.as_ref()
                             && sender
                                 .send(OutFrame::new(protocol::kind::OUTPUT, bytes.to_vec()))
@@ -809,7 +816,7 @@ mod tests {
         ring.append(b"old");
         assert!(ring.resize(size(120)));
         ring.append(b"new");
-        let (tx, rx) = mpsc::sync_channel(8);
+        let (tx, rx) = mpsc::channel();
         assert!(ring.replay(&tx));
         drop(tx);
         let frames: Vec<_> = rx.into_iter().collect();
@@ -915,7 +922,7 @@ mod tests {
         ring.append(b"aaaaaaaaaaaaaaaa"); // 16 bytes: exactly full
         ring.append(b"bbbb");
         assert_eq!(ring.len, 16);
-        let (tx, rx) = mpsc::sync_channel(8);
+        let (tx, rx) = mpsc::channel();
         assert!(ring.replay(&tx));
         drop(tx);
         let bytes: Vec<u8> = rx

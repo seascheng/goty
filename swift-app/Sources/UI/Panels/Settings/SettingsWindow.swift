@@ -1019,6 +1019,23 @@ final class SettingsWindowController: NSObject {
             window.center()
         }
         window.makeKeyAndOrderFront(nil)
+        // macOS 27: makeKeyAndOrderFront from INSIDE another window's
+        // mouseDown keys the target but no longer raises it — the gear
+        // click left Settings key-yet-BEHIND the main window (verified
+        // via key log + CGWindowList z-order; the "点不出来" report).
+        // Re-assert front once the click has fully unwound.
+        DispatchQueue.main.async { [weak self] in
+            self?.window.orderFrontRegardless()
+        }
+        if ProcessInfo.processInfo.environment["GOTY_SETTINGS_DEBUG"] == "1" {
+            let trace = "SETTINGS show: key=\(window.isKeyWindow) vis=\(window.isVisible) occ=\(window.occlusionState.rawValue) keyWin=\(NSApp.keyWindow?.title ?? "nil") appActive=\(NSApp.isActive)\n"
+            FileHandle.standardError.write(trace.data(using: .utf8)!)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let self else { return }
+                let late = "SETTINGS +0.8s: key=\(self.window.isKeyWindow) vis=\(self.window.isVisible) occ=\(self.window.occlusionState.rawValue) keyWin=\(NSApp.keyWindow?.title ?? "nil") frame=\(self.window.frame)\n"
+                FileHandle.standardError.write(late.data(using: .utf8)!)
+            }
+        }
         installArrowMonitor()
     }
 

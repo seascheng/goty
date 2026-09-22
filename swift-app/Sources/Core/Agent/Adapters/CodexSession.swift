@@ -1480,9 +1480,15 @@ final class CodexSession: AgentSessioning {
                 self.threadId = sessionId
                 self.attemptedThreadRescue = false
                 self.sessionId = sessionId
+                // READY BEFORE HISTORY: the resume landed — the pane is
+                // live and usable NOW. A huge thread's history replay
+                // (43M-token rollout on codex 0.155) can outrun the
+                // host's 90s handshake watchdog while the server is
+                // still reading; the transcript rebuild arrives via
+                // transcriptReset (atomic page swap) whenever it lands.
+                self.emit([.ready])
                 self.replayThreadHistory(sessionId) { [weak self] events in
-                    self?.emit(events + [.configChanged(self?.assembleOptions() ?? []),
-                                         .ready])
+                    self?.emit(events + [.configChanged(self?.assembleOptions() ?? [])])
                     completion?(true)
                 }
             }

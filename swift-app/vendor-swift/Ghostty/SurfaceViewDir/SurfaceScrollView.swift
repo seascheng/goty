@@ -130,20 +130,6 @@ class SurfaceScrollView: NSView {
             self?.handleScrollerStyleChange()
         })
 
-        // Listen for frame change events on macOS 26.0. See the docstring for
-        // handleFrameChangeForNSScrollPocket for why this is necessary.
-        if #unavailable(macOS 26.1) { if #available(macOS 26.0, *) {
-            observers.append(NotificationCenter.default.addObserver(
-                forName: NSView.frameDidChangeNotification,
-                object: nil,
-                // Since this observer is used to immediately override the event
-                // that produced the notification, we let it run synchronously on
-                // the posting thread.
-                queue: nil
-            ) { [weak self] notification in
-                self?.handleFrameChangeForNSScrollPocket(notification)
-            })
-        }}
 
         // Listen for derived config changes to update scrollbar settings live
         surfaceView.$derivedConfig
@@ -322,50 +308,6 @@ class SurfaceScrollView: NSView {
         synchronizeScrollView()
     }
 
-    /// Handles a change in the frame of NSScrollPocket styling overlays
-    ///
-    /// NSScrollView instances are set up with a subview hierarchy which, as far
-    /// as I can tell, is intended to add a blur effect to any part of a scroll
-    /// view that lies under the titlebar, presumably to complement a titlebar
-    /// using liquid glass transparency. This doesn't work correctly with our
-    /// hidden titlebar style, which does have a titlebar container, albeit
-    /// hidden. The styling overlays don't care and size themselves to this
-    /// container, creating a blurry, transparent field that clips the top of
-    /// the surface view.
-    ///
-    /// With other titlebar styles, these views always have zero frame size,
-    /// presumably because there is no overlap between the scroll view and the
-    /// titlebar container.
-    ///
-    /// In native fullscreen, the titlebar detaches from the window and these
-    /// views seem to work a bit differently, taking non-zero sizes for all
-    /// styles without creating any problems.
-    ///
-    /// To handle this in a way that minimizes the difference between how the
-    /// hidden titlebar and other window styles behave, we do as follows: If we
-    /// have the hidden titlebar style and we're not fullscreen, we listen to
-    /// frame changes on NSScrollPocket-related objects in scrollView.subviews,
-    /// and reset their frame to zero.
-    ///
-    /// See also https://developer.apple.com/forums/thread/798392.
-    ///
-    /// This bug is only present in macOS 26.0.
-    @available(macOS, introduced: 26.0, obsoleted: 26.1)
-    private func handleFrameChangeForNSScrollPocket(_ notification: Notification) {
-        guard let window = window as? NSWindow else { return }
-        guard !window.styleMask.contains(.fullScreen) else { return }
-        guard let view = notification.object as? NSView else { return }
-        guard view.className.contains("NSScrollPocket") else { return }
-        guard scrollView.subviews.contains(view) else { return }
-        // These guards to avoid an infinite loop don't actually seem necessary.
-        // The number of times we reach this point during any given event (e.g.,
-        // creating a split) is the same either way. We keep them anyway out of
-        // an abundance of caution.
-        view.postsFrameChangedNotifications = false
-        view.frame = NSRect(x: 0, y: 0, width: 0, height: 0)
-        view.postsFrameChangedNotifications = true
-    }
-
     // MARK: Calculations
 
     /// Calculate the appropriate document view height given a scrollbar state
@@ -373,15 +315,13 @@ class SurfaceScrollView: NSView {
         let contentHeight = scrollView.contentSize.height
         let cellHeight = surfaceView.cellSize.height
         if cellHeight > 0, let scrollbar = surfaceView.scrollbar {
-            // The document view must have the same vertical padding around the
-            // scrollback grid as the content view has around the terminal grid
-            // otherwise the content view loses alignment with the surface.
             let documentGridHeight = CGFloat(scrollbar.total) * cellHeight
             let padding = contentHeight - (CGFloat(scrollbar.len) * cellHeight)
             return documentGridHeight + padding
         }
         return contentHeight
     }
+
 
     // MARK: Mouse events
 

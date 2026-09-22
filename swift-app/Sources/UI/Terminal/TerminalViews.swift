@@ -347,6 +347,14 @@ final class PaneHost: NSView {
             let newSession = target.daemon.openPane(
                 id: runtimeId, cwd: cwd, shell: target.shell, args: target.args,
                 environment: target.environment, grid: grid,
+                // A remote pane's ring replays across the ssh forward
+                // on every reattach — an 8MB default ring on a slow
+                // WAN (measured 5090: ~9KB/s over the tailnet UDP
+                // path) turns reopening a busy tab into minutes. 2MB
+                // keeps the replay bounded; live scrollback on the
+                // attached surface is unaffected (the ring only feeds
+                // REATTACH replays).
+                ringBytes: target.daemon.isRemote ? 2 * 1024 * 1024 : nil,
                 // Called on the session's read thread; the stream queue
                 // restores per-pane FIFO and keeps parsing off main.
                 onFrame: { [weak self] kind, data in
