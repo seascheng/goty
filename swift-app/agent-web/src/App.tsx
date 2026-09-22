@@ -1699,6 +1699,7 @@ export function App() {
             onJump={jumpToUser} />
         </div>
       <div className="transcript" ref={scroller} onScroll={onScroll}>
+        {store.loadProgress && <div className="load-bar" aria-hidden />}
         {(begin > 0 || store.hasOlder) && (
           <div className="history-more" ref={sentinelRef}>加载更早消息…</div>
         )}

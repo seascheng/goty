@@ -237,6 +237,9 @@ export const IncomingEventSchema = z.discriminatedUnion("type", [
   /// Locally-applied: the history picker just asked the host to swap
   /// the conversation — the wait until replay needs a visible stage.
   z.object({ type: z.literal("sessionLoading"), text: z.string().nullish() }),
+  /// Host: the load it was asked for (initial attach or history swap)
+  /// finished — retire the progress bar.
+  z.object({ type: z.literal("loadSettled") }),
   z.object({
     type: z.literal("meta"),
     capabilities: z.array(z.string()).nullish(),
@@ -306,6 +309,11 @@ class Store {
   /// History-swap wait: set locally when a session is picked, cleared
   /// by the first replayed block (or an error/notice telling why not).
   sessionLoading: string | null = null;
+  /// Whole-load progress (startup replay OR history swap): true from
+  /// starting/sessionLoading until the host's loadSettled (or ready/
+  /// error). Drives the top indeterminate bar — replay arrives in
+  /// BATCHES with gaps; the stage alone disappears on batch one.
+  loadProgress = false;
   /// Follow-ups queued while a turn ran (Enter mid-turn). omp delivers
   /// them after settle; they flush as user blocks at turnEnded.
   pendingQueue: string[] = [];
@@ -555,6 +563,7 @@ class Store {
     // A terminal error or notice also retires the history-swap stage:
     // the replay will never come, and the reason is now on screen.
     if (event.type === "error" || event.type === "statusFlash") this.sessionLoading = null;
+    if (event.type === "ready" || event.type === "error") this.loadProgress = false;
     if (STARTING_TERMINATORS[event.type]) this.starting = null;
     switch (event.type) {
       case "userMessage":
@@ -707,7 +716,10 @@ class Store {
           this.planCleared = this.plan != null;
         }
         break;
-      case "sessionLoading": this.sessionLoading = event.text ?? null; break;
+      case "sessionLoading":
+        this.sessionLoading = event.text ?? null;
+        if (event.text != null) this.loadProgress = true;
+        break;
       case "planDockPref":
         // Host truth (page-ready push or echo of our own toggle):
         // same LOCAL-only semantics as togglePlanDock — no revision
@@ -819,7 +831,11 @@ class Store {
         }
         break;
       }
-      case "starting": this.starting = event.agent; break;
+      case "starting":
+        this.starting = event.agent;
+        this.loadProgress = true;
+        break;
+      case "loadSettled": this.loadProgress = false; break;
       case "ready":
         // Handshake complete — pure state (the STARTING_TERMINATORS
         // lookup already cleared `starting`); never transcript content.

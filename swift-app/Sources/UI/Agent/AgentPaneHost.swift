@@ -555,7 +555,13 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
             self.lastRetrySchedule = nil   // the swapped-out turn's retry is not this pane's state
             self.bridge.push(["type": "clearTranscript"])
             self.session.load(sessionId: sessionId) { [weak self] _ in
-                DispatchQueue.main.async { self?.refreshSessionTitle() }
+                DispatchQueue.main.async {
+                    self?.refreshSessionTitle()
+                    // Replay done (success OR failure): retire the
+                    // progress bar — the stage already left with the
+                    // first batch, the bar spans the whole swap.
+                    self?.bridge.push(["type": "loadSettled"])
+                }
             }
         }
         bridge.onListFiles = { [weak self] reply in
@@ -725,7 +731,11 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                 // already handled it inside connect.
                 if ok, let restore = self.restoredSessionId,
                    !self.session.selfManagesRestore {
-                    self.session.load(sessionId: restore) { _ in }
+                    self.session.load(sessionId: restore) { [weak self] _ in
+                        DispatchQueue.main.async {
+                            self?.bridge.push(["type": "loadSettled"])
+                        }
+                    }
                 }
                 if ok, let prompt = self.initialPrompt {
                     self.initialPrompt = nil
@@ -779,6 +789,7 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
         print("GOTY_DEBUG: loading", sid)
         session.load(sessionId: sid) { ok in
             DispatchQueue.main.async {
+                self.bridge.push(["type": "loadSettled"])
                 print("GOTY_DEBUG: load ok=\(ok) in \(Date().timeIntervalSince(t0))s replayBytes=\(self.session.debugReplayBytes) frames=\(self.session.debugReplayFrames)")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
                     self.webView.evaluateJavaScript("""
