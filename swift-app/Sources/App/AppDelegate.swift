@@ -386,7 +386,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Test surface: the app-presented editor — owner binding and
     /// overlay wiring included. The headless suite cannot run the
     /// launch path that builds it (no Ghostty.App in tools).
-    func editorPanelForTest() -> EditorPanelView { editorPanel() }
+    /// Open a path in the built-in editor, bound to the focused
+    /// workspace's file source (local or remote). Shared by the right
+    /// panel's file tree and the agent transcript's path chips.
+    func openFileInEditor(_ path: String) {
+        guard let ws = coordinator.store?.focused else { return }
+        editorPanel().open(path: path, source: FileSources.source(for: ws))
+    }
 
     /// The editor follows its workspace (tty7's per-tab TabCode, one
     /// granularity up): switching focus away dismisses the overlay but
@@ -1074,8 +1080,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // terminalArea.presentOverlay/dismissOverlay, so the editor can
         // never touch the window's region constraints (see CLAUDE.md).
         rightPanel.onOpenFile = { [weak self] path in
-            guard let self, let ws = self.coordinator.store?.focused else { return }
-            self.editorPanel().open(path: path, source: FileSources.source(for: ws))
+            self?.openFileInEditor(path)
         }
 
         rightPanel.onOpenDiff = { [weak self] path, staged, untracked in

@@ -24,7 +24,11 @@ export type HostCommand =
   | { type: "startLogin"; providerId: string }
   | { type: "queueRemove"; text: string }
   | { type: "queueSendNow"; text: string }
-  | { type: "stats" };
+  | { type: "stats" }
+  /// A link in the transcript: the HOST opens it (WKWebView has no
+  /// browser); a path opens the built-in editor instead.
+  | { type: "openURL"; url: string }
+  | { type: "openFile"; path: string };
 
 declare global {
   interface Window {

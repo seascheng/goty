@@ -31,6 +31,9 @@ final class AgentWebBridge: WebBridge {
     var onBranchNewPane: ((String) -> Void)?
     var onExport: (() -> Void)?
     var onLogin: (() -> Void)?
+    /// Transcript link → default browser; transcript path chip → editor.
+    var onOpenURL: ((String) -> Void)?
+    var onOpenFile: ((String) -> Void)?
     var onStartLogin: ((String) -> Void)?
     var onStats: (() -> Void)?
     override func route(_ message: [String: Any]) {
@@ -96,6 +99,14 @@ final class AgentWebBridge: WebBridge {
         case "queueSendNow":
             if let text = message["text"] as? String, !text.isEmpty {
                 onQueueSendNow?(text)
+            }
+        case "openURL":
+            if let url = message["url"] as? String, !url.isEmpty {
+                onOpenURL?(url)
+            }
+        case "openFile":
+            if let path = message["path"] as? String, !path.isEmpty {
+                onOpenFile?(path)
             }
         case "stats":
             onStats?()

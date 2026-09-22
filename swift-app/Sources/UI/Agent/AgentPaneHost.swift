@@ -565,6 +565,24 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                 DispatchQueue.main.async { reply(files) }
             }
         }
+        bridge.onOpenURL = { url in
+            DispatchQueue.main.async {
+                if let target = URL(string: url) {
+                    NSWorkspace.shared.open(target)
+                }
+            }
+        }
+        bridge.onOpenFile = { [weak self] path in
+            guard let self else { return }
+            // Agent prose mixes absolute and repo-relative references;
+            // resolve against the session's cwd before handing over.
+            let resolved = path.hasPrefix("/") || path.hasPrefix("~")
+                ? NSString(string: path).expandingTildeInPath
+                : ((self.session.cwd).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/" + path } ?? path)
+            DispatchQueue.main.async {
+                (NSApp.delegate as? AppDelegate)?.openFileInEditor(resolved)
+            }
+        }
         bridge.onPermissionOption = { [weak self] optionId in
             guard let self, let prompt = self.pendingPrompt else { return }
             self.session.respondPermission(requestID: prompt.requestID, optionId: optionId)
