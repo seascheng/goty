@@ -11,7 +11,7 @@ const chevron: number[] = Array.from({ length: 9 }, (_, i) => {
   return (c + Math.abs(r - 1)) * 90;
 });
 
-export function LoaderGrid({ size = 15 }: { size?: number }) {
+export function LoaderGrid({ size = 12 }: { size?: number }) {
   const cell = Math.max(2, size * 4 / 15);
   return (
     <span className="loader-grid" aria-hidden

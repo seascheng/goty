@@ -1329,7 +1329,7 @@ function StatusLine() {
   // the compacting chip is the sharper truth; don't spin both.
   if (s.phase === "thinking" && !rt?.compacting) {
     chips.push(<span key="th" className="cstat" title="模型思考中">
-      <LoaderGrid /><span className="shimmer-text">思考中</span>
+      <LoaderGrid /><span className="shimmer-text">思考中…</span>
       {elapsedT && <span className="turn-elapsed">{elapsedT}</span>}
     </span>);
   } else if (s.phase === "executing") {
@@ -1342,7 +1342,7 @@ function StatusLine() {
     }
     chips.push(
       <span key="ex" className="cstat" title="工具执行中">
-        <LoaderGrid /><span className="shimmer-text">执行中</span>
+        <LoaderGrid /><span className="shimmer-text">执行中…</span>
         {elapsedT && <span className="turn-elapsed">{elapsedT}</span>}
         {running && <span className="turn-tool">{toolDisplayTitle(running)}</span>}
       </span>);
@@ -1357,7 +1357,7 @@ function StatusLine() {
   }
   if (rt?.compacting) {
     chips.push(<span key="compact" className="cstat warn" title="上下文压缩中">
-      <LoaderGrid /><span className="shimmer-text">压缩中</span>
+      <LoaderGrid /><span className="shimmer-text">压缩中…</span>
     </span>);
   }
   if (chips.length === 0) return null;
