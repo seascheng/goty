@@ -871,8 +871,8 @@ body {
 }
 .slash-opt {
   display: grid; grid-template-columns: auto 1fr; column-gap: 10px; width: 100%; text-align: left;
-  background: none; border: 0; color: var(--foreground); padding: 5px 14px;
-  border-radius: 0; cursor: pointer;
+  background: none; border: 0; color: var(--foreground); padding: 5px 10px;
+  border-radius: 6px; cursor: pointer;
   transition: background-color 0.15s ease;
 }
 .slash-opt.cur { background: color-mix(in srgb, var(--foreground) 6%, transparent); }
@@ -1378,13 +1378,20 @@ textarea { caret-color: var(--accent-bright); }
    tinted fill, accent text. Hover/keyboard highlight stays quiet. */
 .pop-row {
   display: flex; width: 100%; align-items: center; gap: 4px;
-  /* PLAIN LIST ROWS: square corners, bleed to the card's edge — no
-     per-option tiles. Selection stays the trailing check. */
-  padding: 0 12px; margin: 0 -6px; border-radius: 0;
+  /* macOS-menu rows: symmetric inset, soft 6px corners — the wash
+     is a rounded band with EQUAL margins either side (the scrollbar
+     is slimmed so the right side doesn't gape). */
+  padding: 0 8px; margin: 0; border-radius: 6px;
   transition: background-color 0.15s ease;
 }
 .pop-row.hot { background: color-mix(in srgb, var(--foreground) 5%, transparent); }
 .pop-row.cur { background: none; }
+.pop-surface ::-webkit-scrollbar { width: 5px; }
+.pop-surface ::-webkit-scrollbar-thumb {
+  background: var(--surface3); border: none; border-radius: 2.5px;
+}
+.pop-surface ::-webkit-scrollbar-track { background: none; }
+
 .pop-check {
   display: inline-flex; align-items: center; justify-content: center;
   flex: none; width: 18px; color: var(--foreground);

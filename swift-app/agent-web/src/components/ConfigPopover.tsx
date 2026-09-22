@@ -85,7 +85,7 @@ export function ConfigPopover({ anchor, option, onDismiss, onPick }: {
         </label>
       )}
       <div role="listbox" aria-label={option.name}
-        className="min-h-0 flex-1 overflow-y-auto overscroll-none px-1.5 pb-1.5">
+        className="min-h-0 flex-1 overflow-y-auto overscroll-none p-1.5">
         {visible.length === 0 && (
           <div className="px-3 py-4 text-[12px] text-content/50">无匹配选项</div>
         )}
