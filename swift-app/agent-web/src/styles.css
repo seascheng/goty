@@ -52,9 +52,6 @@
   /* Config chips + their popovers (derived lifts — follow the pushed
      palette; opaque color-mix so the popover never shows the
      transcript through, even with --bg-alpha translucency). */
-  --chip-bg: var(--surface1);
-  --chip-fg: var(--fg-muted);
-  --chip-border: var(--border-accent);
   --working: #f59e0b;
   --stop-hover: #d96558;
   --stat-add: #4ec96a;
@@ -630,14 +627,15 @@ body {
 .chip, .icon-chip {
   display: inline-flex; align-items: center; justify-content: center; gap: 5px;
   height: 24px; padding: 0 9px;
-  background: transparent; border: 1px solid var(--border); border-radius: 999px;
+  background: transparent; border: 1px solid transparent; border-radius: 8px;
   color: var(--fg-muted); font-size: 11.5px; cursor: pointer;
   transition: background .12s ease, border-color .12s ease, color .12s ease;
 }
 .icon-chip { width: 24px; height: 24px; padding: 0; }
 .chip:hover, .icon-chip:hover { background: var(--surface2); color: var(--foreground); }
 .chip.open, .icon-chip.open {
-  background: var(--surface3); border-color: var(--accent-bright); color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 7%, transparent);
+  border-color: transparent; color: var(--foreground);
 }
 .chip svg, .icon-chip svg { color: var(--fg-extra-muted); pointer-events: none; flex: none; }
 .chip:hover svg, .chip.open svg,
@@ -647,14 +645,17 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  background: var(--chip-bg);
-  color: var(--chip-fg);
-  border: 1px solid var(--chip-border);
+  height: 26px;
+  padding: 0 7px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 12px; font-weight: 500;
   cursor: pointer;
   user-select: none;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
+.chip:hover { background: color-mix(in srgb, var(--foreground) 5%, transparent); color: var(--foreground); }
 
 .chip-value {
   font-size: 12px;
@@ -870,10 +871,11 @@ body {
 }
 .slash-opt {
   display: grid; grid-template-columns: auto 1fr; column-gap: 10px; width: 100%; text-align: left;
-  background: none; border: 0; color: var(--foreground); padding: 6px 8px;
-  border-radius: 5px; cursor: pointer;
+  background: none; border: 0; color: var(--foreground); padding: 5px 8px;
+  border-radius: 6px; cursor: pointer;
+  transition: background-color 0.15s ease;
 }
-.slash-opt.cur { background: var(--surface3); }
+.slash-opt.cur { background: color-mix(in srgb, var(--foreground) 6%, transparent); }
 .slash-name { font-family: "SF Mono", Menlo, monospace; font-size: 12px; color: var(--accent-bright); }
 .slash-hint { color: var(--fg-extra-muted); font-size: 11px; align-self: center; }
 .slash-desc { grid-column: 1 / -1; color: var(--fg-muted); font-size: 11px; }
@@ -1099,7 +1101,7 @@ body {
    failure for the body blur). The lift comes from tokens, the shadow
    does the depth; no blur on this layer. */
 .pop-surface {
-  border-radius: 12px;
+  border-radius: 10px;
   border: 1px solid color-mix(in srgb, var(--foreground) 14%, transparent);
   background: color-mix(in srgb, var(--bg) 92%, var(--foreground));
   box-shadow: var(--pop-shadow);
@@ -1361,7 +1363,7 @@ textarea { caret-color: var(--accent-bright); }
 
 /* #08 Prompt Bar: richer knob surface (rows already strong). */
 .pop-surface {
-  border-radius: 14px;
+  border-radius: 10px;
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.45);
 }
 .pop-pill {
@@ -1389,13 +1391,18 @@ textarea { caret-color: var(--accent-bright); }
    tinted fill, accent text. Hover/keyboard highlight stays quiet. */
 .pop-row {
   display: flex; width: 100%; align-items: center; gap: 4px;
-  padding: 0 4px; margin: 1px 0; border-radius: 8px;
+  padding: 0 4px; margin: 0; border-radius: 6px;
+  transition: background-color 0.15s ease;
 }
-/* ONE selection language across every popover (models / thinking /
-   commands) — the sidebar tab pill: a soft accent fill, no rails,
-   brightest text. Hover/keyboard stays a quiet neutral wash. */
+/* beautifului #08 model picker: selection is the TRAILING CHECK,
+   never a fill; hover/keyboard is a quiet wash on the row. */
 .pop-row.hot { background: color-mix(in srgb, var(--foreground) 5%, transparent); }
-.pop-row.cur { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+.pop-row.cur { background: none; }
+.pop-check {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none; width: 18px; color: var(--foreground);
+}
+.pop-check.invisible { visibility: hidden; }
 
 /* /command and @file popovers: the same card language as the config
    knobs (08 prompt bar: one popover system, not three). */

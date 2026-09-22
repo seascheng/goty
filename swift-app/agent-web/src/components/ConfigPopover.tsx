@@ -1,3 +1,4 @@
+import { Icon } from "./Icon";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Popover, type PopoverAnchor } from "../ui/Popover";
 import { type ConfigChoice } from "../store";
@@ -117,24 +118,23 @@ export function ConfigPopover({ anchor, option, onDismiss, onPick }: {
               onMouseEnter={() => setActive(index)}
               className={"pop-row"
                 + (selected ? " cur" : "")
-                + (highlighted && !selected ? " hot" : "")}>
+                + (highlighted ? " hot" : "")}>
               <button role="option" aria-selected={selected}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => onPick(o.value)}
                 className="flex min-w-0 flex-1 items-center gap-2 px-1.5 py-1.5 text-left text-content">
                 <span className="min-w-0 flex-1">
-                  <span className={"block truncate text-[12.5px] font-medium leading-5" + (selected ? " text-accent" : "")}>{o.name}</span>
+                  <span className="block truncate text-[12.5px] font-medium leading-5">{o.name}</span>
                   {o.source && (
                     <span className="block truncate text-[11px] leading-[13.5px] text-content/50">{o.source}</span>
                   )}
                 </span>
-                {selected && (
-                  <svg className="shrink-0 text-accent" width="14" height="14"
-                    viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                )}
+                {/* 08 picker: the check column is ALWAYS present
+                    (invisible when not selected) so rows don't shift,
+                    and it carries selection — no fill, ink color. */}
+                <span className={"pop-check" + (selected ? "" : " invisible")} aria-hidden>
+                  <Icon kind="check" />
+                </span>
               </button>
             </div>
           );
