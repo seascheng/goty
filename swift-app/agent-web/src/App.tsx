@@ -4,7 +4,7 @@ import { store, fmtTokens, type Block, type ConfigChoice, type PlanEntry, type T
 import { Popover, type PopoverAnchor } from "./ui/Popover";
 import { postToHost } from "./bridge";
 import { Chevron, Icon } from "./components/Icon";
-import { fmtElapsed, LoaderGrid } from "./components/Loader";
+import { fmtElapsed, LoaderGrid, fmtElapsedTenths } from "./components/Loader";
 import { copyText, streamdownProps } from "./components/CodeBlock";
 import { ThoughtView } from "./components/ThoughtCard";
 import { PermissionCard } from "./components/PermissionCard";
@@ -1316,16 +1316,22 @@ function StatusLine() {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (s.phase == null) return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
+    // 100ms tick: the live tenth-of-a-second digit is 01's alive cue.
+    const t = setInterval(() => setNow(Date.now()), 100);
     return () => clearInterval(t);
   }, [s.phase]);
+  const elapsedT = s.turnStartedAt != null
+    ? fmtElapsedTenths(now - s.turnStartedAt) : null;
   const elapsed = s.turnStartedAt != null ? fmtElapsed(now - s.turnStartedAt) : null;
 
   const chips: React.ReactNode[] = [];
   // /compact runs as a normal model turn, so phase=thinking holds —
   // the compacting chip is the sharper truth; don't spin both.
   if (s.phase === "thinking" && !rt?.compacting) {
-    chips.push(<span key="th" className="cstat" title="模型思考中"><LoaderGrid />思考中{elapsed ? ` · ${elapsed}` : ""}…</span>);
+    chips.push(<span key="th" className="cstat" title="模型思考中">
+      <LoaderGrid /><span className="shimmer-text">思考中</span>
+      {elapsedT && <span className="turn-elapsed">{elapsedT}</span>}
+    </span>);
   } else if (s.phase === "executing") {
     // Live tool telemetry: name the tool actually running (claude TUI
     // parity — a bare 执行中 hides which of the turn's tools is active).
@@ -1336,7 +1342,9 @@ function StatusLine() {
     }
     chips.push(
       <span key="ex" className="cstat" title="工具执行中">
-        <LoaderGrid />执行中{elapsed ? ` · ${elapsed}` : ""}{running ? ` · ${toolDisplayTitle(running)}` : ""}…
+        <LoaderGrid /><span className="shimmer-text">执行中</span>
+        {elapsedT && <span className="turn-elapsed">{elapsedT}</span>}
+        {running && <span className="turn-tool">{toolDisplayTitle(running)}</span>}
       </span>);
   } else if (s.phase === "awaitingPermission") {
     chips.push(<span key="ap" className="cstat awaiting" title="等待你在下方授权">等待授权</span>);
@@ -1348,7 +1356,9 @@ function StatusLine() {
     chips.push(<span key="tps" className="cstat" title="输出吞吐">{rt.tokensPerSecond.toFixed(1)} tok/s</span>);
   }
   if (rt?.compacting) {
-    chips.push(<span key="compact" className="cstat warn" title="上下文压缩中"><LoaderGrid />压缩中…</span>);
+    chips.push(<span key="compact" className="cstat warn" title="上下文压缩中">
+      <LoaderGrid /><span className="shimmer-text">压缩中</span>
+    </span>);
   }
   if (chips.length === 0) return null;
   return <div className="composer-status in-transcript">{chips}</div>;
