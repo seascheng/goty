@@ -47,7 +47,7 @@
     color-mix(in srgb, var(--bg) 78%, var(--foreground))
     calc(var(--bg-alpha, 1) * 100%), transparent);
   --surface-sidebar: color-mix(in srgb, var(--surface0) 97%, black);
-  --fg-extra-muted: color-mix(in srgb, var(--fg-muted) 62%, var(--surface0));
+  --fg-extra-muted: color-mix(in srgb, var(--fg-muted) 62%%, transparent);
   --pop-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   /* Config chips + their popovers (derived lifts — follow the pushed
      palette; opaque color-mix so the popover never shows the
@@ -197,7 +197,7 @@ body {
 }
 .thought-card.open {
   border-color: color-mix(in srgb, var(--color-content) 8%, transparent);
-  background: color-mix(in srgb, var(--color-content) 3%, var(--surface0));
+  background: color-mix(in srgb, var(--color-content) 3%%, transparent);
 }
 .thought-head {
   display: flex; align-items: center; gap: 7px; width: 100%;
@@ -282,7 +282,7 @@ body {
 .code-block {
   border: 1px solid color-mix(in srgb, var(--color-content) 10%, transparent);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--color-content) 6%, var(--surface0));
+  background: color-mix(in srgb, var(--color-content) 6%%, transparent);
   overflow: hidden; margin: 10px 0;
 }
 .agent [data-streamdown="table-wrapper"] :where(div) {
@@ -347,7 +347,7 @@ body {
   /* Deliberately FAR dimmer than fg-muted (which tool paths, usage,
      chips share): thinking must read as a distinct layer under the
      real answer. Derived from theme tokens so light/dark both adapt. */
-  color: color-mix(in srgb, var(--fg-muted) 58%, var(--surface0));
+  color: color-mix(in srgb, var(--fg-muted) 58%%, transparent);
   font-style: italic; /* omp TUI parity — thinking renders italic */
   font-size: 12px; margin: 8px 0 12px;
   border-left: 2px solid var(--surface3); padding-left: 12px;
@@ -755,7 +755,7 @@ body {
 .composer-box {
   position: relative;
   display: flex; flex-direction: column;
-  background: color-mix(in srgb, var(--foreground) 3%, var(--surface0));
+  background: color-mix(in srgb, var(--foreground) 3%%, transparent);
   border: 1px solid color-mix(in srgb, var(--foreground) 10%, transparent);
   border-radius: 10px;
   transition: border-color 0.15s ease, background-color 0.15s ease;
@@ -1138,7 +1138,7 @@ body {
    back to quiet when settled. */
 .thought-card.live {
   border-color: color-mix(in srgb, var(--vit-violet) 26%, transparent);
-  background: color-mix(in srgb, var(--vit-violet) 4%, var(--surface0));
+  background: color-mix(in srgb, var(--vit-violet) 4%%, transparent);
   box-shadow: 0 0 14px color-mix(in srgb, var(--vit-violet) 10%, transparent);
 }
 .thought-card.live .thought-dot { background: var(--vit-violet); }
