@@ -19,7 +19,14 @@
    below are the dark defaults so first paint never flashes. Derived
    lifts use color-mix so only 8 colors cross the bridge. */
 :root {
-  --surface0: #181b1a;
+  /* AgentTheme injects --bg (solid) + --bg-alpha; the surface ladder
+     is DERIVED: lift over the solid bg first, then apply bg-alpha.
+     Every component riding a surface token therefore follows the
+     window's background-opacity — one rule, no per-component alpha.
+     (Cards, composer, table heads, thought/tool panels all sit on
+     these tokens.) */
+  --bg: #181b1a;
+  --surface0: color-mix(in srgb, var(--bg) calc(var(--bg-alpha, 1) * 100%), transparent);
   --foreground: #e8eae9;
   --fg-muted: #a1a5a4;
   --accent: #20744a;
@@ -30,9 +37,15 @@
   --radius: 8px;
   --bg-alpha: 1;
   --blur: none;
-  --surface1: color-mix(in srgb, var(--surface0) 96%, var(--foreground));
-  --surface2: color-mix(in srgb, var(--surface0) 91%, var(--foreground));
-  --surface3: color-mix(in srgb, var(--surface0) 78%, var(--foreground));
+  --surface1: color-mix(in srgb,
+    color-mix(in srgb, var(--bg) 96%, var(--foreground))
+    calc(var(--bg-alpha, 1) * 100%), transparent);
+  --surface2: color-mix(in srgb,
+    color-mix(in srgb, var(--bg) 91%, var(--foreground))
+    calc(var(--bg-alpha, 1) * 100%), transparent);
+  --surface3: color-mix(in srgb,
+    color-mix(in srgb, var(--bg) 78%, var(--foreground))
+    calc(var(--bg-alpha, 1) * 100%), transparent);
   --surface-sidebar: color-mix(in srgb, var(--surface0) 97%, black);
   --fg-extra-muted: color-mix(in srgb, var(--fg-muted) 62%, var(--surface0));
   --pop-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
@@ -90,8 +103,7 @@ body {
      an explicit "none" — a bare blur(0px) still forces WebKit's
      backdrop-sampling path, which on a transparent webview re-samples
      erratically on every repaint (background visibly shifting). */
-  background:
-    color-mix(in srgb, var(--surface0) calc(var(--bg-alpha, 1) * 100%), transparent);
+  background: var(--surface0);
   -webkit-backdrop-filter: var(--blur, none);
   color: var(--foreground);
   font: 13.5px/1.6 -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
@@ -855,7 +867,7 @@ body {
 .dock-jobs { padding: 6px 12px; }
 .dock-jobs.card {
   margin: 0 16px 6px;
-  background: color-mix(in srgb, var(--surface0) 88%, var(--foreground));
+  background: var(--surface2);
   border-radius: 14px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
 }
@@ -877,7 +889,7 @@ body {
 .dock-agents { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; }
 .dock-agents.card {
   margin: 0 16px 6px;
-  background: color-mix(in srgb, var(--surface0) 88%, var(--foreground));
+  background: var(--surface2);
   border-radius: 14px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
 }
@@ -987,7 +999,7 @@ body {
 .pop-surface {
   border-radius: 12px;
   border: 1px solid color-mix(in srgb, var(--foreground) 14%, transparent);
-  background: color-mix(in srgb, var(--surface0) 92%, var(--foreground));
+  background: color-mix(in srgb, var(--bg) 92%, var(--foreground));
   box-shadow: var(--pop-shadow);
   outline: none;
 }
@@ -1298,7 +1310,7 @@ textarea { caret-color: var(--accent-bright); }
 /* Plan card: same floating-card language as the approval card. */
 .dock-plan.card {
   margin: 0 16px 6px;
-  background: color-mix(in srgb, var(--surface0) 88%, var(--foreground));
+  background: var(--surface2);
   border-radius: 14px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
   overflow: hidden;

@@ -30,9 +30,17 @@ enum AgentTheme {
                           Int(round(x.blueComponent * 255)))
         }
         return [
-            "surface0": hex(bg),
+            // Solid page color ONLY: the web :root derives the whole
+            // surface ladder from it (surface0 = bg @ bg-alpha, the
+            // lifts mix-then-alpha), so every component that rides a
+            // surface token follows background-opacity — body, cards,
+            // composer, table heads, thought/tool panels alike.
+            "bg": hex(bg),
             "foreground": hex(t.foreground),
-            "fg-muted": hex(t.secondaryText),
+            // Composer chips, popovers, hints — the page's muted ladder
+            // rides the SIDEBRIGHT step, not the quieter chrome muted
+            // (the Arthur brightness pass: input components + popups).
+            "fg-muted": hex(t.sidebarText),
             "accent": hex(t.accent),
             "accent-bright": hex(t.accentBright),
             "destructive": hex(t.dangerFill),

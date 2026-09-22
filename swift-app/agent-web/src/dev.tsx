@@ -24,7 +24,7 @@ const seeds: unknown[] = [
   // Dark defaults mirroring the first-paint palette in styles.css.
   { type: "theme", vars: {
     mode: "dark",
-    "surface0": "#181b1a",
+    "bg": "#181b1a",
     "foreground": "#e8eae9",
     "fg-muted": "#a1a5a4",
     "accent": "#20744a",
