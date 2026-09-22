@@ -5,6 +5,18 @@
     <description>Most recent changes to Goty.</description>
     <language>en</language>
   <item>
+    <title>Version 0.3.2 (Build 6)</title>
+    <pubDate>Tue, 22 Sep 2026 05:20:58 +0000</pubDate>
+    <sparkle:version>6</sparkle:version>
+    <sparkle:shortVersionString>0.3.2</sparkle:shortVersionString>
+    <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+    <description><![CDATA[<ul><li>macOS 27 适配：菜单图标内嵌渲染修复，设置窗口点不开/置后修复</li><li>Codex 审批弹窗可靠性：串行队列 + 断线重推自愈 + 卡流看门狗</li><li>Codex supervised 档改为 workspace-write，0.155 下工具恢复可用</li><li>Codex 大会话秒开：恢复即就绪，历史异步补齐，不再 90 秒超时</li><li>sessiond 死锁根除：无界通道 + 死客户端超时收割，守护进程不再全局挂死</li><li>Agent 正文/侧栏/输入区亮度提升；稳定签名身份，TCC 权限不再每次重置</li></ul>]]></description>
+    <enclosure url="https://github.com/seascheng/goty/releases/download/v0.3.2/Goty-0.3.2-arm64.dmg"
+               type="application/octet-stream"
+               sparkle:edSignature="91+kcSeHW4afE3kRODwaQOK9LmeyBiOw+sma4Tu6FAghYjBfd7YoFi0k6s3piMUOJ5z33fxigxaQMJHZMg2mDg=="
+               length="16708034" />
+  </item>
+  <item>
     <title>Version 0.3.1 (Build 5)</title>
     <pubDate>Tue, 15 Sep 2026 05:02:40 +0000</pubDate>
     <sparkle:version>5</sparkle:version>
