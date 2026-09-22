@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { postToHost } from "../bridge";
+import { Icon } from "./Icon";
 import rehypeHighlight from "rehype-highlight";
 
 function codeTextOf(node: React.ReactNode): string {
@@ -82,29 +83,53 @@ function InlineCode(props: React.ComponentProps<"code">) {
   }
   const text = codeTextOf(props.children);
   if (looksLikeFilePath(text)) {
+    const cat = pathCategory(text);
     return (
       <code
         {...props}
         className={(className ? className + " " : "") + "code-path"}
+        data-cat={cat}
         title="在编辑器中打开"
         onClick={() => postToHost({ type: "openFile", path: text })}
-      />
+      >
+        <Icon kind={cat === "config" ? "braces" : "doc"} />
+        {props.children}
+      </code>
     );
   }
   return <code {...props} />;
+}
+
+/// Vitality layer: what KIND of file a path is decides the chip's hue
+/// (code=cyan, doc=amber, config=violet, style=rose, else neutral) —
+/// the same identity-coloring the tool glyphs use.
+function pathCategory(path: string): "code" | "doc" | "config" | "style" | "other" {
+  const ext = path.slice(path.lastIndexOf(".")).toLowerCase();
+  if (/^\.(swift|ts|tsx|js|jsx|mjs|c|h|m|mm|go|java|kt|rb|php|rs|py|zig|sh|zsh|bash|sql)$/.test(ext)) return "code";
+  if (/^\.(md|txt|rst)$/.test(ext)) return "doc";
+  if (/^\.(json|ya?ml|toml|lock|plist|ini|cfg|conf|nix)$/.test(ext)) return "config";
+  if (/^\.(css|scss|html|vue|svelte)$/.test(ext)) return "style";
+  return "other";
 }
 
 /// Conservative: anchored at /, ~/, ./ or ../; must look like one path
 /// token (no spaces, has a slash beyond the anchor, plausibly a name).
 export function looksLikeFilePath(text: string): boolean {
   if (!text || /\s/.test(text) || text.length > 512) return false;
-  if (/^[A-Za-z0-9_.-]+$/.test(text)) return false;     // bare word / filename
+  // Bare token: only a KNOWN extension makes it a file ref — plain
+  // words (`popovers`, `v1.2`) fall through to ordinary code styling.
+  if (/^[A-Za-z0-9_.-]+$/.test(text)
+      && !/\.(swift|ts|tsx|js|jsx|mjs|css|html|json|md|rs|py|toml|ya?ml|sh|zsh|bash|txt|c|h|m|mm|go|java|kt|rb|php|vue|svelte|sql|lock|plist|cfg|conf|ini|zig|nix)$/i.test(text)) {
+    return false;
+  }
   if (/^(\/|~\/|\.\.?\/)/.test(text)) return (text.match(/\//g) ?? []).length >= 2;
-  // Unanchored (repo-relative): needs depth AND a known extension —
-  // `swift-app/Sources/App/AppDelegate.swift` yes, `a/b` no.
-  return (text.match(/\//g) ?? []).length >= 2
-      && /\.[A-Za-z][A-Za-z0-9]{0,5}$/.test(text)
+  // Unanchored: depth AND a known extension — `swift-app/Sources/
+  // AppDelegate.swift` yes, `a/b` no. A BARE filename with a known
+  // extension (`README.md`, `styles.css`) reads as a file ref too —
+  // the host resolves it against the session cwd.
+  const ext = /\.[A-Za-z][A-Za-z0-9]{0,5}$/.test(text)
       && /\.(swift|ts|tsx|js|jsx|mjs|css|html|json|md|rs|py|toml|ya?ml|sh|zsh|bash|txt|c|h|m|mm|go|java|kt|rb|php|vue|svelte|sql|lock|plist|cfg|conf|ini|zig|nix)$/i.test(text);
+  return ext;
 }
 
 /// streamdown's default link renders a confirmation BUTTON
@@ -123,7 +148,7 @@ function LinkAnchor({ href, children, ...rest }: React.ComponentProps<"a">) {
         e.preventDefault();
         postToHost({ type: "openURL", url: href });
       }}
-    >{children}</a>
+    ><Icon kind="link" />{children}</a>
   );
 }
 

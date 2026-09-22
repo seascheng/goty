@@ -2,7 +2,8 @@ import React from "react";
 
 /// Minimal 24px stroke icons (lucide-style geometry, no dependency).
 export function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking" | "speed"
-  | "stop" | "send" | "folder" | "branch" | "copy" | "check" | "messages" }) {
+  | "stop" | "send" | "folder" | "branch" | "copy" | "check" | "messages"
+  | "link" | "doc" | "braces" }) {
   const common = { width: 13, height: 13, viewBox: "0 0 24 24", fill: "none",
                    stroke: "currentColor", strokeWidth: 2,
                    strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
@@ -31,6 +32,12 @@ export function Icon({ kind }: { kind: "history" | "model" | "mode" | "thinking"
       return <svg {...common}><path d="M20 6 9 17l-5-5" /></svg>;
     case "messages":
       return <svg {...common}><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" /></svg>;
+    case "link":
+      return <svg {...common}><path d="M9 15l6-6" /><path d="M11 6l1-1a4 4 0 1 1 6 6l-1 1" /><path d="M13 18l-1 1a4 4 0 1 1-6-6l1-1" /></svg>;
+    case "doc":
+      return <svg {...common}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /></svg>;
+    case "braces":
+      return <svg {...common}><path d="M8 3H7a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2h1" /><path d="M16 21h1a2 2 0 0 0 2-2v-4a2 2 0 0 1 2-2 2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1" /></svg>;
   }
 }
 
