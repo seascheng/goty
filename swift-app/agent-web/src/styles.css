@@ -94,6 +94,12 @@
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
+/* The page is an app CHROME, not a document: header above, composer
+   below, and ONLY the transcript scrolls. Without this the body
+   itself grows scrollable whenever the dock cards stack tall — the
+   whole-page scroll the user felt. overscroll-behavior kills the
+   residual rubber-band on the document. */
+html, body { overflow: hidden; overscroll-behavior: none; }
 html { background: transparent; }
 body {
   /* Terminal-parity translucency: AgentTheme ships --bg-alpha and

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { postToHost } from "./bridge";
 
 /// Swift → JS events (AgentWebBridge). Schema-parsed once at this
 /// boundary; Swift fills absent optionals with NSNull(), so absent string
@@ -229,6 +230,10 @@ export const IncomingEventSchema = z.discriminatedUnion("type", [
     title: z.string().nullish(),
   }),
   z.object({ type: z.literal("theme"), vars: z.record(z.string(), z.string()) }),
+  /// Host-owned plan-dock fold pref, pushed at page ready (and after
+  /// every toggle): custom-scheme WKWebView localStorage does not
+  /// survive loads, so NSUserDefaults is the source of truth.
+  z.object({ type: z.literal("planDockPref"), open: z.boolean() }),
   z.object({
     type: z.literal("meta"),
     capabilities: z.array(z.string()).nullish(),
@@ -338,8 +343,10 @@ class Store {
     // jank. PlanPanel subscribes to planDockOpen itself; App's
     // revision snapshot is unchanged so React bails out there.
     this.emit();
-    // Persist OFF the click path: synchronous localStorage writes
-    // inside the event handler stall the fold in WKWebView.
+    // Persist to the HOST (NSUserDefaults): custom-scheme localStorage
+    // dies with every page load — it kept resurrecting the panel the
+    // user had folded. The local write stays as a same-load fallback.
+    postToHost({ type: "planDockPref", open: this.planDockOpen });
     clearTimeout(this.planDockPersistTimer);
     this.planDockPersistTimer = setTimeout(() => {
       this.planDockPersistTimer = undefined;
@@ -686,6 +693,13 @@ class Store {
         } else {
           this.planCleared = this.plan != null;
         }
+        break;
+      case "planDockPref":
+        // Host truth (page-ready push or echo of our own toggle):
+        // same LOCAL-only semantics as togglePlanDock — no revision
+        // bump, the panel's own subscription repaints.
+        this.planDockOpen = event.open;
+        this.emit();
         break;
       case "permission": this.permission = event; break;
       case "permissionResolved":

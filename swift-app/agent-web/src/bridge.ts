@@ -28,7 +28,10 @@ export type HostCommand =
   /// A link in the transcript: the HOST opens it (WKWebView has no
   /// browser); a path opens the built-in editor instead.
   | { type: "openURL"; url: string }
-  | { type: "openFile"; path: string };
+  | { type: "openFile"; path: string }
+  /// Plan-dock fold pref: WKWebView localStorage on a custom scheme
+  /// does not survive page loads — the HOST owns the truth.
+  | { type: "planDockPref"; open: boolean };
 
 declare global {
   interface Window {

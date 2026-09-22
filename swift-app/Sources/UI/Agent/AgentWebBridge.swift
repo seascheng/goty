@@ -34,6 +34,9 @@ final class AgentWebBridge: WebBridge {
     /// Transcript link → default browser; transcript path chip → editor.
     var onOpenURL: ((String) -> Void)?
     var onOpenFile: ((String) -> Void)?
+    /// Plan-dock fold pref: NSUserDefaults is the truth (WKWebView
+    /// localStorage on a custom scheme does not survive page loads).
+    var onPlanDockPref: ((Bool) -> Void)?
     var onStartLogin: ((String) -> Void)?
     var onStats: (() -> Void)?
     override func route(_ message: [String: Any]) {
@@ -107,6 +110,10 @@ final class AgentWebBridge: WebBridge {
         case "openFile":
             if let path = message["path"] as? String, !path.isEmpty {
                 onOpenFile?(path)
+            }
+        case "planDockPref":
+            if let open = message["open"] as? Bool {
+                onPlanDockPref?(open)
             }
         case "stats":
             onStats?()

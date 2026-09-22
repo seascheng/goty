@@ -565,6 +565,9 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
                 DispatchQueue.main.async { reply(files) }
             }
         }
+        bridge.onPlanDockPref = { open in
+            UserDefaults.standard.set(open, forKey: "agentweb.planDockOpen")
+        }
         bridge.onOpenURL = { url in
             DispatchQueue.main.async {
                 if let target = URL(string: url) {
@@ -801,6 +804,11 @@ final class AgentPaneHost: NSView, PaneHosting, AgentSessionDelegate,
     /// walk → fresh CSS vars → live restyle, no rebuild.
     func pushTheme() {
         AgentTheme.push(to: bridge)
+        // Fold-pref truth: the page's localStorage resets per load on a
+        // custom scheme — re-seed it before any plan renders, or the
+        // dock the user folded reopens itself (2026-09-22 report).
+        let open = UserDefaults.standard.object(forKey: "agentweb.planDockOpen") as? Bool ?? true
+        bridge.push(["type": "planDockPref", "open": open] as [String: Any])
     }
 
     /// First reveal of a pane that loaded OFFSCREEN: mark visibility —
