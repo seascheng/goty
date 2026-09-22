@@ -766,9 +766,22 @@ body {
    above the input (orca/paseo statusbar model) — */
 .composer-status {
   display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
-  padding: 6px 12px 0;
+  /* Align with the pane-head's title column: composer pads 20px, the
+     head 14px — pull the status line back the 6px difference. */
+  margin-left: -6px; padding: 6px 12px 0;
   font-size: 11.5px; color: var(--fg-muted);
 }
+
+/* Loading stage: the empty transcript during startup or a history
+   swap gets a REAL presence (the 3×3 violet pulse + state text), not
+   a blank void with a disabled composer. */
+.load-stage {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 12px; padding: 72px 24px 40px; flex: none;
+  color: var(--fg-muted); user-select: none;
+}
+.load-title { font-size: 13px; font-weight: 500; color: var(--foreground); }
+.load-sub { font-size: 11.5px; color: var(--fg-muted); }
 /* Inside the transcript (StatusLine) the parent already owns the 20px
    gutter — the composer's 12px left padding double-indents and the
    status falls out of alignment with the turn body above it. */

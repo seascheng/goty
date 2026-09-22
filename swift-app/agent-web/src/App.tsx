@@ -538,7 +538,7 @@ function histFallback(s: { updatedAt?: string | null }): string {
 /// the target (svg has pointer-events:none); the portalled Popover owns
 /// outside-click/Escape dismissal.
 function HistoryChip({ open, onToggle, onSelect }: {
-  open: boolean; onToggle: () => void; onSelect: (sessionId: string) => void;
+  open: boolean; onToggle: () => void; onSelect: (sessionId: string, title: string) => void;
 }) {
   const wrap = useRef<HTMLSpanElement>(null);
   return (
@@ -555,7 +555,7 @@ function HistoryChip({ open, onToggle, onSelect }: {
           {store.sessions.length === 0 && <div className="slash-desc">无会话记录</div>}
           {store.sessions.map((s) => (
             <button key={s.sessionId} className="chip-opt hist"
-              onClick={() => onSelect(s.sessionId)}>
+              onClick={() => onSelect(s.sessionId, s.title || histFallback(s))}>
               <span className="hist-title">{s.title || histFallback(s)}</span>
               <span className="hist-meta">
                 {s.messageCount != null ? `${s.messageCount} 条` : ""}
@@ -1091,9 +1091,10 @@ function Composer({ working, phase, scrollerRef, draft, draftKey }: { working: b
               setOpenPop(next ? "history" : null);
               if (next) postToHost({ type: "listSessions" });
             }}
-            onSelect={(sessionId) => {
+            onSelect={(sessionId, title) => {
               postToHost({ type: "loadSession", sessionId });
               store.apply({ type: "clearTranscript" });
+              store.apply({ type: "sessionLoading", text: `正在加载「${title}」的历史…` });
               setOpenPop(null);
             }} />
           )}
@@ -1700,6 +1701,20 @@ export function App() {
       <div className="transcript" ref={scroller} onScroll={onScroll}>
         {(begin > 0 || store.hasOlder) && (
           <div className="history-more" ref={sentinelRef}>加载更早消息…</div>
+        )}
+        {store.blocks.length === 0
+          && (store.starting != null || store.sessionLoading != null) && (
+        <div className="load-stage" role="status">
+          <LoaderGrid size={22} />
+          <div className="load-title">
+            {store.sessionLoading ?? `正在启动 ${store.starting}…`}
+          </div>
+          <div className="load-sub">
+            {store.sessionLoading != null
+              ? "正在拉取会话历史,完成后即可继续对话"
+              : "握手完成前输入框与模型选择暂不可用"}
+          </div>
+        </div>
         )}
         {/* beautifului tool chips: runs of consecutive completed tool
             cards (>= TOOL_CLUSTER_MIN) fold into one cluster row. The

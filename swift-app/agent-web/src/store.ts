@@ -234,6 +234,9 @@ export const IncomingEventSchema = z.discriminatedUnion("type", [
   /// every toggle): custom-scheme WKWebView localStorage does not
   /// survive loads, so NSUserDefaults is the source of truth.
   z.object({ type: z.literal("planDockPref"), open: z.boolean() }),
+  /// Locally-applied: the history picker just asked the host to swap
+  /// the conversation — the wait until replay needs a visible stage.
+  z.object({ type: z.literal("sessionLoading"), text: z.string().nullish() }),
   z.object({
     type: z.literal("meta"),
     capabilities: z.array(z.string()).nullish(),
@@ -300,6 +303,9 @@ class Store {
   /// Stats dialog payload (get_session_stats); null = closed.
   stats: Record<string, unknown> | null = null;
   working = false;
+  /// History-swap wait: set locally when a session is picked, cleared
+  /// by the first replayed block (or an error/notice telling why not).
+  sessionLoading: string | null = null;
   /// Follow-ups queued while a turn ran (Enter mid-turn). omp delivers
   /// them after settle; they flush as user blocks at turnEnded.
   pendingQueue: string[] = [];
@@ -440,6 +446,9 @@ class Store {
 
   private push(block: BlockInput): Block {
     const stamped = { ...block, id: this.nextBlockId++ } as Block;
+    // First replayed/live block = the swapped conversation arrived:
+    // retire the history-picker's loading stage.
+    this.sessionLoading = null;
     this.blocks.push(stamped);
     return stamped;
   }
@@ -538,10 +547,14 @@ class Store {
     this.revision += 1;
     this.emit();
   }
+
   private applyParsed(event: IncomingEvent) {
     // A terminal error ends startup too: a process that exited cannot
     // complete its handshake, and leaving `starting` set renders a
     // permanent contradictory spinner.
+    // A terminal error or notice also retires the history-swap stage:
+    // the replay will never come, and the reason is now on screen.
+    if (event.type === "error" || event.type === "statusFlash") this.sessionLoading = null;
     if (STARTING_TERMINATORS[event.type]) this.starting = null;
     switch (event.type) {
       case "userMessage":
@@ -694,6 +707,7 @@ class Store {
           this.planCleared = this.plan != null;
         }
         break;
+      case "sessionLoading": this.sessionLoading = event.text ?? null; break;
       case "planDockPref":
         // Host truth (page-ready push or echo of our own toggle):
         // same LOCAL-only semantics as togglePlanDock — no revision
