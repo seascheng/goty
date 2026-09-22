@@ -1313,6 +1313,38 @@ textarea { caret-color: var(--accent-bright); }
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
 }
 .perm-glyph { color: var(--vit-violet); display: inline-flex; margin-right: 7px; }
+/* Command body: mono block, quiet wash, capped and scrollable — never
+   a bold paragraph smearing across the card. */
+.perm-command {
+  margin: 9px 0 0; padding: 8px 10px; max-height: 128px; overflow-y: auto;
+  background: color-mix(in srgb, var(--foreground) 5%, transparent);
+  border-radius: 8px;
+  font: 11.5px/1.55 var(--mono, ui-monospace, Menlo, monospace);
+  color: var(--foreground); white-space: pre-wrap; word-break: break-all;
+}
+.perm-command::-webkit-scrollbar { width: 5px; }
+.perm-command::-webkit-scrollbar-thumb {
+  background: var(--surface3); border: none; border-radius: 2.5px;
+}
+/* Short flat options: a button row, not three stretched slabs. */
+.perm-actions { display: flex; gap: 8px; margin-top: 11px; }
+.perm-btn {
+  flex: 1; padding: 7px 10px; border-radius: 9px; cursor: pointer;
+  font-size: 12px; font-weight: 500; color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--foreground) 10%, transparent);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+.perm-btn:hover { background: color-mix(in srgb, var(--foreground) 10%, transparent); }
+.perm-btn.primary {
+  background: var(--accent); border-color: transparent; color: #fff;
+}
+.perm-btn.primary:hover { background: color-mix(in srgb, var(--accent) 86%, #fff); }
+.perm-btn.danger:hover {
+  background: color-mix(in srgb, #e5534b 14%, transparent);
+  border-color: color-mix(in srgb, #e5534b 45%, transparent);
+  color: #e5534b;
+}
 .perm-question { font-weight: 600; }
 .perm-options { display: flex; flex-direction: column; gap: 6px; margin-top: 11px; }
 .perm-opt {

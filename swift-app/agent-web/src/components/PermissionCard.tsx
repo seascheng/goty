@@ -14,6 +14,25 @@ export function PermissionCard({ permission }: {
     : isInput ? "输入" : "授权";
   const multi = permission.multi === true;
   const checked = new Set(permission.checkedIndices ?? []);
+  // codex/bash confirmations put the whole command in toolCallTitle.
+  // A long or multiline title IS the command body — show it in a
+  // mono block and keep the header a short question.
+  const rawTitle = permission.toolCallTitle ?? "";
+  const isCommandBody = !isInput && !multi
+    && (rawTitle.includes("\n") || rawTitle.length > 48);
+  const question = isCommandBody ? "需要授权执行此命令" : rawTitle || "需要授权";
+  // Short flat options (允许 / 本会话总是允许 / 拒绝) read as a button
+  // row — macOS dialog language, primary/secondary/danger. Long or
+  // detailed options keep the full-width list rows.
+  const asButtons = !multi && permission.options.length <= 3
+    && permission.options.every(o => !o.detail && o.name.length <= 12);
+  const btnTone = (name: string) => {
+    const n = name.trim();
+    // "本会话总是允许" contains 允许 — match short consents exactly.
+    if (/^(允许|同意|继续|allow|approve|accept|yes|continue|ok)$/i.test(n)) return " primary";
+    if (/拒绝|不允许|deny|reject|cancel|取消|停止|abort/i.test(n)) return " danger";
+    return "";
+  };
   return (
     <div className="permission">
       <div className="perm-title">
@@ -26,7 +45,7 @@ export function PermissionCard({ permission }: {
             <line x1="12" y1="17" x2="12.01" y2="17" />
           </svg>
         </span>
-        <span className="perm-question">{permission.toolCallTitle ?? "需要授权"}</span>
+        <span className="perm-question">{question}</span>
         <span className="perm-kind">{kind}</span>
         {(permission.pendingCount ?? 1) > 1 && (
           <span className="perm-queue" title="codex 已排队的授权请求数">
@@ -34,6 +53,9 @@ export function PermissionCard({ permission }: {
           </span>
         )}
       </div>
+      {isCommandBody && (
+        <pre className="perm-command"><code>{rawTitle}</code></pre>
+      )}
       {isInput ? (
         <div className="perm-input">
           <input autoFocus value={value}
@@ -46,6 +68,16 @@ export function PermissionCard({ permission }: {
             }} />
           <button className="btn send" disabled={!value.trim()}
             onClick={() => postToHost({ type: "permission", optionId: value })}>提交</button>
+        </div>
+      ) : asButtons ? (
+        <div className="perm-actions">
+          {permission.options.map((o, index) => (
+            <button key={index} type="button"
+              className={"perm-btn" + btnTone(o.name)}
+              onClick={() => postToHost({ type: "permission", optionId: o.optionId })}>
+              {o.name}
+            </button>
+          ))}
         </div>
       ) : (
         <div className="perm-options">
