@@ -60,13 +60,10 @@ export function ConfigPopover({ anchor, option, onDismiss, onPick }: {
     }
   };
 
-  // Pills size to their content — a 4-option knob must not stretch to
-  // the model list's 300px column.
-  const pillMode = !searchable && option.options.length <= 5;
   return (
     <Popover anchor={anchor} side="top"
-      width={pillMode ? undefined : 300}
-      minHeight={pillMode ? undefined : 120} maxHeight={pillMode ? undefined : 340}
+      width={searchable ? 300 : 220}
+      minHeight={120} maxHeight={340}
       onDismiss={onDismiss} role="dialog" aria-label={option.name}
       className="flex flex-col overflow-hidden"
       // No search row → the surface itself takes the arrow keys.
@@ -87,24 +84,6 @@ export function ConfigPopover({ anchor, option, onDismiss, onPick }: {
             onKeyDown={onKey} />
         </label>
       )}
-      {!searchable && option.options.length <= 5 ? (
-        // happier's SessionConfigOptionControl: short enums read as
-        // capsule pills — one glance, no rows.
-        <div className="pop-pills" role="listbox" aria-label={option.name}>
-          {visible.map((o, index) => (
-            <button key={o.value} role="option"
-              aria-selected={o.value === option.currentValue}
-              onMouseDown={(e) => e.preventDefault()}
-              onMouseEnter={() => setActive(index)}
-              onClick={() => onPick(o.value)}
-              className={"pop-pill"
-                + (o.value === option.currentValue ? " cur" : "")
-                + (index === active ? " act" : "")}>
-              {o.name}
-            </button>
-          ))}
-        </div>
-      ) : (
       <div role="listbox" aria-label={option.name}
         className="min-h-0 flex-1 overflow-y-auto overscroll-none px-1.5 pb-1.5">
         {visible.length === 0 && (
@@ -140,7 +119,6 @@ export function ConfigPopover({ anchor, option, onDismiss, onPick }: {
           );
         })}
       </div>
-      )}
     </Popover>
   );
 }

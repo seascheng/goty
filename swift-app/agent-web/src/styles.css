@@ -1125,16 +1125,7 @@ body {
 /* Small-enum config knobs (thinking/effort/mode) render as capsule
    pills inside the popover (happier SessionConfigOptionControl):
    selected = accent pill, keyboard-active = ring. */
-.pop-pills { display: flex; flex-wrap: wrap; gap: 5px; padding: 10px; }
-.pop-pill {
-  border: none; border-radius: 999px; padding: 4px 14px;
-  font: inherit; font-size: 12px; cursor: pointer;
-  color: color-mix(in srgb, var(--color-content) 65%, transparent);
-  background: color-mix(in srgb, var(--color-content) 8%, transparent);
-}
 .pop-pill:hover { background: color-mix(in srgb, var(--color-content) 14%, transparent); }
-.pop-pill.cur { background: var(--accent); color: #fff; }
-.pop-pill.act { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-bright) 45%, transparent); }
 
 @keyframes popover-open {
   from {
@@ -1365,10 +1356,6 @@ textarea { caret-color: var(--accent-bright); }
 .pop-surface {
   border-radius: 10px;
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.45);
-}
-.pop-pill {
-  border-radius: 999px;
-  transition: background-color 0.13s, transform 0.1s;
 }
 .pop-pill:active { transform: scale(0.96); }
 
