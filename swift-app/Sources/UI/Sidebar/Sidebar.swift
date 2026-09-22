@@ -58,7 +58,6 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
             self.onPlus?(self.plusButton)
         }
         toggleButton.onClick = { [weak self] in self?.onToggle?() }
-
         // Chevron owns the trailing edge when present; the '+' rides
         // flush-right otherwise. Two mutually exclusive constraints —
         // hidden views still occupy constraint space in AppKit.
@@ -176,6 +175,13 @@ final class SectionHeaderView: NSView, ThemeRefreshable {
         } else {
             countField.isHidden = true
         }
+    }
+
+    /// The WHOLE row is the fold target: the chevron is the affordance
+    /// but clicking the name or blank header toggles the fold too —
+    /// child buttons ('+', chevron) consume their own hits first.
+    override func mouseDown(with event: NSEvent) {
+        if onToggle != nil { onToggle?() } else { super.mouseDown(with: event) }
     }
 
     /// Flip the chevron WITHOUT a full reconfigure — the owning section

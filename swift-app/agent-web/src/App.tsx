@@ -1450,7 +1450,10 @@ export function App() {
   //     button) releases. Programmatic writes self-identify (100ms
   //     echo window) so their own scroll events can't masquerade as
   //     user intent.
-  const PIN_THRESHOLD_PX = 24;
+  // 90: a wheel notch is tens of px; landing short of the exact tail
+  // must still count as "watching" (the missed-own-message report).
+  // A deliberate scroll UP unhooks instantly via onWheel below.
+  const PIN_THRESHOLD_PX = 90;
   const INTENT_WINDOW_MS = 320;
   const JUMP_HOLD_MS = 2500;
   const parked = useRef(false);
@@ -1507,6 +1510,24 @@ export function App() {
   // fall back to the tail window instead of rendering nothing.
   const begin = Math.min(start, Math.max(0, total - INITIAL_WINDOW));
   const visible = store.blocks.slice(begin);
+
+  // NEW USER BLOCK re-pins the tail. Without it a reader parked a
+  // wheel-notch above the bottom misses their own message AND stays
+  // unhitched for the whole reply. Replay skips this — history loads
+  // keep their loading posture.
+  const lastUserKey = (() => {
+    for (let i = store.blocks.length - 1; i >= 0; i--) {
+      if (store.blocks[i].kind === "user") return store.blocks[i].id;
+    }
+    return -1;
+  })();
+  useLayoutEffect(() => {
+    if (store.loadProgress) return;
+    parked.current = false;
+    lastRawInputAt.current = -Infinity;
+    const el = scroller.current;
+    if (el) { el.scrollTop = el.scrollHeight; intentTop.current = el.scrollTop; }
+  }, [lastUserKey]);
 
   const sentinelRef = useRef<HTMLDivElement>(null);
   const growAnchor = useRef<{ height: number; top: number } | null>(null);
@@ -1617,6 +1638,12 @@ export function App() {
     return () => { cancelAnimationFrame(raf); clearInterval(iv); };
   }, []);
 
+  // monocode AgentTranscript: an upward wheel is unambiguous intent
+  // to read — unhook NOW, regardless of the pin band.
+  const onWheel = (e: React.WheelEvent) => {
+    if (e.deltaY < 0) parked.current = true;
+  };
+
   const onScroll = () => {
     const el = scroller.current!;
     const now = performance.now();
@@ -1711,6 +1738,7 @@ export function App() {
             onJump={jumpToUser} />
         </div>
       <div className="transcript" ref={scroller} onScroll={onScroll}
+        onWheel={onWheel}
         // Live appends rise in; replayed history must not mass-fly.
         // (loadProgress is a boolean — starting/replay true, else false.)
         data-live={store.loadProgress ? "0" : "1"}>
