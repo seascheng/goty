@@ -1563,36 +1563,58 @@ export function App() {
       growing.current = false;
     });
   });
+  // TAIL GLIDE (monocode/gooey-pi pin INSTANTLY — every append is a
+  // visible jump). One mount-level rAF loop approaches the tail
+  // exponentially with a speed cap, so streaming growth, block mounts,
+  // dock grid transitions and late layout are all ridden in ONE smooth
+  // chase instead of per-render teleports + correction passes.
+  const intentTop = useRef(-1);
   useEffect(() => {
     const el = scroller.current;
-    if (!el || parked.current) return;
-    // Outline-hop grace: the hop DELIBERATELY parked near the tail;
-    // follow must not snatch the viewport back (jumpToUser).
-    if (performance.now() - jumpAt.current < JUMP_HOLD_MS) return;
-    if (performance.now() - lastRawInputAt.current < INTENT_WINDOW_MS) return;
-    const target = el.scrollHeight;
-    if (Math.abs(target - el.clientHeight - el.scrollTop) < 0.5) return;
-    lastWriteAt.current = performance.now();
-    el.scrollTop = target;
-    // One rAF correction: layout landing AFTER this write (dock
-    // remount at turn end, image decode) re-opens a gap under a pinned
-    // tail, leaving the pane parked mid-history (the "turn end scrolled
-    // me backwards" report, 2026-09-02).
-    requestAnimationFrame(() => {
-      if (parked.current) return;
-      if (performance.now() - lastRawInputAt.current < INTENT_WINDOW_MS) return;
-      const residual = el.scrollHeight - el.clientHeight - el.scrollTop;
-      if (residual < 0.5) return;
-      lastWriteAt.current = performance.now();
-      el.scrollTop = el.scrollHeight;
-    });
-  });
+    if (!el) return;
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.min(64, Math.max(1, now - last));
+      last = now;
+      const gap = el.scrollHeight - el.clientHeight - el.scrollTop;
+      // Same intent gates the old teleport honored: parking, the
+      // outline-hop grace window, and the raw-input window.
+      const follow = !parked.current
+        && now - jumpAt.current >= JUMP_HOLD_MS
+        && now - lastRawInputAt.current >= INTENT_WINDOW_MS;
+      if (follow && gap > 0.5) {
+        // Frame-rate-independent approach (tau 90ms) capped at
+        // ~2.2 px/ms so a huge append glides instead of snapping.
+        const step = Math.min(gap * (1 - Math.exp(-dt / 90)), dt * 2.2);
+        el.scrollTop += step;
+        // Read back the CLAMPED actual position: the scroll echo
+        // compares against where we really are, not where we aimed.
+        intentTop.current = el.scrollTop;
+        lastWriteAt.current = now;
+      } else if (gap <= 0.5) {
+        intentTop.current = el.scrollTop;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    // Belt for occluded webviews: rAF is SUSPENDED when the pane is
+    // hidden (same WebKit behavior main.tsx documents), and a frozen
+    // chase would strand a pinned tail mid-history. The interval just
+    // re-runs the same idempotent step — visible panes converge via
+    // rAF, occluded ones via the belt.
+    const iv = window.setInterval(() => tick(performance.now()), 250);
+    return () => { cancelAnimationFrame(raf); clearInterval(iv); };
+  }, []);
 
   const onScroll = () => {
     const el = scroller.current!;
     const now = performance.now();
     const distance = Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop);
-    const byUser = now - lastWriteAt.current > 100;
+    // Position, not time: the glide loop writes every frame, so a time
+    // window would swallow a user's counter-scroll mid-chase. Anything
+    // more than a pixel off our last (read-back) position is the user.
+    const byUser = Math.abs(el.scrollTop - intentTop.current) > 1.5;
     if (byUser) {
       // User-caused movement (raw input or its momentum frames):
       // refresh intent (invariant 2) and settle parking by MEASUREMENT
@@ -1642,32 +1664,12 @@ export function App() {
     });
   };
 
-  // Dock presence + plan fold: both change the transcript's height via
-  // a grid transition — a pinned (follow-mode) viewport must ride the
-  // transition frame-by-frame, or the tail drifts open/shut in a jump.
+  // Dock presence + plan fold change the transcript's height via a
+  // grid transition — the glide loop above rides it frame-by-frame for
+  // a pinned tail; readers above the tail are top-anchored and the
+  // dock only grows from the bottom edge.
   const dockOn = !!(store.plan || store.jobs.length > 0
     || store.subagents.length > 0 || store.pendingQueue.length > 0);
-  const planOpen = useSyncExternalStore(
-    (onChange) => store.subscribe(onChange),
-    () => store.planDockOpen && !store.planFoldedBySettle,
-    () => true,
-  );
-  useEffect(() => {
-    const sc = scroller.current;
-    if (!sc) return;
-    const t0 = performance.now();
-    let raf = 0;
-    const tick = () => {
-      // Readers above the tail are top-anchored: the dock grows from
-      // the bottom edge and never moves what they see.
-      if (parked.current) return;
-      lastWriteAt.current = performance.now();
-      sc.scrollTop = sc.scrollHeight;
-      if (performance.now() - t0 < 320) raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [dockOn, planOpen]);
 
   const jumpToBottom = () => {
     // Explicit command: release parking AND revoke input evidence (the
@@ -1698,7 +1700,10 @@ export function App() {
             onToggle={() => setMsgPop(!msgPop)}
             onJump={jumpToUser} />
         </div>
-      <div className="transcript" ref={scroller} onScroll={onScroll}>
+      <div className="transcript" ref={scroller} onScroll={onScroll}
+        // Live appends rise in; replayed history must not mass-fly.
+        // (loadProgress is a boolean — starting/replay true, else false.)
+        data-live={store.loadProgress ? "0" : "1"}>
         {store.loadProgress && <div className="load-bar" aria-hidden />}
         {(begin > 0 || store.hasOlder) && (
           <div className="history-more" ref={sentinelRef}>加载更早消息…</div>
