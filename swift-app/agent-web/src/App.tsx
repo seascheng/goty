@@ -1529,6 +1529,29 @@ export function App() {
     if (el) { el.scrollTop = el.scrollHeight; intentTop.current = el.scrollTop; }
   }, [lastUserKey]);
 
+  // WebKit SUSPENDS hidden webviews (rAF and timers both) — switching
+  // to another server/tab freezes the glide mid-chase, and the wake-up
+  // scroll echoes can leave the viewport parked mid-history even
+  // though the user never scrolled. Leaving while following (gap within
+  // a generous band) => returning re-pins to the tail. Leaving while
+  // reading (huge gap) => the reading position survives the round-trip.
+  const wasFollowing = useRef(true);
+  useEffect(() => {
+    const onVis = () => {
+      const el = scroller.current;
+      if (document.visibilityState === "hidden") {
+        wasFollowing.current = !parked.current && el != null
+          && el.scrollHeight - el.clientHeight - el.scrollTop <= 600;
+      } else if (wasFollowing.current) {
+        parked.current = false;
+        lastRawInputAt.current = -Infinity;
+        if (el) { el.scrollTop = el.scrollHeight; intentTop.current = el.scrollTop; }
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
   const sentinelRef = useRef<HTMLDivElement>(null);
   const growAnchor = useRef<{ height: number; top: number } | null>(null);
   const growing = useRef(false);
